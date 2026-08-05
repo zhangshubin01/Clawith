@@ -4,8 +4,9 @@ from contextlib import asynccontextmanager, contextmanager
 from contextvars import ContextVar
 from typing import Any, Generic, Type, TypeVar
 
-from sqlalchemy import select
+from sqlalchemy import event, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import Session, with_loader_criteria
 
 from app.database import Base, _session_ctx, async_session
 
@@ -108,6 +109,49 @@ class BaseDAO(Generic[ModelType]):
 _tenant_ctx: ContextVar[uuid.UUID | None] = ContextVar("tenant_ctx", default=None)
 
 
+def _is_tenant_scoped_model(model: type[Base]) -> bool:
+    """Return whether model rows must be isolated whenever tenant context exists.
+
+    Non-null ``tenant_id`` columns are tenant-owned by schema.  Legacy tables
+    whose tenant column is nullable can opt in with ``__tenant_scoped__ = True``
+    while their historic, tenant-less rows remain readable only outside a tenant
+    context (for example during migration or platform administration).
+    """
+    if getattr(model, "__tenant_scoped__", False):
+        return True
+    tenant_column = model.__table__.c.get("tenant_id")
+    return tenant_column is not None and not tenant_column.nullable
+
+
+@event.listens_for(Session, "do_orm_execute")
+def _inject_tenant_scope(execute_state: Any) -> None:
+    """Apply the active tenant predicate to every tenant-owned ORM SELECT.
+
+    This is deliberately installed on SQLAlchemy's synchronous ``Session``
+    class, which is also the execution layer below ``AsyncSession``.  It covers
+    direct API/service queries and DAO queries alike, so a missed business-level
+    ``tenant_id`` filter cannot disclose another tenant's rows.
+    """
+    if not execute_state.is_select:
+        return
+    tenant_id = _tenant_ctx.get()
+    if tenant_id is None:
+        return
+
+    statement = execute_state.statement
+    for mapper in execute_state.all_mappers:
+        model = mapper.class_
+        if _is_tenant_scoped_model(model):
+            statement = statement.options(
+                with_loader_criteria(
+                    model,
+                    lambda cls: cls.tenant_id == tenant_id,
+                    include_aliases=True,
+                )
+            )
+    execute_state.statement = statement
+
+
 @contextmanager
 def tenant_context(tenant_id: uuid.UUID):
     """Explicitly bind a tenant_id to the current coroutine context.
@@ -193,4 +237,3 @@ class TenantScopedBaseDAO(BaseDAO[ModelType]):
                 await db.delete(obj)
                 await db.flush()
             return obj
-
