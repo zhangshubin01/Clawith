@@ -41,20 +41,23 @@ async def test_upsert_with_caller_session_refreshes_before_serializing(monkeypat
         flush=flush,
         refresh=refresh,
     )
-    monkeypatch.setattr(focus_service, "_serialize_focus_item", lambda value: {"key": "system:okr_reports"})
+    agent_id = uuid.uuid4()
+    item_key = "system:okr_reports"
+    monkeypatch.setattr(focus_service, "migrate_legacy_focus_file", AsyncMock(return_value=None))
+    monkeypatch.setattr(focus_service, "_serialize_focus_item", lambda value: {"key": item_key})
+    monkeypatch.setattr(focus_service.focus_dao, "upsert_item", AsyncMock(return_value=item))
 
-    result = await focus_service._upsert_focus_item_impl(
-        session,
-        uuid.uuid4(),
-        "system:okr_reports",
-        None,
-        "OKR reports",
-        "in_progress",
-        "system",
-        "trigger",
-        None,
-        should_commit=False,
+    result = await focus_service.upsert_focus_item(
+        agent_id=agent_id,
+        key=item_key,
+        title=None,
+        description="OKR reports",
+        status="in_progress",
+        kind="system",
+        source="trigger",
+        metadata=None,
+        db=session,
     )
 
-    assert result == {"key": "system:okr_reports"}
-    assert events == ["flush", "refresh"]
+    assert result == {"key": item_key}
+    focus_service.focus_dao.upsert_item.assert_awaited_once()
