@@ -938,6 +938,27 @@ class RuntimeModelSettingsUpdate(BaseModel):
     compact_model_id: uuid.UUID
 
 
+def _require_system_setting_access(key: str, current_user: User) -> None:
+    """Authorize access to a platform setting or a tenant company introduction.
+
+    ``system_settings`` is a global key/value table and can contain credentials.
+    The sole tenant-scoped key family exposed through this API is
+    ``company_intro_<tenant UUID>``; organization administrators may manage
+    only their own tenant's entry. All other keys require a platform admin.
+    """
+    company_intro_prefix = "company_intro_"
+    if key.startswith(company_intro_prefix):
+        try:
+            tenant_id = uuid.UUID(key.removeprefix(company_intro_prefix))
+        except ValueError:
+            tenant_id = None
+        if tenant_id is not None and current_user.role == "org_admin" and current_user.tenant_id == tenant_id:
+            return
+    if _is_platform_admin_user(current_user):
+        return
+    raise HTTPException(status_code=403, detail="Platform admin access required for system settings")
+
+
 def _runtime_settings_tenant_id(current_user: User, requested_tenant_id: str | None) -> uuid.UUID:
     raw_tenant_id = requested_tenant_id or current_user.tenant_id
     if raw_tenant_id is None:
@@ -1071,6 +1092,7 @@ async def get_system_setting(
     db: AsyncSession = Depends(get_db),
 ):
     """Get a system setting by key."""
+    _require_system_setting_access(key, current_user)
     result = await db.execute(select(SystemSetting).where(SystemSetting.key == key))
     setting = result.scalar_one_or_none()
     if not setting:
@@ -1086,9 +1108,7 @@ async def update_system_setting(
     db: AsyncSession = Depends(get_db),
 ):
     """Create or update a system setting."""
-    # Platform-level settings (e.g. PUBLIC_BASE_URL) require platform_admin
-    if key == "platform" and not _is_platform_admin_user(current_user):
-        raise HTTPException(status_code=403, detail="Only platform admin can modify platform settings")
+    _require_system_setting_access(key, current_user)
     result = await db.execute(select(SystemSetting).where(SystemSetting.key == key))
     setting = result.scalar_one_or_none()
     if setting:
