@@ -2,7 +2,7 @@ import uuid
 from collections.abc import AsyncGenerator, Sequence
 from contextlib import asynccontextmanager, contextmanager
 from contextvars import ContextVar
-from typing import Any, Generic, Type, TypeVar
+from typing import Any, Generic, TypeVar
 
 from sqlalchemy import event, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -16,7 +16,7 @@ ModelType = TypeVar("ModelType", bound=Base)
 class BaseDAO(Generic[ModelType]):
     """Base class for data access objects, managing session context and basic CRUD."""
 
-    def __init__(self, model: Type[ModelType]):
+    def __init__(self, model: type[ModelType]):
         self.model = model
 
     @asynccontextmanager
