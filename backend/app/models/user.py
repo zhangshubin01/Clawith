@@ -55,6 +55,7 @@ class User(Base):
     """
 
     __tablename__ = "users"
+    __tenant_scoped__ = True
     # Note: Unique constraints for (tenant_id, username), (tenant_id, email) and (tenant_id, primary_mobile)
     # are handled via partial unique indexes in migration to allow NULL values
 

@@ -14,6 +14,7 @@ class AuditLog(Base):
     """Audit trail for all operations."""
 
     __tablename__ = "audit_logs"
+    __tenant_scoped__ = True
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     tenant_id: Mapped[uuid.UUID | None] = mapped_column(
@@ -50,6 +51,7 @@ class ChatMessage(Base):
     """Message on the unified chat substrate."""
 
     __tablename__ = "chat_messages"
+    __tenant_scoped__ = True
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     tenant_id: Mapped[uuid.UUID | None] = mapped_column(
