@@ -17,6 +17,11 @@ from sqlalchemy.orm import selectinload
 router = APIRouter(prefix="/org", tags=["organization"])
 
 
+def _is_platform_admin(user: User) -> bool:
+    """Return whether the caller has platform-wide administrative authority."""
+    return user.role == "platform_admin" or bool(getattr(user.identity, "is_platform_admin", False))
+
+
 # ─── Users Management ──────────────────────────────────
 
 @router.get("/users", response_model=list[UserOut])
@@ -29,11 +34,11 @@ async def list_users(
     query = (
         select(User)
         .options(selectinload(User.identity))
-        .where(User.is_active == True)
+        .where(User.is_active)
     )
 
     target_tenant_id = current_user.tenant_id
-    if current_user.role in ("platform_admin", "org_admin") and tenant_id:
+    if _is_platform_admin(current_user) and tenant_id:
         target_tenant_id = tenant_id
     if target_tenant_id:
         query = query.where(User.tenant_id == target_tenant_id)
@@ -51,16 +56,30 @@ async def admin_update_user(
     db: AsyncSession = Depends(get_db),
 ):
     """Admin update user profile."""
-    result = await query_dao.execute(db, 
+    query = (
         select(User)
         .options(selectinload(User.identity))
         .where(User.id == user_id)
     )
+    if not _is_platform_admin(current_user):
+        query = query.where(User.tenant_id == current_user.tenant_id)
+
+    result = await query_dao.execute(db, query)
     user = result.scalar_one_or_none()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
 
     update_data = data.model_dump(exclude_unset=True)
+
+    # Email is stored on the globally shared Identity rather than the tenant User.
+    # An organization administrator must not be able to alter another member's
+    # login and password-reset address, even if that member belongs to this tenant.
+    if (
+        "email" in update_data
+        and not _is_platform_admin(current_user)
+        and user.identity_id != current_user.identity_id
+    ):
+        raise HTTPException(status_code=403, detail="Cannot modify another user's login email")
 
     # Validate email uniqueness within tenant if changing
     if "email" in update_data and update_data["email"] != user.email:
