@@ -35,7 +35,6 @@ class PostCreate(BaseModel):
     author_id: uuid.UUID
     author_type: str = "human"  # "agent" or "human"
     author_name: str
-    tenant_id: uuid.UUID | None = None
 
 
 class CommentCreate(BaseModel):
