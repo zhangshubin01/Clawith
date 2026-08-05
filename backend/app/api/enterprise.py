@@ -83,6 +83,28 @@ def _is_platform_admin_user(user: User) -> bool:
     return user.role == "platform_admin" or bool(getattr(getattr(user, "identity", None), "is_platform_admin", False))
 
 
+def _llm_management_tenant_id(current_user: User, requested_tenant_id: str | None = None) -> uuid.UUID | None:
+    """Resolve an LLM-management tenant without letting org admins switch tenants."""
+    raw_tenant_id = requested_tenant_id or current_user.tenant_id
+    if raw_tenant_id is None:
+        return None
+    try:
+        tenant_id = uuid.UUID(str(raw_tenant_id))
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail="Invalid tenant ID") from exc
+    if not _is_platform_admin_user(current_user) and tenant_id != current_user.tenant_id:
+        raise HTTPException(status_code=403, detail="Cannot manage another tenant's models")
+    return tenant_id
+
+
+def _llm_model_scope(model_id: uuid.UUID, current_user: User):
+    """Build the tenant-scoped model lookup used by all mutable LLM routes."""
+    conditions = [LLMModel.id == model_id, LLMModel.deleted_at.is_(None)]
+    if not _is_platform_admin_user(current_user):
+        conditions.append(LLMModel.tenant_id == current_user.tenant_id)
+    return select(LLMModel).where(*conditions)
+
+
 # ─── Public: Check Email Exists ────────────────────────
 
 class CheckEmailRequest(BaseModel):
@@ -368,12 +390,7 @@ async def list_llm_models(
     db: AsyncSession = Depends(get_db),
 ):
     """List LLM models scoped to the selected tenant."""
-    # Authorization: non-platform admins can only see their own tenant's models
-    if tenant_id and current_user.role != "platform_admin":
-        if str(current_user.tenant_id) != tenant_id:
-            raise HTTPException(status_code=403, detail="Cannot access other tenant's models")
-
-    tid = tenant_id or str(current_user.tenant_id) if current_user.tenant_id else None
+    tid = _llm_management_tenant_id(current_user, tenant_id)
     query = (
         select(LLMModel)
         .where(LLMModel.deleted_at.is_(None))
@@ -400,7 +417,7 @@ async def add_llm_model(
     db: AsyncSession = Depends(get_db),
 ):
     """Add a new LLM model to the tenant's pool (admin)."""
-    tid = tenant_id or (str(current_user.tenant_id) if current_user.tenant_id else None)
+    tid = _llm_management_tenant_id(current_user, tenant_id)
     model = LLMModel(
         provider=data.provider,
         model=data.model,
@@ -413,7 +430,7 @@ async def add_llm_model(
         supports_vision=data.supports_vision,
         max_output_tokens=data.max_output_tokens,
         request_timeout=data.request_timeout,
-        tenant_id=uuid.UUID(tid) if tid else None,
+        tenant_id=tid,
     )
     db.add(model)
     await db.flush()
@@ -437,12 +454,7 @@ async def set_default_llm_model(
     db: AsyncSession = Depends(get_db),
 ):
     """Mark this model as the tenant's default for new agents."""
-    result = await db.execute(
-        select(LLMModel).where(
-            LLMModel.id == model_id,
-            LLMModel.deleted_at.is_(None),
-        )
-    )
+    result = await db.execute(_llm_model_scope(model_id, current_user))
     model = result.scalar_one_or_none()
     if not model:
         raise HTTPException(status_code=404, detail="Model not found")
@@ -526,12 +538,7 @@ async def update_llm_model(
     db: AsyncSession = Depends(get_db),
 ):
     """Update an existing LLM model in the pool (admin)."""
-    result = await db.execute(
-        select(LLMModel).where(
-            LLMModel.id == model_id,
-            LLMModel.deleted_at.is_(None),
-        )
-    )
+    result = await db.execute(_llm_model_scope(model_id, current_user))
     model = result.scalar_one_or_none()
     if not model:
         raise HTTPException(status_code=404, detail="Model not found")
