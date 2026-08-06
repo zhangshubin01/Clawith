@@ -1,3 +1,4 @@
+from typing import Any
 """Organization management API routes (users only)."""
 
 import uuid
@@ -23,7 +24,7 @@ router = APIRouter(prefix="/org", tags=["organization"])
 async def list_users(
     tenant_id: uuid.UUID | None = None,
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: Any = None,
 ):
     """List users, optionally filtered by tenant."""
     query = (
@@ -48,7 +49,7 @@ async def admin_update_user(
     user_id: uuid.UUID,
     data: UserUpdate,
     current_user: User = Depends(get_current_admin),
-    db: AsyncSession = Depends(get_db),
+    db: Any = None,
 ):
     """Admin update user profile."""
     result = await query_dao.execute(db, 

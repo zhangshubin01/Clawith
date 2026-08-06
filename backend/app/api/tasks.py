@@ -1,3 +1,4 @@
+from typing import Any
 """Task management API routes."""
 
 import uuid
@@ -34,7 +35,7 @@ async def list_tasks(
     status_filter: str | None = None,
     type_filter: str | None = None,
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: Any = None,
 ):
     """List tasks for an agent."""
     await check_agent_access(db, current_user, agent_id)
@@ -65,7 +66,7 @@ async def create_task(
     agent_id: uuid.UUID,
     data: TaskCreate,
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: Any = None,
 ):
     """Create a new task for an agent."""
     agent, _access = await check_agent_access(db, current_user, agent_id)
@@ -114,7 +115,7 @@ async def update_task(
     task_id: uuid.UUID,
     data: TaskUpdate,
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: Any = None,
 ):
     """Update a task."""
     await check_agent_access(db, current_user, agent_id)
@@ -134,7 +135,7 @@ async def get_task_logs(
     agent_id: uuid.UUID,
     task_id: uuid.UUID,
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: Any = None,
 ):
     """Get progress logs for a task."""
     await check_agent_access(db, current_user, agent_id)
@@ -150,7 +151,7 @@ async def add_task_log(
     task_id: uuid.UUID,
     data: TaskLogCreate,
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: Any = None,
 ):
     """Add a progress log entry to a task."""
     await check_agent_access(db, current_user, agent_id)
@@ -165,7 +166,7 @@ async def trigger_task(
     agent_id: uuid.UUID,
     task_id: uuid.UUID,
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: Any = None,
 ):
     """Manually trigger a supervision task execution (for testing)."""
     from app.core.permissions import is_agent_expired
