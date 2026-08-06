@@ -44,7 +44,7 @@ _USER_RESOLUTION_ERROR_TIP = (
 async def feishu_oauth_callback(
     code: str, 
     state: str = None, 
-    db: Any = None
+    db: AsyncSession = Depends(get_db)
 ):
     """Handle Feishu OAuth callback — exchange code for user session."""
     # Parse state if it's a UUID (session ID) or other context
@@ -138,7 +138,7 @@ async def configure_channel(
     agent_id: uuid.UUID,
     data: ChannelConfigCreate,
     current_user: User = Depends(get_current_user),
-    db: Any = None,
+    db: AsyncSession = Depends(get_db),
 ):
     """Configure Feishu bot credentials for a digital employee (wizard step 5)."""
     agent, _access = await check_agent_access(db, current_user, agent_id)
@@ -221,7 +221,7 @@ async def configure_channel(
 async def get_channel_config(
     agent_id: uuid.UUID,
     current_user: User = Depends(get_current_user),
-    db: Any = None,
+    db: AsyncSession = Depends(get_db),
 ):
     """Get Feishu channel configuration for an agent."""
     await check_agent_access(db, current_user, agent_id)
@@ -236,7 +236,7 @@ async def get_channel_config(
 
 
 @router.get("/agents/{agent_id}/channel/webhook-url")
-async def get_webhook_url(agent_id: uuid.UUID, request: Request, db: Any = None):
+async def get_webhook_url(agent_id: uuid.UUID, request: Request, db: AsyncSession = Depends(get_db)):
     """Get the webhook URL for this agent's Feishu bot."""
     from app.services.platform_service import platform_service
     public_base = await platform_service.get_public_base_url(db, request)
@@ -247,7 +247,7 @@ async def get_webhook_url(agent_id: uuid.UUID, request: Request, db: Any = None)
 async def delete_channel_config(
     agent_id: uuid.UUID,
     current_user: User = Depends(get_current_user),
-    db: Any = None,
+    db: AsyncSession = Depends(get_db),
 ):
     """Remove Feishu bot configuration for an agent."""
     agent, _access = await check_agent_access(db, current_user, agent_id)
