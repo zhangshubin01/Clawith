@@ -182,7 +182,7 @@ async def _create_personal_assistant(
 @router.get("/status")
 async def get_onboarding_status(
     current_user: User = Depends(get_current_user),
-    db: Any = None,
+    db: AsyncSession = Depends(get_db),
 ):
     """Return onboarding state for the current user/company."""
     return _status_payload(await _get_row(db, current_user))
@@ -192,7 +192,7 @@ async def get_onboarding_status(
 async def start_onboarding(
     data: OnboardingStartRequest,
     current_user: User = Depends(get_current_user),
-    db: Any = None,
+    db: AsyncSession = Depends(get_db),
 ):
     """Start or resume onboarding for the current user/company."""
     row = await _ensure_row(db, current_user, data.entry_mode)
@@ -204,7 +204,7 @@ async def start_onboarding(
 async def create_personal_assistant(
     data: PersonalAssistantRequest,
     current_user: User = Depends(get_current_user),
-    db: Any = None,
+    db: AsyncSession = Depends(get_db),
 ):
     """Create the user's private assistant and advance onboarding."""
     row = await _ensure_row(db, current_user, "join")
@@ -233,7 +233,7 @@ async def create_personal_assistant(
 @router.post("/complete")
 async def complete_onboarding(
     current_user: User = Depends(get_current_user),
-    db: Any = None,
+    db: AsyncSession = Depends(get_db),
 ):
     """Mark the current user/company onboarding as completed."""
     row = await _get_row(db, current_user)

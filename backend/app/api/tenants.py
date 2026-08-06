@@ -154,7 +154,7 @@ class SelfCreateResponse(BaseModel):
 async def self_create_company(
     data: TenantCreate,
     current_user: User = Depends(get_authenticated_user),
-    db: Any = None,
+    db: AsyncSession = Depends(get_db),
 ):
     """Create a new company (self-service). The creator becomes org_admin.
 
@@ -255,7 +255,7 @@ class JoinResponse(BaseModel):
 async def join_company(
     data: JoinRequest,
     current_user: User = Depends(get_authenticated_user),
-    db: Any = None,
+    db: AsyncSession = Depends(get_db),
 ):
     """Join an existing company using an invitation code.
 
@@ -377,7 +377,7 @@ async def join_company(
 # ─── Registration Config ───────────────────────────────
 
 @router.get("/registration-config")
-async def get_registration_config(db: Any = None):
+async def get_registration_config(db: AsyncSession = Depends(get_db)):
     """Public — returns whether self-creation of companies is allowed."""
     from app.models.system_settings import SystemSetting
     result = await query_dao.execute(db, 
@@ -393,7 +393,7 @@ async def get_registration_config(db: Any = None):
 @router.get("/resolve-by-domain")
 async def resolve_tenant_by_domain(
     domain: str,
-    db: Any = None,
+    db: AsyncSession = Depends(get_db),
 ):
     """Resolve a tenant by its sso_domain or subdomain slug.
 
@@ -461,7 +461,7 @@ async def resolve_tenant_by_domain(
 @router.get("/", response_model=list[TenantOut])
 async def list_tenants(
     current_user: User = Depends(require_role("platform_admin")),
-    db: Any = None,
+    db: AsyncSession = Depends(get_db),
 ):
     """List all tenants (platform_admin only)."""
     result = await query_dao.execute(db, select(Tenant).order_by(Tenant.created_at.desc()))
@@ -471,7 +471,7 @@ async def list_tenants(
 @router.get("/me", response_model=TenantOut)
 async def get_my_tenant(
     current_user: User = Depends(get_current_user),
-    db: Any = None,
+    db: AsyncSession = Depends(get_db),
 ):
     """Return the current user's own tenant. Any authenticated member can read
     this — the wizard and the chat model switcher need default_model_id, which
@@ -489,7 +489,7 @@ async def get_my_tenant(
 @router.get("/me/token-usage")
 async def get_my_tenant_token_usage(
     current_user: User = Depends(get_current_user),
-    db: Any = None,
+    db: AsyncSession = Depends(get_db),
 ):
     """Return aggregate token and prompt-cache usage for the current company."""
     if not current_user.tenant_id:
@@ -530,7 +530,7 @@ async def get_my_tenant_token_usage(
 async def get_tenant(
     tenant_id: uuid.UUID,
     current_user: User = Depends(get_current_user),
-    db: Any = None,
+    db: AsyncSession = Depends(get_db),
 ):
     """Get tenant details. Platform admins can view any; org_admins only their own."""
     if current_user.role not in ("platform_admin", "org_admin"):
@@ -552,7 +552,7 @@ async def update_tenant(
     tenant_id: uuid.UUID,
     data: TenantUpdate,
     current_user: User = Depends(require_role("org_admin", "platform_admin")),
-    db: Any = None,
+    db: AsyncSession = Depends(get_db),
 ):
     """Update tenant settings. Platform admins can update any; org_admins only their own."""
     if current_user.role == "org_admin":
@@ -595,7 +595,7 @@ async def upload_tenant_logo(
     tenant_id: uuid.UUID,
     file: UploadFile = File(...),
     current_user: User = Depends(require_role("org_admin", "platform_admin")),
-    db: Any = None,
+    db: AsyncSession = Depends(get_db),
 ):
     """Upload a cropped square company logo.
 
@@ -637,7 +637,7 @@ async def upload_tenant_logo(
 async def delete_tenant_logo(
     tenant_id: uuid.UUID,
     current_user: User = Depends(require_role("org_admin", "platform_admin")),
-    db: Any = None,
+    db: AsyncSession = Depends(get_db),
 ):
     """Remove a custom company logo and fall back to the generated default."""
     tenant = await _get_updateable_tenant(tenant_id, current_user, db)
@@ -660,7 +660,7 @@ async def assign_user_to_tenant(
     user_id: uuid.UUID,
     role: str = "member",
     current_user: User = Depends(require_role("platform_admin")),
-    db: Any = None,
+    db: AsyncSession = Depends(get_db),
 ):
     """Assign a user to a tenant with a specific role."""
     # Verify tenant
@@ -689,7 +689,7 @@ async def assign_user_to_tenant(
 async def delete_tenant(
     tenant_id: uuid.UUID,
     current_user: User = Depends(get_current_user),
-    db: Any = None,
+    db: AsyncSession = Depends(get_db),
 ):
     """Permanently delete a company and ALL its data.
 
