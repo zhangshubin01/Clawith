@@ -140,6 +140,10 @@ class Settings(BaseSettings):
     AGENT_RUNTIME_COMMAND_CONCURRENCY: int = Field(default=10, gt=0, le=100)
     AGENT_RUNTIME_COMMAND_CLAIM_TTL_SECONDS: int = Field(default=60, gt=0)
     AGENT_RUNTIME_COMMAND_CLAIM_RENEW_SECONDS: int = Field(default=20, gt=0)
+    # Maximum LangGraph recursion steps per Agent Run. Raised from the
+    # library default (25) to absorb long tool-call loops; override via
+    # AGENT_RUNTIME_RECURSION_LIMIT when a tenant needs more headroom.
+    AGENT_RUNTIME_RECURSION_LIMIT: int = Field(default=200, gt=0)
     AGENT_RUNTIME_COMMAND_MAX_ATTEMPTS: int = Field(default=5, gt=0)
     AGENT_RUNTIME_ASYNC_TOOL_POLL_SCAN_SECONDS: float = Field(default=0.25, gt=0)
     AGENT_RUNTIME_CHANNEL_DELIVERY_CLAIM_TTL_SECONDS: int = Field(default=120, gt=0)

@@ -13,6 +13,7 @@ import uuid
 
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+from langgraph.errors import GraphRecursionError
 from psycopg import AsyncConnection as PsycopgAsyncConnection
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
@@ -386,6 +387,13 @@ class RuntimeCommandDaemon:
                 result = await self._worker.run_once()
             except asyncio.CancelledError:
                 raise
+            except GraphRecursionError:
+                logger.warning(
+                    "Runtime Command Worker iteration hit recursion limit "
+                    "(%s steps) — run may be stuck in a loop",
+                    get_settings().AGENT_RUNTIME_RECURSION_LIMIT,
+                )
+                delay = self._error_delay_seconds
             except Exception:
                 logger.exception("Runtime Command Worker iteration failed")
                 delay = self._error_delay_seconds
