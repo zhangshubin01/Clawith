@@ -1,3 +1,4 @@
+from typing import Any
 """Public pages API — serves published HTML without authentication."""
 
 import uuid
@@ -23,7 +24,7 @@ router = APIRouter(prefix="/pages", tags=["pages"])
 # ── Public render (NO auth) ────────────────────────────
 
 @public_router.get("/p/{short_id}")
-async def render_page(short_id: str, db: AsyncSession = Depends(get_db)):
+async def render_page(short_id: str, db: Any = None):
     """Serve a published HTML page. No authentication required."""
     result = await query_dao.execute(db, 
         select(PublishedPage).where(PublishedPage.short_id == short_id)
@@ -63,7 +64,7 @@ async def render_page(short_id: str, db: AsyncSession = Depends(get_db)):
 async def list_pages(
     agent_id: uuid.UUID,
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: Any = None,
 ):
     """List published pages for an agent."""
     from app.core.permissions import check_agent_access
