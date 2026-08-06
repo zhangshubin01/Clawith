@@ -11,6 +11,7 @@ import uuid
 from langgraph.types import Command
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession
 
+from app.config import get_settings
 from app.services.agent_runtime.checkpointer import (
     runtime_command_config,
     runtime_thread_config,
@@ -422,7 +423,7 @@ class LangGraphRuntimeDriver:
             command_id=command.id,
             checkpoint_id=(checkpoint.checkpoint_id if checkpoint is not None else None),
         )
-        config["recursion_limit"] = 150  # 默认25不够，50轮 LLM 循环需 ~100 步
+        config["recursion_limit"] = get_settings().AGENT_RUNTIME_RECURSION_LIMIT
         context = _runtime_context(run, command, self._node_executor)
 
         if (

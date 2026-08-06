@@ -165,8 +165,8 @@ class AndroidBuildBackend(BaseSandboxBackend):
                 )
             else:
                 logger.debug(f"[AndroidBuild] gradle module dirs={dir_count}")
-        except (asyncio.TimeoutError, ValueError, ProcessLookupError):
-            pass  # 超时/解析失败/容器不存在 — 不影响构建
+        except (asyncio.TimeoutError, ValueError, ProcessLookupError, FileNotFoundError):
+            pass  # 超时/解析失败/容器不存在/docker CLI 不可用 — 不影响构建
 
     async def _check_sdk_version_drift(self, container) -> bool:
         """比较镜像 SDK 版本与卷中版本，检测漂移。"""
