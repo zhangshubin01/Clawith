@@ -1511,12 +1511,23 @@ async def flush_temp_workspace(temp_workspace: TempWorkspace, conflict_mode: str
             if entry and entry.base_hash == current_hash:
                 skipped.append(rel_path)
                 continue
-            condition = (
-                WriteCondition(version_token=entry.base_version_token)
-                if entry
-                else WriteCondition(require_absent=True)
-            )
-            storage_key = entry.storage_key if entry else normalize_storage_key(f"{temp_workspace.agent_id}/{rel_path}")
+            if entry:
+                condition = WriteCondition(version_token=entry.base_version_token)
+                storage_key = entry.storage_key
+            else:
+                # Tool-produced new file: create when absent, otherwise use the
+                # current version as an optimistic lock.  This lets a stale
+                # artifact at the same path (e.g. a previous package build
+                # that was too large to materialize) be replaced by the tool's
+                # fresh output, while a genuine concurrent edit still surfaces
+                # as a conflict instead of a silent overwrite.
+                storage_key = normalize_storage_key(f"{temp_workspace.agent_id}/{rel_path}")
+                current = await storage.get_version(storage_key)
+                condition = (
+                    WriteCondition(require_absent=True)
+                    if not current.exists
+                    else WriteCondition(version_token=current.token)
+                )
             result = await storage.write_bytes_if_match(
                 storage_key,
                 data,

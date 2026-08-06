@@ -9,6 +9,16 @@ from app.dao.base import BaseDAO, tenant_context
 from app.database import Base, _session_ctx
 
 
+class NullableTenantRecord(Base):
+    """Legacy-style row whose tenant column is nullable but opted into scoping."""
+
+    __tablename__ = "test_nullable_tenant_records"
+    __tenant_scoped__ = True
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(String, nullable=True)
+
+
 class DummyModel:
     id = "id"
 
@@ -136,3 +146,39 @@ def test_orm_session_injects_tenant_filter_for_direct_queries():
             records = session.scalars(select(TenantScopedRecord).order_by(TenantScopedRecord.id)).all()
 
     assert [record.id for record in records] == ["a"]
+
+
+def test_orm_session_fills_tenant_on_insert_within_context():
+    """New tenant-scoped rows inherit the active tenant instead of landing NULL.
+
+    Regression: delivery/websocket-created ChatMessage rows had tenant_id NULL,
+    which the SELECT-side auto-injection then filtered out, surfacing as
+    runtime_delivery_message_missing.
+    """
+    engine = create_engine("sqlite://")
+    NullableTenantRecord.__table__.create(engine)
+    tenant = str(uuid.uuid4())
+
+    with Session(engine) as session:
+        with tenant_context(tenant):
+            session.add(NullableTenantRecord(id="n1"))
+            session.flush()
+        # Outside the context the row must still carry the inherited tenant.
+        record = session.get(NullableTenantRecord, "n1")
+
+    assert record is not None
+    assert record.tenant_id == tenant
+
+
+def test_orm_session_leaves_tenant_null_outside_context():
+    """Without a tenant context, INSERT auto-fill must not invent a tenant."""
+    engine = create_engine("sqlite://")
+    NullableTenantRecord.__table__.create(engine)
+
+    with Session(engine) as session:
+        session.add(NullableTenantRecord(id="n2"))
+        session.flush()
+        record = session.get(NullableTenantRecord, "n2")
+
+    assert record is not None
+    assert record.tenant_id is None

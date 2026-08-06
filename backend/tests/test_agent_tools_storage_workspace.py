@@ -435,3 +435,84 @@ async def test_delete_workspace_directory_uses_prefix_existence(monkeypatch, tmp
     assert result.ok is True
     assert f"{agent_id}/workspace/dir/a.txt" not in storage.files
     assert f"{agent_id}/workspace/dir/nested/b.txt" not in storage.files
+
+
+@pytest.mark.asyncio
+async def test_flush_temp_workspace_creates_new_file_when_absent(monkeypatch, tmp_path):
+    """Tool-produced file lands when the target does not exist yet."""
+    agent_id = uuid.uuid4()
+    storage = MemoryStorageBackend()
+    monkeypatch.setattr(agent_tools, "get_storage_backend", lambda: storage)
+
+    (tmp_path / "workspace").mkdir()
+    (tmp_path / "workspace" / "build.tar.gz").write_bytes(b"new-artifact")
+    temp_ws = agent_tools.TempWorkspace(
+        temp_dir=tmp_path,
+        root=tmp_path,
+        agent_id=agent_id,
+        tenant_id=None,
+        selected_paths=["workspace"],
+        manifest={},
+    )
+    result = await agent_tools.flush_temp_workspace(temp_ws)
+
+    assert result["conflicted"] == []
+    assert "workspace/build.tar.gz" in result["updated"]
+    assert storage.files[f"{agent_id}/workspace/build.tar.gz"] == b"new-artifact"
+
+
+@pytest.mark.asyncio
+async def test_flush_temp_workspace_replaces_stale_artifact(monkeypatch, tmp_path):
+    """A stale artifact at the same path is replaced via current-version lock."""
+    agent_id = uuid.uuid4()
+    storage = MemoryStorageBackend({
+        f"{agent_id}/workspace/build.tar.gz": b"stale-artifact",
+    })
+    monkeypatch.setattr(agent_tools, "get_storage_backend", lambda: storage)
+
+    (tmp_path / "workspace").mkdir()
+    (tmp_path / "workspace" / "build.tar.gz").write_bytes(b"fresh-artifact")
+    temp_ws = agent_tools.TempWorkspace(
+        temp_dir=tmp_path,
+        root=tmp_path,
+        agent_id=agent_id,
+        tenant_id=None,
+        selected_paths=["workspace"],
+        manifest={},
+    )
+    result = await agent_tools.flush_temp_workspace(temp_ws)
+
+    assert result["conflicted"] == []
+    assert "workspace/build.tar.gz" in result["updated"]
+    assert storage.files[f"{agent_id}/workspace/build.tar.gz"] == b"fresh-artifact"
+
+
+@pytest.mark.asyncio
+async def test_flush_temp_workspace_conflicts_on_concurrent_new_file(monkeypatch, tmp_path):
+    """A genuinely concurrent edit at the same path still surfaces as a conflict."""
+    agent_id = uuid.uuid4()
+
+    class RacingStorageBackend(MemoryStorageBackend):
+        async def write_bytes_if_match(self, storage_key, data, **kwargs):
+            self.versions[storage_key] = self.versions.get(storage_key, 0) + 100
+            return await super().write_bytes_if_match(storage_key, data, **kwargs)
+
+    storage = RacingStorageBackend({
+        f"{agent_id}/workspace/build.tar.gz": b"concurrent-edit",
+    })
+    monkeypatch.setattr(agent_tools, "get_storage_backend", lambda: storage)
+
+    (tmp_path / "workspace").mkdir()
+    (tmp_path / "workspace" / "build.tar.gz").write_bytes(b"tool-output")
+    temp_ws = agent_tools.TempWorkspace(
+        temp_dir=tmp_path,
+        root=tmp_path,
+        agent_id=agent_id,
+        tenant_id=None,
+        selected_paths=["workspace"],
+        manifest={},
+    )
+    result = await agent_tools.flush_temp_workspace(temp_ws)
+
+    assert result["conflicted"] == ["workspace/build.tar.gz"]
+    assert storage.files[f"{agent_id}/workspace/build.tar.gz"] == b"concurrent-edit"
