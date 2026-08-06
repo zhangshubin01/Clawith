@@ -357,7 +357,9 @@ async def test_worker_context_keeps_supplied_checkpointer_open() -> None:
         "checkpointer_exit",
     ]
     assert len(session_factory.sessions) == 1
-    assert len(session_factory.sessions[0].statements) == 1
+    # Two statements: release_rejected_start_lanes + release_completed_start_lanes
+    # (the latter added by 373d0c00 as part of the lane-leak fix).
+    assert len(session_factory.sessions[0].statements) == 2
 
 
 @pytest.mark.asyncio
