@@ -8,6 +8,8 @@ import json
 from typing import Protocol, cast
 import uuid
 
+from loguru import logger
+
 from app.config import Settings, get_settings
 from app.models.llm import LLMModel
 from app.services.agent_runtime.model_capabilities import (
@@ -491,11 +493,48 @@ def _call_arguments(call: Mapping[str, object]) -> Mapping[str, object]:
     return parsed
 
 
+def _fallback_summary_from_mapping(parsed: Mapping[str, object]) -> JsonObject:
+    """Best-effort summary from a raw mapping (model skipped the tool call)."""
+    summary: JsonObject = {}
+    for field_name in sorted(_SUMMARY_FIELDS):
+        value = parsed.get(field_name)
+        summary[field_name] = (
+            value.strip()
+            if isinstance(value, str)
+            else ""
+        )
+    return summary
+
+
 def _summary_from_step(step: LLMCompletionStep) -> JsonObject:
     if (
         len(step.tool_calls) != 1
         or _call_name(step.tool_calls[0]) != _TOOL_NAME
     ):
+        if len(step.tool_calls) == 0 and step.content and step.content.strip():
+            # Model skipped the required tool call (e.g. wrote a plain reply).
+            # Prefer a structured JSON body when the model emitted one, otherwise
+            # fall back to the raw text so the user's run is not hard-failed.
+            content = step.content.strip()
+            logger.warning(
+                "Thread Compact model did not call %s exactly once; "
+                "using text fallback (content_length=%d)",
+                _TOOL_NAME,
+                len(content),
+            )
+            try:
+                parsed = json.loads(content)
+                if isinstance(parsed, Mapping):
+                    return _fallback_summary_from_mapping(parsed)
+            except (ValueError, TypeError):
+                pass
+            return {
+                "task_goal_and_constraints": "",
+                "completed_work_and_results": content[:4000],
+                "key_decisions_and_evidence": "",
+                "unfinished_or_blocked": "",
+                "next_actions": "",
+            }
         raise RunCompactorError(
             "invalid_thread_compact_output",
             "Thread Compact model must call commit_thread_summary exactly once",
