@@ -157,6 +157,9 @@ async def test_runtime_intake_rejection_settles_occurrence_without_legacy_fallba
     assert execution.last_error == "agent_model_missing: Runtime Trigger Agent has no primary model"
     assert execution.finished_at is not None
     assert trigger.fire_count == 0
+    # Terminal failure must still advance the scheduling cursor: otherwise the
+    # same cron idempotency window is re-enqueued on every daemon tick.
+    assert trigger.last_fired_at == execution.scheduled_at
     assert db.commits == 1
 
 

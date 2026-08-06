@@ -45,6 +45,18 @@ def _mark_trigger_fired(trigger: AgentTrigger, now: datetime) -> None:
         trigger.is_enabled = False
 
 
+def _advance_trigger_cursor(trigger: AgentTrigger, execution: TriggerExecution) -> None:
+    """Advance the scheduling cursor after a terminal failure.
+
+    A failed execution still occupies its cron idempotency window.  Without
+    advancing ``last_fired_at`` the same window is re-enqueued on every daemon
+    tick with an identical idempotency key, producing endless duplicate-key
+    violations (``uq_trigger_execution_idempotency``) in the database log.
+    """
+    if trigger.last_fired_at is None or execution.scheduled_at > trigger.last_fired_at:
+        trigger.last_fired_at = execution.scheduled_at
+
+
 def _fail_runtime_execution(
     execution: TriggerExecution,
     error: TriggerRuntimeIntakeError,
@@ -126,6 +138,7 @@ async def enqueue_trigger_execution(
             ),
             now,
         )
+        _advance_trigger_cursor(stored_trigger, execution)
     else:
         try:
             async with db.begin_nested():
@@ -148,6 +161,7 @@ async def enqueue_trigger_execution(
                 await db.flush()
         except TriggerRuntimeIntakeError as error:
             _fail_runtime_execution(execution, error, now)
+            _advance_trigger_cursor(stored_trigger, execution)
 
     await db.commit()
     return execution, True

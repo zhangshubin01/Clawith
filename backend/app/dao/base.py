@@ -152,6 +152,27 @@ def _inject_tenant_scope(execute_state: Any) -> None:
     execute_state.statement = statement
 
 
+@event.listens_for(Session, "before_flush")
+def _inject_tenant_on_insert(session: Any, flush_context: Any, instances: Any) -> None:
+    """Fill ``tenant_id`` on new tenant-scoped rows from the active tenant context.
+
+    Symmetric to ``_inject_tenant_scope`` (SELECT side): HTTP requests carry the
+    tenant via ``TenantContextMiddleware``, so freshly created rows of
+    tenant-scoped models inherit it automatically instead of silently landing as
+    ``NULL`` (which the SELECT-side auto-injection then filters out).  Background
+    code without a tenant context must pass ``tenant_id`` explicitly or wrap the
+    work in ``tenant_context()``.
+    """
+    tenant_id = _tenant_ctx.get()
+    if tenant_id is None:
+        return
+    for obj in session.new:
+        if not _is_tenant_scoped_model(type(obj)):
+            continue
+        if getattr(obj, "tenant_id", None) is None:
+            obj.tenant_id = tenant_id
+
+
 @contextmanager
 def tenant_context(tenant_id: uuid.UUID):
     """Explicitly bind a tenant_id to the current coroutine context.
