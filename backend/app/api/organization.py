@@ -1,3 +1,4 @@
+from typing import Any
 """Organization management API routes (users only)."""
 
 import uuid
@@ -6,6 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.dao import query_dao
 from app.core.security import get_current_admin, get_current_user
 from app.database import get_db
 from app.models.user import User, Identity
@@ -22,7 +24,7 @@ router = APIRouter(prefix="/org", tags=["organization"])
 async def list_users(
     tenant_id: uuid.UUID | None = None,
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: Any = None,
 ):
     """List users, optionally filtered by tenant."""
     query = (
@@ -38,7 +40,7 @@ async def list_users(
         query = query.where(User.tenant_id == target_tenant_id)
 
     query = query.order_by(User.display_name)
-    result = await db.execute(query)
+    result = await query_dao.execute(db, query)
     return [UserOut.model_validate(u) for u in result.scalars().all()]
 
 
@@ -47,10 +49,10 @@ async def admin_update_user(
     user_id: uuid.UUID,
     data: UserUpdate,
     current_user: User = Depends(get_current_admin),
-    db: AsyncSession = Depends(get_db),
+    db: Any = None,
 ):
     """Admin update user profile."""
-    result = await db.execute(
+    result = await query_dao.execute(db, 
         select(User)
         .options(selectinload(User.identity))
         .where(User.id == user_id)
@@ -63,7 +65,7 @@ async def admin_update_user(
 
     # Validate email uniqueness within tenant if changing
     if "email" in update_data and update_data["email"] != user.email:
-        existing = await db.execute(
+        existing = await query_dao.execute(db, 
             select(User)
             .join(Identity, User.identity_id == Identity.id)
             .where(
@@ -77,7 +79,7 @@ async def admin_update_user(
 
     # Validate mobile uniqueness within tenant if changing
     if "primary_mobile" in update_data and update_data["primary_mobile"] != user.primary_mobile:
-        existing = await db.execute(
+        existing = await query_dao.execute(db, 
             select(User)
             .join(Identity, User.identity_id == Identity.id)
             .where(
@@ -91,7 +93,7 @@ async def admin_update_user(
 
     for field, value in update_data.items():
         setattr(user, field, value)
-    await db.flush()
+    await query_dao.flush(db)
 
     # Sync email/phone to OrgMember if changed
     if "email" in update_data or "primary_mobile" in update_data:

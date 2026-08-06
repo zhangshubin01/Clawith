@@ -49,6 +49,7 @@ COPY . .
 RUN useradd --create-home clawith && \
     mkdir -p /data/agents && \
     chmod +x /app/entrypoint.sh && \
+    chmod u+s /usr/bin/bwrap && \
     chown -R clawith:clawith /app /data
 
 RUN su - clawith -c "git config --global user.name 'Clawith Agent' && git config --global user.email 'agent@clawith.local' && git config --global safe.directory /data/agents"

@@ -43,6 +43,7 @@ from app.services.group_message_service import GroupMessageServiceError
 from app.services.group_realtime import publish_group_message_created
 from app.services.participant_identity import get_or_create_user_participant
 from app.services.storage import guess_content_type
+from app.dao import agent_dao, user_dao
 
 
 router = APIRouter(prefix="/api/groups", tags=["groups"])
@@ -414,11 +415,11 @@ async def _member_outputs(
     agents: dict[uuid.UUID, Agent] = {}
     users: dict[uuid.UUID, User] = {}
     if agent_ref_ids:
-        agent_result = await db.execute(select(Agent).where(Agent.id.in_(agent_ref_ids)))
-        agents = {agent.id: agent for agent in agent_result.scalars().all()}
+        agent_list = await agent_dao.list_by_ids(list(agent_ref_ids), db=db)
+        agents = {agent.id: agent for agent in agent_list}
     if user_ref_ids:
-        user_result = await db.execute(select(User).where(User.id.in_(user_ref_ids)))
-        users = {user.id: user for user in user_result.scalars().all()}
+        user_list = await user_dao.list_by_ids(list(user_ref_ids), db=db)
+        users = {user.id: user for user in user_list}
 
     output: list[GroupMemberOut] = []
     for membership in memberships:
@@ -511,7 +512,7 @@ async def _message_outputs(
 async def create_group(
     body: CreateGroupIn,
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: Any = None,
 ):
     tenant_id = _tenant_id(current_user)
     participant = await _current_participant(db, current_user)
@@ -544,7 +545,7 @@ async def create_group(
 @router.get("", response_model=list[GroupOut])
 async def list_groups(
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: Any = None,
 ):
     tenant_id = _tenant_id(current_user)
     participant = await _current_participant(db, current_user)
@@ -561,7 +562,7 @@ async def list_tenant_member_candidates(
     participant_type: Annotated[Literal["user", "agent"], Query()],
     limit: Annotated[int, Query(ge=1, le=100)] = 100,
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: Any = None,
 ):
     """Candidates for the create-group flow, before any group exists."""
     tenant_id = _tenant_id(current_user)
@@ -585,7 +586,7 @@ async def list_tenant_member_candidates(
 async def get_group(
     group_id: uuid.UUID,
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: Any = None,
 ):
     tenant_id = _tenant_id(current_user)
     participant = await _current_participant(db, current_user)
@@ -605,7 +606,7 @@ async def patch_group(
     group_id: uuid.UUID,
     body: PatchGroupIn,
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: Any = None,
 ):
     if "name" not in body.model_fields_set and "description" not in body.model_fields_set:
         raise HTTPException(status_code=400, detail="At least one field must be supplied")
@@ -638,7 +639,7 @@ async def patch_group(
 async def delete_group(
     group_id: uuid.UUID,
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: Any = None,
 ):
     tenant_id = _tenant_id(current_user)
     participant = await _current_participant(db, current_user)
@@ -665,7 +666,7 @@ async def delete_group(
 async def list_group_members(
     group_id: uuid.UUID,
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: Any = None,
 ):
     tenant_id = _tenant_id(current_user)
     participant = await _current_participant(db, current_user)
@@ -690,7 +691,7 @@ async def list_group_member_candidates(
     participant_type: Annotated[Literal["user", "agent"], Query()],
     limit: Annotated[int, Query(ge=1, le=100)] = 100,
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: Any = None,
 ):
     tenant_id = _tenant_id(current_user)
     participant = await _current_participant(db, current_user)
@@ -721,7 +722,7 @@ async def invite_group_member(
     group_id: uuid.UUID,
     body: InviteGroupMemberIn,
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: Any = None,
 ):
     tenant_id = _tenant_id(current_user)
     participant = await _current_participant(db, current_user)
@@ -754,7 +755,7 @@ async def remove_group_member(
     group_id: uuid.UUID,
     member_id: uuid.UUID,
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: Any = None,
 ):
     tenant_id = _tenant_id(current_user)
     participant = await _current_participant(db, current_user)
@@ -783,7 +784,7 @@ async def remove_group_member(
 async def list_group_sessions(
     group_id: uuid.UUID,
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: Any = None,
 ):
     tenant_id = _tenant_id(current_user)
     participant = await _current_participant(db, current_user)
@@ -818,7 +819,7 @@ async def create_group_session(
     group_id: uuid.UUID,
     body: CreateGroupSessionIn,
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: Any = None,
 ):
     tenant_id = _tenant_id(current_user)
     participant = await _current_participant(db, current_user)
@@ -849,7 +850,7 @@ async def patch_group_session(
     session_id: uuid.UUID,
     body: PatchGroupSessionIn,
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: Any = None,
 ):
     tenant_id = _tenant_id(current_user)
     participant = await _current_participant(db, current_user)
@@ -883,7 +884,7 @@ async def delete_group_session(
     group_id: uuid.UUID,
     session_id: uuid.UUID,
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: Any = None,
 ):
     tenant_id = _tenant_id(current_user)
     participant = await _current_participant(db, current_user)
@@ -923,7 +924,7 @@ async def mark_group_session_read(
     session_id: uuid.UUID,
     body: MarkGroupSessionReadIn,
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: Any = None,
 ):
     tenant_id = _tenant_id(current_user)
     participant = await _current_participant(db, current_user)
@@ -962,7 +963,7 @@ async def list_group_messages(
         Query(description="Cursor '<created_at>|<id>' for the last seen position"),
     ] = None,
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: Any = None,
 ):
     tenant_id = _tenant_id(current_user)
     participant = await _current_participant(db, current_user)
@@ -993,7 +994,7 @@ async def create_group_message(
     body: CreateGroupMessageIn,
     request: Request,
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: Any = None,
 ):
     tenant_id = _tenant_id(current_user)
     participant = await _current_participant(db, current_user)
@@ -1051,7 +1052,7 @@ async def list_active_group_runs(
     group_id: uuid.UUID,
     session_id: uuid.UUID,
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: Any = None,
 ):
     """Return exact non-terminal Runs that should animate this group Session."""
     tenant_id = _tenant_id(current_user)
@@ -1118,7 +1119,7 @@ async def get_group_run_state(
     session_id: uuid.UUID,
     run_id: uuid.UUID,
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: Any = None,
 ):
     tenant_id = _tenant_id(current_user)
     participant = await _current_participant(db, current_user)
@@ -1157,7 +1158,7 @@ async def cancel_group_run(
     session_id: uuid.UUID,
     run_id: uuid.UUID,
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: Any = None,
 ):
     tenant_id = _tenant_id(current_user)
     participant = await _current_participant(db, current_user)
@@ -1202,7 +1203,7 @@ async def cancel_group_run(
 async def get_group_announcement(
     group_id: uuid.UUID,
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: Any = None,
 ):
     tenant_id = _tenant_id(current_user)
     participant = await _current_participant(db, current_user)
@@ -1225,7 +1226,7 @@ async def put_group_announcement(
     group_id: uuid.UUID,
     body: GroupTextFileIn,
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: Any = None,
 ):
     tenant_id = _tenant_id(current_user)
     participant = await _current_participant(db, current_user)
@@ -1258,7 +1259,7 @@ async def get_group_agent_memory(
     group_id: uuid.UUID,
     agent_id: uuid.UUID,
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: Any = None,
 ):
     tenant_id = _tenant_id(current_user)
     participant = await _current_participant(db, current_user)
@@ -1283,7 +1284,7 @@ async def put_group_agent_memory(
     agent_id: uuid.UUID,
     body: GroupTextFileIn,
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: Any = None,
 ):
     tenant_id = _tenant_id(current_user)
     participant = await _current_participant(db, current_user)
@@ -1324,7 +1325,7 @@ async def delete_group_agent_memory(
     agent_id: uuid.UUID,
     expected_version_token: Annotated[str | None, Query()] = None,
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: Any = None,
 ):
     tenant_id = _tenant_id(current_user)
     participant = await _current_participant(db, current_user)
@@ -1360,7 +1361,7 @@ async def get_group_session_summary(
     group_id: uuid.UUID,
     session_id: uuid.UUID,
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: Any = None,
 ):
     tenant_id = _tenant_id(current_user)
     participant = await _current_participant(db, current_user)
@@ -1393,7 +1394,7 @@ async def list_group_workspace(
     group_id: uuid.UUID,
     path: Annotated[str, Query(max_length=500)] = "",
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: Any = None,
 ):
     tenant_id = _tenant_id(current_user)
     participant = await _current_participant(db, current_user)
@@ -1417,7 +1418,7 @@ async def get_group_workspace_file(
     group_id: uuid.UUID,
     path: Annotated[str, Query(min_length=1, max_length=500)],
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: Any = None,
 ):
     tenant_id = _tenant_id(current_user)
     participant = await _current_participant(db, current_user)
@@ -1442,7 +1443,7 @@ async def put_group_workspace_file(
     body: GroupWorkspaceFileIn,
     path: Annotated[str, Query(min_length=1, max_length=500)],
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: Any = None,
 ):
     tenant_id = _tenant_id(current_user)
     participant = await _current_participant(db, current_user)
@@ -1483,7 +1484,7 @@ async def upload_group_workspace_file(
     expected_version_token: Annotated[str | None, Query()] = None,
     require_absent: Annotated[bool, Query()] = False,
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: Any = None,
 ):
     """Upload one group workspace file without converting binary bytes to text."""
     tenant_id = _tenant_id(current_user)
@@ -1544,8 +1545,7 @@ async def _download_user(
         parsed_user_id = uuid.UUID(user_id)
     except (TypeError, ValueError) as exc:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token") from exc
-    result = await db.execute(select(User).where(User.id == parsed_user_id))
-    user = result.scalar_one_or_none()
+    user = await user_dao.get(parsed_user_id)
     if user is None or not user.is_active:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -1561,7 +1561,7 @@ async def download_group_workspace_file(
     token: str = "",
     inline: bool = False,
     credentials: HTTPAuthorizationCredentials | None = Depends(HTTPBearer(auto_error=False)),
-    db: AsyncSession = Depends(get_db),
+    db: Any = None,
 ):
     """Download a group workspace file with membership authorization."""
     current_user = await _download_user(token=token, credentials=credentials, db=db)
@@ -1613,7 +1613,7 @@ async def delete_group_workspace_file(
     path: Annotated[str, Query(min_length=1, max_length=500)],
     expected_version_token: Annotated[str | None, Query()] = None,
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: Any = None,
 ):
     tenant_id = _tenant_id(current_user)
     participant = await _current_participant(db, current_user)
