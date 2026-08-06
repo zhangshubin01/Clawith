@@ -1,3 +1,4 @@
+from typing import Any
 """Agent (Digital Employee) API routes."""
 
 import hashlib
@@ -35,6 +36,7 @@ from app.models.skill import Skill
 from app.services.resource_discovery import import_mcp_from_smithery
 from app.services.agent_runtime.persistence import enqueue_cancel
 from app.services.llm.model_resolution import load_active_model
+from app.dao import agent_dao, tenant_dao, user_dao
 
 router = APIRouter(prefix="/agents", tags=["agents"])
 settings = get_settings()
@@ -43,14 +45,7 @@ settings = get_settings()
 async def _get_active_admin_users(db: AsyncSession, tenant_id: uuid.UUID | None) -> list[User]:
     if not tenant_id:
         return []
-    result = await db.execute(
-        select(User).where(
-            User.tenant_id == tenant_id,
-            User.is_active == True,  # noqa: E712
-            User.role.in_(["platform_admin", "org_admin"]),
-        )
-    )
-    return result.scalars().all()
+    return list(await user_dao.list_admin_users(tenant_id))
 
 
 async def _validate_active_agent_model(
@@ -142,7 +137,7 @@ def _serialize_agent_out(agent: Agent, unread_count: int = 0) -> AgentOut:
 @router.get("/templates")
 async def list_templates(
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: Any = None,
 ):
     """List all available agent templates."""
     from app.models.agent import AgentTemplate
@@ -200,22 +195,13 @@ async def _agents_to_out(
 
 @router.get("/", response_model=list[AgentOut])
 async def list_agents(
-    tenant_id: uuid.UUID | None = None,
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: Any = None,
 ):
     """List all agents the current user has access to."""
-    if tenant_id and tenant_id != current_user.tenant_id:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Can only list agents in your own company",
-        )
-
-    requested_tenant_id = current_user.tenant_id
-
     stmt = build_visible_agents_query(
         current_user,
-        tenant_id=requested_tenant_id,
+        tenant_id=current_user.tenant_id,
     ).order_by(Agent.created_at.desc())
 
     result = await db.execute(stmt)
@@ -251,13 +237,7 @@ async def _background_agent_setup(
     # 1. Initialize agent file system from template
     try:
         async with async_session() as db:
-            agent_result = await db.execute(
-                select(Agent).where(
-                    Agent.id == agent_id,
-                    Agent.deleted_at.is_(None),
-                )
-            )
-            agent = agent_result.scalar_one_or_none()
+            agent = await agent_dao.get(agent_id)
             if not agent:
                 logger.error(f"[background_agent_setup] Agent {agent_id} not found")
                 return
@@ -427,7 +407,7 @@ async def create_agent(
     data: AgentCreate,
     background_tasks: BackgroundTasks,
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: Any = None,
 ):
     """Create a new digital employee (any authenticated user)."""
     # Check agent creation quota
@@ -610,7 +590,7 @@ async def create_agent(
 async def get_agent(
     agent_id: uuid.UUID,
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: Any = None,
 ):
     """Get agent details."""
     agent, access_level = await check_agent_access(db, current_user, agent_id)
@@ -626,22 +606,13 @@ async def get_agent(
     # We must eagerly load the identity relationship (selectinload) to avoid
     # async lazy-loading errors (SQLAlchemy raises MissingGreenlet in async context).
     if agent.creator_id:
-        from sqlalchemy.orm import selectinload
-        from app.models.user import Identity  # noqa: F401
-
-        creator_result = await db.execute(
-            select(User).where(User.id == agent.creator_id).options(selectinload(User.identity))
-        )
-        creator = creator_result.scalar_one_or_none()
+        creator = await user_dao.get_with_identity(agent.creator_id)
         out["creator_username"] = creator.username if creator else None
 
     # Resolve effective timezone (agent → tenant → UTC)
     effective_tz = agent.timezone
     if not effective_tz and agent.tenant_id:
-        from app.models.tenant import Tenant
-
-        t_result = await db.execute(select(Tenant).where(Tenant.id == agent.tenant_id))
-        tenant = t_result.scalar_one_or_none()
+        tenant = await tenant_dao.get(agent.tenant_id)
         if tenant:
             effective_tz = tenant.timezone or "UTC"
     out["effective_timezone"] = effective_tz or "UTC"
@@ -653,12 +624,11 @@ async def get_agent(
 async def get_agent_permissions(
     agent_id: uuid.UUID,
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: Any = None,
 ):
     """Get agent permission scope."""
     agent, access_level = await check_agent_access(db, current_user, agent_id)
-    result = await db.execute(select(AgentPermission).where(AgentPermission.agent_id == agent_id))
-    perms = result.scalars().all()
+    perms = await agent_dao.list_permissions(agent_id)
     can_manage = access_level == "manage"
     is_owner = is_agent_creator(current_user, agent)
     access_mode = getattr(agent, "access_mode", None) or "company"
@@ -692,8 +662,8 @@ async def get_agent_permissions(
         display_user_ids.update(admin.id for admin in await _get_active_admin_users(db, agent.tenant_id))
 
     if display_user_ids:
-        users_result = await db.execute(select(User).where(User.id.in_(display_user_ids)))
-        users_by_id = {str(u.id): u for u in users_result.scalars().all()}
+        users = await user_dao.list_by_ids(list(display_user_ids))
+        users_by_id = {str(u.id): u for u in users}
         access_by_user_id = {
             str(perm.scope_id): (perm.access_level or "use")
             for perm in perms
@@ -752,7 +722,7 @@ async def update_agent_permissions(
     agent_id: uuid.UUID,
     data: dict,
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: Any = None,
 ):
     """Update agent permission scope (owner or platform_admin only)."""
     agent, access_level = await check_agent_access(db, current_user, agent_id)
@@ -850,7 +820,7 @@ async def get_agent_permission_candidates(
     agent_id: uuid.UUID,
     search: str | None = None,
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: Any = None,
 ):
     """Return org members that can be granted custom access.
 
@@ -931,7 +901,7 @@ async def update_agent(
     agent_id: uuid.UUID,
     data: AgentUpdate,
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: Any = None,
 ):
     """Update agent settings (creator or admin)."""
     agent, _access = await check_agent_access(db, current_user, agent_id)
@@ -1047,7 +1017,7 @@ async def update_agent(
 async def delete_agent(
     agent_id: uuid.UUID,
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: Any = None,
 ):
     """Logically delete an Agent while retaining its history and Workspace."""
     agent, _access = await check_agent_access(
@@ -1138,7 +1108,7 @@ async def delete_agent(
 async def start_agent(
     agent_id: uuid.UUID,
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: Any = None,
 ):
     """Start an agent's container."""
     agent, access_level = await check_agent_access(db, current_user, agent_id)
@@ -1156,7 +1126,7 @@ async def start_agent(
 async def stop_agent(
     agent_id: uuid.UUID,
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: Any = None,
 ):
     """Stop an agent's container."""
     agent, access_level = await check_agent_access(db, current_user, agent_id)
@@ -1178,7 +1148,7 @@ async def list_agent_approvals(
     agent_id: uuid.UUID,
     status_filter: str | None = None,
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: Any = None,
 ):
     """List approval requests for a specific agent. Only creator or admin can view."""
     agent, _access = await check_agent_access(db, current_user, agent_id)
@@ -1217,7 +1187,7 @@ async def resolve_agent_approval(
     approval_id: uuid.UUID,
     data: dict,
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: Any = None,
 ):
     """Approve or reject a pending approval for a specific agent."""
     agent, _access = await check_agent_access(db, current_user, agent_id)
@@ -1245,7 +1215,7 @@ async def resolve_agent_approval(
 async def generate_or_reset_api_key(
     agent_id: uuid.UUID,
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: Any = None,
 ):
     """Generate or regenerate API key for an OpenClaw agent."""
     agent, _access = await check_agent_access(db, current_user, agent_id)
@@ -1265,7 +1235,7 @@ async def generate_or_reset_api_key(
 async def list_gateway_messages(
     agent_id: uuid.UUID,
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: Any = None,
 ):
     """List recent gateway messages for an OpenClaw agent."""
     agent, _access = await check_agent_access(db, current_user, agent_id)

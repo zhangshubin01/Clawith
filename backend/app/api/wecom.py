@@ -1,3 +1,4 @@
+from typing import Any
 """WeCom (企业微信) Channel API routes.
 
 Provides Config CRUD and webhook-based message handling with AES encryption.
@@ -111,7 +112,7 @@ _VERIFY_FILENAME_RE = re.compile(r"^WW_verify_[A-Za-z0-9_]{1,64}\.txt$")
 @router.get("/wecom-verify/{filename}")
 async def serve_wecom_verify_file(
     filename: str,
-    db: AsyncSession = Depends(get_db),
+    db: Any = None,
 ):
     """Serve a WeCom domain verification file.
 
@@ -155,7 +156,7 @@ async def configure_wecom_channel(
     agent_id: uuid.UUID,
     data: dict,
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: Any = None,
 ):
     """Configure WeCom bot for an agent.
 
@@ -246,7 +247,7 @@ async def configure_wecom_channel(
 async def get_wecom_channel(
     agent_id: uuid.UUID,
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: Any = None,
 ):
     await check_agent_access(db, current_user, agent_id)
     result = await db.execute(
@@ -271,7 +272,7 @@ async def get_wecom_channel(
 async def get_wecom_webhook_url(
     agent_id: uuid.UUID,
     request: Request,
-    db: AsyncSession = Depends(get_db),
+    db: Any = None,
 ):
     public_base = await platform_service.get_public_base_url(db, request)
     return {"webhook_url": f"{public_base}/api/channel/wecom/{agent_id}/webhook"}
@@ -281,7 +282,7 @@ async def get_wecom_webhook_url(
 async def delete_wecom_channel(
     agent_id: uuid.UUID,
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: Any = None,
 ):
     agent, _ = await check_agent_access(db, current_user, agent_id)
     if not is_agent_creator(current_user, agent):
@@ -313,7 +314,7 @@ async def wecom_verify_webhook(
     timestamp: str = "",
     nonce: str = "",
     echostr: str = "",
-    db: AsyncSession = Depends(get_db),
+    db: Any = None,
 ):
     """Handle WeCom callback URL verification (GET request)."""
     result = await db.execute(
@@ -351,7 +352,7 @@ async def wecom_event_webhook(
     msg_signature: str = "",
     timestamp: str = "",
     nonce: str = "",
-    db: AsyncSession = Depends(get_db),
+    db: Any = None,
 ):
     """Handle WeCom message callback (POST request with encrypted XML)."""
     body_bytes = await request.body()
@@ -607,7 +608,7 @@ async def _process_wecom_text(
 async def wecom_callback(
     code: str,
     state: str = None,
-    db: AsyncSession = Depends(get_db),
+    db: Any = None,
 ):
     # 1. Resolve session to get tenant context
     tenant_id = None
@@ -663,7 +664,7 @@ async def wecom_callback(
 
 
     # Standard login
-    token = create_access_token(str(user.id), user.role)
+    token = create_access_token(str(user.id), user.role, tenant_id=str(user.tenant_id) if user.tenant_id else None)
 
     if state:
         try:

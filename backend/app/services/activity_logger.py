@@ -4,7 +4,7 @@ import uuid
 
 from loguru import logger
 
-from app.database import async_session
+from app.dao import query_dao
 from app.models.activity_log import AgentActivityLog
 
 
@@ -17,14 +17,14 @@ async def log_activity(
 ) -> None:
     """Record an agent activity. Fire-and-forget, never raises."""
     try:
-        async with async_session() as db:
-            db.add(AgentActivityLog(
+        async with query_dao.session() as db:
+            query_dao.add(db, AgentActivityLog(
                 agent_id=agent_id,
                 action_type=action_type,
                 summary=summary,
                 detail_json=detail,
                 related_id=related_id,
             ))
-            await db.commit()
+            await query_dao.commit(db)
     except Exception as e:
         logger.error(f"[ActivityLog] Failed to log {action_type}: {e}")

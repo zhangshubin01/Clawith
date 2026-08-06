@@ -3,9 +3,6 @@
 import asyncio
 from typing import Any, Dict
 import uuid
-from app.database import async_session
-from app.models.channel_config import ChannelConfig
-from sqlalchemy import select
 
 from loguru import logger
 try:
@@ -76,6 +73,9 @@ def _make_no_proxy_connect(orig_connect):
 
     return _scoped_no_proxy
 
+from app.dao import query_dao
+from app.models.channel_config import ChannelConfig
+from sqlalchemy import select
 
 
 if not _HAS_LARK:
@@ -84,15 +84,6 @@ if not _HAS_LARK:
         "Feishu WebSocket features will be disabled. "
         "Install with: pip install lark-oapi"
     )
-
-
-async def _cancel_card_run(run_id: str, bridge) -> None:
-    """Cancel a LangGraph run and abort its streaming card."""
-    try:
-        logger.info("[FEISHU-CARD] interrupt_requested run_id={}", run_id)
-        await bridge.abort("⏹ 回复已中断")
-    except Exception:
-        logger.exception("[FEISHU-CARD] interrupt_abort_failed run_id={}", run_id)
 
 
 class FeishuWSManager:
@@ -158,38 +149,9 @@ class FeishuWSManager:
                 except Exception as e:
                     logger.exception(f"[Feishu WS] Could not dispatch event to main loop: {e}")
 
-        def handle_card_action(data: Any) -> None:
-            """Handle card.action.trigger events (e.g. interrupt button)."""
-            try:
-                action_value = None
-                if isinstance(data, dict):
-                    action_value = data.get("action", {}).get("value", {})
-                elif hasattr(data, "action"):
-                    action = data.action
-                    action_value = getattr(action, "value", {}) if action else {}
-                if isinstance(action_value, str):
-                    import json as _json
-                    try:
-                        action_value = _json.loads(action_value)
-                    except Exception:
-                        action_value = {}
-                if isinstance(action_value, dict) and action_value.get("action") == "interrupt_stream":
-                    run_id = action_value.get("run_id", "")
-                    if run_id:
-                        logger.info("[Feishu WS] card_action interrupt_stream run_id={}", run_id)
-                        from app.services.agent_runtime.card_stream_bridge import get_bridge
-                        bridge = get_bridge(run_id)
-                        if bridge is not None:
-                            asyncio.create_task(_cancel_card_run(run_id, bridge))
-                        else:
-                            logger.warning("[Feishu WS] card_action bridge_not_found run_id={}", run_id)
-            except Exception:
-                logger.exception("[Feishu WS] card_action handler error")
-
         dispatcher = (
             lark.EventDispatcherHandler.builder("", "")
             .register_p2_customized_event("im.message.receive_v1", handle_message)
-            .register_p2_customized_event("card.action.trigger", handle_card_action)
             .build()
         )
         return dispatcher
@@ -250,7 +212,6 @@ class FeishuWSManager:
         app_id: str,
         app_secret: str,
         stop_existing: bool = True,
-        domain: str = "https://open.larksuite.com",
     ):
         """Spawns a WebSocket client fully asynchronously inside FastAPI's loop."""
         if not _HAS_LARK:
@@ -278,10 +239,6 @@ class FeishuWSManager:
             if old_task and not old_task.done():
                 old_task.cancel()
                 logger.info(f"[Feishu WS] Cancelled old WS task for {agent_id}")
-                try:
-                    await old_task
-                except (asyncio.CancelledError, Exception):
-                    pass
 
         try:
             event_handler = self._create_event_handler(agent_id)
@@ -297,7 +254,6 @@ class FeishuWSManager:
             event_handler=event_handler,
             log_level=lark.LogLevel.INFO,
             auto_reconnect=True,
-            domain=domain,
         )
         self._clients[agent_id] = client
 
@@ -377,9 +333,8 @@ class FeishuWSManager:
                     logger.info(f"[Feishu WS] Task cancelled for agent {agent_id}")
                     try:
                         await client._disconnect()
-                    except Exception as e:
-                        logger.warning(f"[Feishu WS] Disconnect error for {agent_id}: {e}")
-                    self._clients.pop(agent_id, None)
+                    except Exception:
+                        pass
                     return
                 except Exception as e:
                     logger.exception(f"[Feishu WS] Health-watch error for agent {agent_id}: {e}")
@@ -395,11 +350,6 @@ class FeishuWSManager:
             if not task.done():
                 task.cancel()
                 logger.info(f"[Feishu WS] Stopped client task for agent {agent_id}")
-                try:
-                    await task
-                except (asyncio.CancelledError, Exception):
-                    pass
-        # Fallback: if client still registered (task cleanup missed), disconnect directly
         if agent_id in self._clients:
             client = self._clients.pop(agent_id)
             try:
@@ -413,26 +363,22 @@ class FeishuWSManager:
             logger.info("[Feishu WS] lark-oapi not installed, skipping Feishu WS initialization")
             return
         logger.info("[Feishu WS] Initializing all active Feishu channels...")
-        async with async_session() as db:
-            result = await db.execute(
+        async with query_dao.session() as db:
+            result = await query_dao.execute(db, 
                 select(ChannelConfig).where(
+                    ChannelConfig.is_configured == True,
                     ChannelConfig.channel_type == "feishu",
-                    ChannelConfig.is_configured,
                 )
             )
             configs = result.scalars().all()
 
-        from app.config import get_settings
-        settings = get_settings()
-
         for config in configs:
             extra = config.extra_config or {}
             mode = extra.get("connection_mode", "webhook")
-            domain = extra.get("domain") or settings.FEISHU_DOMAIN
             if mode == "websocket":
                 if config.app_id and config.app_secret:
                     await self.start_client(
-                        config.agent_id, config.app_id, config.app_secret, stop_existing=False, domain=domain,
+                        config.agent_id, config.app_id, config.app_secret, stop_existing=False
                     )
                 else:
                     logger.warning(f"[Feishu WS] Skipping agent {config.agent_id}: missing credentials")

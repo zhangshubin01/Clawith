@@ -16,6 +16,7 @@ except ImportError:
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.dao import query_dao
 from app.config import get_settings
 from app.core.security import create_access_token
 from app.models.user import User, Identity
@@ -226,7 +227,7 @@ class FeishuService:
         # Resolve provider (needed for OrgMember.provider_id scoping)
         provider_query = select(IdentityProvider).where(IdentityProvider.provider_type == "feishu")
         provider_query = provider_query.where(IdentityProvider.tenant_id == tenant_id)
-        provider_result = await db.execute(provider_query)
+        provider_result = await query_dao.execute(db, provider_query)
         provider = provider_result.scalars().first()
         if not provider:
             provider = IdentityProvider(
@@ -236,14 +237,14 @@ class FeishuService:
                 config={"app_id": self.app_id, "app_secret": self.app_secret},
                 tenant_id=tenant_id,
             )
-            db.add(provider)
-            await db.flush()
+            query_dao.add(db, provider)
+            await query_dao.flush(db)
 
         # 1. Look up OrgMember by open_id (primary) or external_id (user_id)
         #    Also filter by tenant_id and provider_id for accuracy
         member = None
         if open_id:
-            member_r = await db.execute(
+            member_r = await query_dao.execute(db, 
                 select(OrgMember).where(
                     OrgMember.open_id == open_id,
                     OrgMember.provider_id == provider.id,
@@ -252,7 +253,7 @@ class FeishuService:
             )
             member = member_r.scalars().first()
         if not member and user_id:
-            member_r = await db.execute(
+            member_r = await query_dao.execute(db, 
                 select(OrgMember).where(
                     OrgMember.external_id == user_id,
                     OrgMember.provider_id == provider.id,
@@ -264,7 +265,7 @@ class FeishuService:
         # 2. Resolve User from OrgMember
         user = None
         if member and member.user_id:
-            u_result = await db.execute(select(User).where(User.id == member.user_id))
+            u_result = await query_dao.execute(db, select(User).where(User.id == member.user_id))
             user = u_result.scalars().first()
 
         # 3. Fallback: find by email matching (exact match)
@@ -272,7 +273,7 @@ class FeishuService:
             query = select(User).join(User.identity).where(Identity.email == fs_email)
             if tenant_id:
                 query = query.where(User.tenant_id == tenant_id)
-            result = await db.execute(query)
+            result = await query_dao.execute(db, query)
             user = result.scalars().first()
 
         if user:
@@ -304,7 +305,7 @@ class FeishuService:
             if tenant_id:
                 query = query.where(User.tenant_id == tenant_id)
             
-            existing = await db.execute(query)
+            existing = await query_dao.execute(db, query)
             if existing.scalar_one_or_none():
                 import uuid
                 username = f"{username}_{uuid.uuid4().hex[:6]}"
@@ -329,16 +330,16 @@ class FeishuService:
                 is_active=True,
             )
 
-            db.add(user)
-            await db.flush()
+            query_dao.add(db, user)
+            await query_dao.flush(db)
 
             # Link back to OrgMember if found
             if member:
                 member.user_id = user.id
 
-        await db.flush()
+        await query_dao.flush(db)
 
-        token = create_access_token(str(user.id), user.role)
+        token = create_access_token(str(user.id), user.role, tenant_id=str(user.tenant_id) if user.tenant_id else None)
         return user, token
 
 

@@ -10,10 +10,10 @@ import httpx
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 
-from app.config import get_settings
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.dao import query_dao
 from app.models.identity import IdentityProvider
 from app.models.user import User, Identity
 from app.services.google_workspace_oauth import GOOGLE_HTTP_PROXY
@@ -180,8 +180,8 @@ class BaseAuthProvider(ABC):
                 config=self.config,
                 tenant_id=tenant_id,
             )
-            db.add(provider)
-            await db.flush()
+            query_dao.add(db, provider)
+            await query_dao.flush(db)
 
         self.provider = provider
         return provider
@@ -234,7 +234,7 @@ class BaseAuthProvider(ABC):
         )
         if tenant_id:
             query = query.where(User.tenant_id == tenant_id)
-        existing = await db.execute(query)
+        existing = await query_dao.execute(db, query)
         if existing.scalar_one_or_none():
             username = f"{username}_{uuid.uuid4().hex[:6]}"
 
@@ -252,8 +252,8 @@ class BaseAuthProvider(ABC):
         # Set legacy fields if needed
         await self._set_legacy_user_fields(user, user_info)
 
-        db.add(user)
-        await db.flush()
+        query_dao.add(db, user)
+        await query_dao.flush(db)
         
         # Preload identity
         user.identity = identity
@@ -273,21 +273,9 @@ class FeishuAuthProvider(BaseAuthProvider):
 
     provider_type = "feishu"
 
-    @property
-    def _domain(self):
-        return get_settings().FEISHU_DOMAIN
-
-    @property
-    def _token_url(self):
-        return f"{self._domain}/open-apis/authen/v1/oidc/access_token"
-
-    @property
-    def _user_info_url(self):
-        return f"{self._domain}/open-apis/authen/v1/user_info"
-
-    @property
-    def _app_token_url(self):
-        return f"{self._domain}/open-apis/auth/v3/app_access_token/internal"
+    FEISHU_TOKEN_URL = "https://open.feishu.cn/open-apis/authen/v1/oidc/access_token"
+    FEISHU_USER_INFO_URL = "https://open.feishu.cn/open-apis/authen/v1/user_info"
+    FEISHU_APP_TOKEN_URL = "https://open.feishu.cn/open-apis/auth/v3/app_access_token/internal"
 
     def __init__(self, provider: IdentityProvider | None = None, config: dict | None = None):
         super().__init__(provider, config)
@@ -297,7 +285,7 @@ class FeishuAuthProvider(BaseAuthProvider):
 
     async def get_authorization_url(self, redirect_uri: str, state: str) -> str:
         app_id = self.app_id or ""
-        base_url = f"{self._domain}/open-apis/authen/v1/authorize"
+        base_url = "https://open.feishu.cn/open-apis/authen/v1/authorize"
         params = f"app_id={app_id}&redirect_uri={redirect_uri}&state={state}"
         return f"{base_url}?{params}"
 
@@ -307,7 +295,7 @@ class FeishuAuthProvider(BaseAuthProvider):
 
         async with httpx.AsyncClient() as client:
             resp = await client.post(
-                self._app_token_url,
+                self.FEISHU_APP_TOKEN_URL,
                 json={"app_id": self.app_id, "app_secret": self.app_secret},
             )
             data = resp.json()
@@ -319,7 +307,7 @@ class FeishuAuthProvider(BaseAuthProvider):
 
         async with httpx.AsyncClient() as client:
             token_resp = await client.post(
-                self._token_url,
+                self.FEISHU_TOKEN_URL,
                 json={"grant_type": "authorization_code", "code": code},
                 headers={"Authorization": f"Bearer {app_token}"},
             )
@@ -329,7 +317,7 @@ class FeishuAuthProvider(BaseAuthProvider):
     async def get_user_info(self, access_token: str) -> ExternalUserInfo:
         async with httpx.AsyncClient() as client:
             info_resp = await client.get(
-                self._user_info_url, headers={"Authorization": f"Bearer {access_token}"}
+                self.FEISHU_USER_INFO_URL, headers={"Authorization": f"Bearer {access_token}"}
             )
             info_data = info_resp.json().get("data", {})
             logger.info(f"Feishu user info: {info_data}")

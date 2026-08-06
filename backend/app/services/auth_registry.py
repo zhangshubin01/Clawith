@@ -8,6 +8,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.dao import query_dao
 from app.dao import identity_provider_dao
 from app.models.identity import IdentityProvider
 from app.services.auth_provider import (
@@ -100,7 +101,7 @@ class AuthProviderRegistry:
                 # Public OAuth login should only expose global providers.
                 query = query.where(IdentityProvider.tenant_id.is_(None))
 
-            result = await db.execute(query)
+            result = await query_dao.execute(db, query)
             return list(result.scalars().all())
 
     async def create_provider(
@@ -130,8 +131,8 @@ class AuthProviderRegistry:
             config=config,
             tenant_id=tenant_id,
         )
-        db.add(provider)
-        await db.flush()
+        query_dao.add(db, provider)
+        await query_dao.flush(db)
 
         # Clear cache for this provider type
         self._clear_cache(provider_type)
@@ -158,7 +159,7 @@ class AuthProviderRegistry:
         Returns:
             Updated IdentityProvider or None if not found
         """
-        result = await db.execute(
+        result = await query_dao.execute(db, 
             select(IdentityProvider).where(IdentityProvider.id == provider_id)
         )
         provider = result.scalar_one_or_none()
@@ -173,7 +174,7 @@ class AuthProviderRegistry:
         if is_active is not None:
             provider.is_active = is_active
 
-        await db.flush()
+        await query_dao.flush(db)
 
         # Clear cache
         self._clear_cache(provider.provider_type)
@@ -190,7 +191,7 @@ class AuthProviderRegistry:
         Returns:
             True if deleted, False if not found
         """
-        result = await db.execute(
+        result = await query_dao.execute(db, 
             select(IdentityProvider).where(IdentityProvider.id == provider_id)
         )
         provider = result.scalar_one_or_none()
@@ -199,8 +200,8 @@ class AuthProviderRegistry:
             return False
 
         provider_type = provider.provider_type
-        await db.delete(provider)
-        await db.flush()
+        await query_dao.delete(db, provider)
+        await query_dao.flush(db)
 
         # Clear cache
         self._clear_cache(provider_type)

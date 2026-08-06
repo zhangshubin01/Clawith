@@ -1,3 +1,4 @@
+from typing import Any
 """Enterprise management API routes: LLM pool, enterprise info, approvals, audit logs."""
 
 import uuid
@@ -95,7 +96,7 @@ class CheckEmailRequest(BaseModel):
 @router.post("/check-email-exists")
 async def check_email_exists(
     data: CheckEmailRequest,
-    db: AsyncSession = Depends(get_db),
+    db: Any = None,
 ):
     """Public endpoint — check if an email address is already registered on this platform.
 
@@ -368,7 +369,7 @@ async def test_llm_model(
 async def list_llm_models(
     tenant_id: str | None = None,
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: Any = None,
 ):
     """List LLM models scoped to the selected tenant."""
     # Authorization: non-platform admins can only see their own tenant's models
@@ -400,7 +401,7 @@ async def add_llm_model(
     data: LLMModelCreate,
     tenant_id: str | None = None,
     current_user: User = Depends(get_current_admin),
-    db: AsyncSession = Depends(get_db),
+    db: Any = None,
 ):
     """Add a new LLM model to the tenant's pool (admin)."""
     tid = tenant_id or (str(current_user.tenant_id) if current_user.tenant_id else None)
@@ -437,7 +438,7 @@ async def add_llm_model(
 async def set_default_llm_model(
     model_id: uuid.UUID,
     current_user: User = Depends(get_current_admin),
-    db: AsyncSession = Depends(get_db),
+    db: Any = None,
 ):
     """Mark this model as the tenant's default for new agents."""
     result = await db.execute(
@@ -491,7 +492,7 @@ async def set_default_llm_model(
 async def remove_llm_model(
     model_id: uuid.UUID,
     current_user: User = Depends(get_current_admin),
-    db: AsyncSession = Depends(get_db),
+    db: Any = None,
 ):
     """Logically delete an LLM model while retaining every historical reference."""
     query = select(LLMModel).where(LLMModel.id == model_id)
@@ -526,7 +527,7 @@ async def update_llm_model(
     model_id: uuid.UUID,
     data: LLMModelUpdate,
     current_user: User = Depends(get_current_admin),
-    db: AsyncSession = Depends(get_db),
+    db: Any = None,
 ):
     """Update an existing LLM model in the pool (admin)."""
     result = await db.execute(
@@ -585,7 +586,7 @@ async def update_llm_model(
 @router.get("/info", response_model=list[EnterpriseInfoOut])
 async def list_enterprise_info(
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: Any = None,
 ):
     """List all enterprise information entries."""
     result = await db.execute(select(EnterpriseInfo).order_by(EnterpriseInfo.info_type))
@@ -597,7 +598,7 @@ async def update_enterprise_info(
     info_type: str,
     data: EnterpriseInfoUpdate,
     current_user: User = Depends(get_current_admin),
-    db: AsyncSession = Depends(get_db),
+    db: Any = None,
 ):
     """Create or update enterprise information. Triggers sync to agents."""
     info = await enterprise_sync_service.update_enterprise_info(
@@ -615,7 +616,7 @@ async def list_approvals(
     tenant_id: str | None = None,
     status_filter: str | None = None,
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: Any = None,
 ):
     """List approval requests scoped to a tenant."""
     query = select(ApprovalRequest)
@@ -656,7 +657,7 @@ async def resolve_approval(
     approval_id: uuid.UUID,
     data: ApprovalAction,
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: Any = None,
 ):
     """Approve or reject a pending approval request."""
     try:
@@ -676,7 +677,7 @@ async def list_audit_logs(
     tenant_id: str | None = None,
     limit: int = 50,
     current_user: User = Depends(get_current_admin),
-    db: AsyncSession = Depends(get_db),
+    db: Any = None,
 ):
     """List audit logs scoped to a tenant (admin only)."""
     query = select(AuditLog).order_by(AuditLog.created_at.desc()).limit(limit)
@@ -697,7 +698,7 @@ async def list_audit_logs(
 async def get_enterprise_stats(
     tenant_id: str | None = None,
     current_user: User = Depends(get_current_admin),
-    db: AsyncSession = Depends(get_db),
+    db: Any = None,
 ):
     """Get enterprise dashboard statistics, optionally scoped to a tenant."""
     # Determine which tenant to filter by
@@ -757,7 +758,7 @@ class TenantQuotaUpdate(BaseModel):
 @router.get("/tenant-quotas")
 async def get_tenant_quotas(
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: Any = None,
 ):
     """Get tenant quota defaults and heartbeat settings."""
     if not current_user.tenant_id:
@@ -783,7 +784,7 @@ async def get_tenant_quotas(
 async def update_tenant_quotas(
     data: TenantQuotaUpdate,
     current_user: User = Depends(get_current_admin),
-    db: AsyncSession = Depends(get_db),
+    db: Any = None,
 ):
     """Update tenant quota defaults (admin only). Enforces heartbeat floor on existing agents."""
     if not current_user.tenant_id:
@@ -840,7 +841,7 @@ class TestEmailRequest(BaseModel):
 async def send_test_email_endpoint(
     data: TestEmailRequest,
     current_user: User = Depends(get_current_admin),
-    db: AsyncSession = Depends(get_db),
+    db: Any = None,
 ):
     """Send a test email to verify SMTP configuration (admin only)."""
     import smtplib
@@ -876,7 +877,7 @@ async def send_test_email_endpoint(
 @router.get("/email-templates")
 async def get_email_templates_endpoint(
     current_user: User = Depends(get_current_admin),
-    db: AsyncSession = Depends(get_db),
+    db: Any = None,
 ):
     """Get email templates (current values + available variables per scenario)."""
     from app.services.system_email_service import (
@@ -901,7 +902,7 @@ class EmailTemplatesUpdate(BaseModel):
 async def update_email_templates_endpoint(
     data: EmailTemplatesUpdate,
     current_user: User = Depends(get_current_admin),
-    db: AsyncSession = Depends(get_db),
+    db: Any = None,
 ):
     """Save email templates (admin only)."""
     from app.services.system_email_service import EMAIL_TEMPLATE_VARIABLES
@@ -997,7 +998,7 @@ async def _runtime_model_settings_payload(db: AsyncSession, *, tenant_id: uuid.U
 async def get_runtime_model_settings(
     tenant_id: str | None = None,
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: Any = None,
 ):
     """Return the selected tenant's eligible Group Runtime model choices."""
     resolved_tenant_id = _runtime_settings_tenant_id(current_user, tenant_id)
@@ -1009,7 +1010,7 @@ async def update_runtime_model_settings(
     data: RuntimeModelSettingsUpdate,
     tenant_id: str | None = None,
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: Any = None,
 ):
     """Persist tenant-scoped Group Runtime models, effective immediately."""
     resolved_tenant_id = _runtime_settings_tenant_id(current_user, tenant_id)
@@ -1050,7 +1051,7 @@ async def update_runtime_model_settings(
 
 @router.get("/system-settings/notification_bar/public")
 async def get_notification_bar_public(
-    db: AsyncSession = Depends(get_db),
+    db: Any = None,
 ):
     """Public (no auth) endpoint to read the notification bar config."""
     result = await db.execute(
@@ -1070,7 +1071,7 @@ async def get_notification_bar_public(
 async def get_system_setting(
     key: str,
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: Any = None,
 ):
     """Get a system setting by key."""
     result = await db.execute(select(SystemSetting).where(SystemSetting.key == key))
@@ -1085,7 +1086,7 @@ async def update_system_setting(
     key: str,
     data: SettingUpdate,
     current_user: User = Depends(get_current_admin),
-    db: AsyncSession = Depends(get_db),
+    db: Any = None,
 ):
     """Create or update a system setting."""
     # Platform-level settings (e.g. PUBLIC_BASE_URL) require platform_admin
@@ -1205,7 +1206,7 @@ async def list_identity_providers(
     tenant_id: str | None = None,
     global_only: bool = False,
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: Any = None,
 ):
     """List identity providers configured for the tenant."""
     # Authorization: non-platform admins can only see their own tenant's providers
@@ -1359,7 +1360,7 @@ def _identity_provider_response(provider: IdentityProvider, sso_domain: str | No
 async def create_identity_provider(
     data: IdentityProviderCreate,
     current_user: User = Depends(get_current_admin),
-    db: AsyncSession = Depends(get_db),
+    db: Any = None,
 ):
     """Create a new identity provider (Admin only)."""
     from app.services.auth_registry import auth_provider_registry
@@ -1410,7 +1411,7 @@ async def create_identity_provider(
 async def create_oauth2_provider(
     data: IdentityProviderOAuth2Create,
     current_user: User = Depends(get_current_admin),
-    db: AsyncSession = Depends(get_db),
+    db: Any = None,
 ):
     """Create a new OAuth2 identity provider with simplified fields (app_id, app_secret, authorize_url, etc.)."""
     from app.services.auth_registry import auth_provider_registry
@@ -1476,7 +1477,7 @@ async def update_oauth2_provider(
     provider_id: uuid.UUID,
     data: OAuth2ConfigUpdate,
     current_user: User = Depends(get_current_admin),
-    db: AsyncSession = Depends(get_db),
+    db: Any = None,
 ):
     """Update an OAuth2 identity provider with simplified fields."""
     from app.services.auth_registry import auth_provider_registry
@@ -1544,7 +1545,7 @@ async def update_identity_provider(
     provider_id: uuid.UUID,
     data: IdentityProviderUpdate,
     current_user: User = Depends(get_current_admin),
-    db: AsyncSession = Depends(get_db),
+    db: Any = None,
 ):
     """Update an existing identity provider."""
     from app.services.auth_registry import auth_provider_registry
@@ -1601,7 +1602,7 @@ async def update_identity_provider(
 async def delete_identity_provider(
     provider_id: uuid.UUID,
     current_user: User = Depends(get_current_admin),
-    db: AsyncSession = Depends(get_db),
+    db: Any = None,
 ):
     """Delete an identity provider."""
     result = await db.execute(select(IdentityProvider).where(IdentityProvider.id == provider_id))
@@ -1639,7 +1640,7 @@ async def list_org_departments(
     tenant_id: str | None = None,
     provider_id: str | None = None,
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: Any = None,
 ):
     """List all departments, optionally filtered by tenant or provider."""
     # Tenant isolation rules:
@@ -1706,7 +1707,7 @@ async def list_org_members(
     tenant_id: str | None = None,
     provider_id: str | None = None,
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: Any = None,
 ):
     """List org members, optionally filtered by department, search, tenant, or provider."""
     # Tenant isolation rules:
@@ -1789,7 +1790,7 @@ async def list_org_members(
 async def trigger_org_sync(
     provider_id: str | None = None,
     current_user: User = Depends(get_current_admin),
-    db: AsyncSession = Depends(get_db),
+    db: Any = None,
 ):
     """Manually trigger org structure sync from a specific identity provider."""
     from app.services.org_sync_service import org_sync_service
@@ -1823,7 +1824,7 @@ async def wecom_org_sync_verify(
     timestamp: str = "",
     nonce: str = "",
     echostr: str = "",
-    db: AsyncSession = Depends(get_db),
+    db: Any = None,
 ):
     """Handle WeCom receive-message-server URL verification for the org sync app.
 
@@ -1967,7 +1968,7 @@ async def _ensure_invitation_email_enabled(db: AsyncSession) -> None:
 async def create_invitation_codes(
     data: InvitationCodeCreate,
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: Any = None,
 ):
     """Batch-create invitation codes for the current user's company."""
     _require_tenant_admin(current_user)
@@ -1996,7 +1997,7 @@ async def invite_users(
     data: UserInviteRequest,
     background_tasks: BackgroundTasks,
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: Any = None,
 ):
     """Batch-invite users via email to the current user's company."""
     _require_tenant_admin(current_user)
@@ -2062,7 +2063,7 @@ async def list_invitation_codes(
     page_size: int = 20,
     search: str = "",
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: Any = None,
 ):
     """List invitation codes for the current user's company."""
     _require_tenant_admin(current_user)
@@ -2106,7 +2107,7 @@ async def list_invitation_codes(
 @router.get("/invitation-codes/export")
 async def export_invitation_codes_csv(
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: Any = None,
 ):
     """Export invitation codes for the current user's company as CSV."""
     _require_tenant_admin(current_user)
@@ -2145,7 +2146,7 @@ async def export_invitation_codes_csv(
 async def deactivate_invitation_code(
     code_id: str,
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: Any = None,
 ):
     """Deactivate an invitation code (must belong to current user's company)."""
     _require_tenant_admin(current_user)

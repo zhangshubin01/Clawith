@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import smtplib
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime
@@ -16,7 +17,8 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.utils import formataddr, make_msgid
 
-from app.core.email import send_smtp_email
+from app.core import email as core_email
+from app.core.email import force_ipv4, send_smtp_email
 
 logger = logging.getLogger(__name__)
 
@@ -107,6 +109,8 @@ def _send_email_with_config_sync(config: SystemEmailConfig, to: str, subject: st
     msg["Date"] = datetime.now().strftime("%a, %d %b %Y %H:%M:%S %z")
     msg.attach(MIMEText(body, "plain", "utf-8"))
 
+    core_email.smtplib = smtplib
+    core_email.force_ipv4 = force_ipv4
     send_smtp_email(
         host=config.smtp_host,
         port=config.smtp_port,

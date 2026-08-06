@@ -1,3 +1,4 @@
+from typing import Any
 """DingTalk Channel API routes.
 
 Provides Config CRUD and message handling for DingTalk bots using Stream mode.
@@ -31,7 +32,7 @@ async def configure_dingtalk_channel(
     agent_id: uuid.UUID,
     data: dict,
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: Any = None,
 ):
     """Configure DingTalk bot for an agent. Fields: app_key, app_secret, agent_id (optional)."""
     agent, _ = await check_agent_access(db, current_user, agent_id)
@@ -99,7 +100,7 @@ async def configure_dingtalk_channel(
 async def get_dingtalk_channel(
     agent_id: uuid.UUID,
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: Any = None,
 ):
     await check_agent_access(db, current_user, agent_id)
     result = await db.execute(
@@ -118,7 +119,7 @@ async def get_dingtalk_channel(
 async def delete_dingtalk_channel(
     agent_id: uuid.UUID,
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: Any = None,
 ):
     agent, _ = await check_agent_access(db, current_user, agent_id)
     if not is_agent_creator(current_user, agent):
@@ -271,7 +272,7 @@ async def process_dingtalk_message(
 async def dingtalk_callback(
     authCode: str, # DingTalk uses authCode parameter
     state: str = None,
-    db: AsyncSession = Depends(get_db),
+    db: Any = None,
 ):
     """Callback for DingTalk OAuth2 login."""
     from app.models.identity import SSOScanSession
@@ -323,7 +324,7 @@ async def dingtalk_callback(
         return HTMLResponse(f"Auth failed: {str(e)}")
 
     # 4. Standard login
-    token = create_access_token(str(user.id), user.role)
+    token = create_access_token(str(user.id), user.role, tenant_id=str(user.tenant_id) if user.tenant_id else None)
 
     if state:
         try:

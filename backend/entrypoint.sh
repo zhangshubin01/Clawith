@@ -5,7 +5,14 @@ set -e
 
 PROCESS_ROLE="${PROCESS_ROLE:-all}"
 ALLOW_MIGRATION_FAILURE="${ALLOW_MIGRATION_FAILURE:-false}"
-START_COMMAND="${START_COMMAND:-uvicorn app.main:app --host 0.0.0.0 --port 8000 --ws-ping-interval 15 --ws-ping-timeout 10}"
+APP_WORKERS="${APP_WORKERS:-1}"
+DEFAULT_UVICORN_WORKERS="1"
+case ",${PROCESS_ROLE}," in
+    *,api,*|*,all,*)
+        DEFAULT_UVICORN_WORKERS="${APP_WORKERS}"
+        ;;
+esac
+START_COMMAND="${START_COMMAND:-uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers ${DEFAULT_UVICORN_WORKERS}}"
 
 role_contains() {
     case ",${PROCESS_ROLE}," in
@@ -25,31 +32,6 @@ if [ "$(id -u)" = '0' ]; then
             chown -R clawith:clawith "${TARGET_DIR}"
         else
             echo "[entrypoint] Directory ${TARGET_DIR} is already owned by clawith:clawith, skipping chown."
-        fi
-    fi
-
-    # Grant clawith access to the Docker socket via its owning group.
-    # docker-compose mounts /var/run/docker.sock and adds its group via
-    # group_add, but gosu strips supplementary groups the target user is
-    # not a member of in /etc/group. We detect the socket's actual GID,
-    # ensure a matching group exists, and add clawith to it.
-    if [ -S /var/run/docker.sock ]; then
-        SOCK_GID=$(stat -c '%g' /var/run/docker.sock 2>/dev/null || echo "")
-        if [ -z "$SOCK_GID" ]; then
-            echo "[entrypoint] WARNING: Cannot determine docker.sock GID — skipping Docker access setup"
-        elif [ "$SOCK_GID" = "0" ]; then
-            SOCK_GROUP="root"
-        else
-            # Non-root group — create if missing and add clawith
-            if ! getent group "$SOCK_GID" >/dev/null 2>&1; then
-                echo "[entrypoint] Creating group gid=$SOCK_GID for Docker socket access..."
-                groupadd -g "$SOCK_GID" docker_sock_group
-            fi
-            SOCK_GROUP=$(getent group "$SOCK_GID" | cut -d: -f1)
-        fi
-        if [ -n "${SOCK_GROUP:-}" ] && ! id -nG clawith 2>/dev/null | grep -qwF "$SOCK_GROUP"; then
-            echo "[entrypoint] Adding clawith to '$SOCK_GROUP' group for Docker socket access..."
-            usermod -a -G "$SOCK_GROUP" clawith
         fi
     fi
 
