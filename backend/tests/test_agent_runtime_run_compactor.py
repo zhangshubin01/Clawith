@@ -152,15 +152,18 @@ def _state(messages: list[JsonObject]) -> tuple[RuntimeGraphState, RuntimeContex
     return state, context, tenant_id
 
 
-def _step(**overrides: str) -> LLMCompletionStep:
-    arguments = {
+def _step_arguments() -> dict[str, str]:
+    return {
         "task_goal_and_constraints": "Complete the work accurately",
         "completed_work_and_results": "Reviewed earlier context",
         "key_decisions_and_evidence": "Use the durable receipt",
         "unfinished_or_blocked": "No blockers",
         "next_actions": "Answer the exact current request",
-        **overrides,
     }
+
+
+def _step(**overrides: str) -> LLMCompletionStep:
+    arguments = {**_step_arguments(), **overrides}
     return LLMCompletionStep(
         content="",
         tool_calls=(
@@ -744,7 +747,8 @@ async def test_transient_provider_failure_is_typed_for_langgraph_retry() -> None
 
 
 @pytest.mark.asyncio
-async def test_invalid_summary_is_deterministic_and_never_committed() -> None:
+async def test_text_fallback_summary_when_model_skips_tool_call() -> None:
+    """Plain-text reply (no tool call) is used as best-effort summary."""
     state, context, tenant_id = _state(
         [_normal("old", "old " * 300), _normal("current")]
     )
@@ -753,6 +757,88 @@ async def test_invalid_summary_is_deterministic_and_never_committed() -> None:
         return LLMCompletionStep(
             content="free text",
             tool_calls=(),
+            reasoning_content=None,
+            retry_instruction=None,
+            usage=TokenUsage(total_tokens=1),
+        )
+
+    result = await _service(
+        model=_model(tenant_id),
+        completion=complete,
+        effective_budget=1_000,
+        current_tokens=900,
+    ).compact_if_needed(state, context)
+
+    assert result.compacted is True
+    assert result.thread_summary is not None
+    assert result.thread_summary["completed_work_and_results"] == "free text"
+    assert result.thread_summary["task_goal_and_constraints"] == ""
+
+
+@pytest.mark.asyncio
+async def test_json_body_fallback_summary_when_model_skips_tool_call() -> None:
+    """A raw JSON body with summary fields is structured-fallbacked."""
+    state, context, tenant_id = _state(
+        [_normal("old", "old " * 300), _normal("current")]
+    )
+    body = {
+        "task_goal_and_constraints": "Ship the feature",
+        "completed_work_and_results": "Reviewed and patched",
+        "key_decisions_and_evidence": "Keep receipts",
+        "unfinished_or_blocked": "None",
+        "next_actions": "Answer now",
+    }
+
+    async def complete(*_args, **_kwargs):
+        return LLMCompletionStep(
+            content=json.dumps(body),
+            tool_calls=(),
+            reasoning_content=None,
+            retry_instruction=None,
+            usage=TokenUsage(total_tokens=1),
+        )
+
+    result = await _service(
+        model=_model(tenant_id),
+        completion=complete,
+        effective_budget=1_000,
+        current_tokens=900,
+    ).compact_if_needed(state, context)
+
+    assert result.compacted is True
+    assert result.thread_summary is not None
+    assert result.thread_summary["completed_work_and_results"] == "Reviewed and patched"
+    assert result.thread_summary["next_actions"] == "Answer now"
+
+
+@pytest.mark.asyncio
+async def test_multiple_tool_calls_remain_deterministic_failure() -> None:
+    """More than one tool call is a genuine anomaly and still fails closed."""
+    state, context, tenant_id = _state(
+        [_normal("old", "old " * 300), _normal("current")]
+    )
+
+    async def complete(*_args, **_kwargs):
+        return LLMCompletionStep(
+            content="",
+            tool_calls=(
+                {
+                    "id": "compact-1",
+                    "type": "function",
+                    "function": {
+                        "name": "commit_thread_summary",
+                        "arguments": json.dumps(_step_arguments()),
+                    },
+                },
+                {
+                    "id": "compact-2",
+                    "type": "function",
+                    "function": {
+                        "name": "commit_thread_summary",
+                        "arguments": json.dumps(_step_arguments()),
+                    },
+                },
+            ),
             reasoning_content=None,
             retry_instruction=None,
             usage=TokenUsage(total_tokens=1),
@@ -767,8 +853,6 @@ async def test_invalid_summary_is_deterministic_and_never_committed() -> None:
         ).compact_if_needed(state, context)
 
     assert raised.value.code == "invalid_thread_compact_output"
-    assert "thread_summary" not in state
-    assert "summary_covered_through_message_id" not in state
 
 
 @pytest.mark.asyncio
