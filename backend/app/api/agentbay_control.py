@@ -14,13 +14,14 @@ import logging
 import time
 import uuid
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.dao import query_dao
 from app.config import get_settings
 from app.core.permissions import check_agent_access
 from app.core.security import encrypt_data, get_current_user
@@ -625,7 +626,7 @@ async def control_current_url(
     agent_id: uuid.UUID,
     data: CurrentUrlRequest,
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: Any = None,
 ):
     """Get the current page URL from the active browser session via CDP.
 
@@ -675,7 +676,7 @@ async def control_click(
     agent_id: uuid.UUID,
     data: ClickRequest,
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: Any = None,
 ):
     """Forward a mouse click to the AgentBay session.
 
@@ -708,7 +709,7 @@ async def control_type(
     agent_id: uuid.UUID,
     data: TypeRequest,
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: Any = None,
 ):
     """Forward text input to the AgentBay session."""
     _agent, _access = await check_agent_access(db, current_user, agent_id)
@@ -735,7 +736,7 @@ async def control_press_keys(
     agent_id: uuid.UUID,
     data: PressKeysRequest,
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: Any = None,
 ):
     """Forward keyboard key presses to the AgentBay session."""
     _agent, _access = await check_agent_access(db, current_user, agent_id)
@@ -762,7 +763,7 @@ async def control_drag(
     agent_id: uuid.UUID,
     data: DragRequest,
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: Any = None,
 ):
     """Simulate a human-like mouse drag in the AgentBay session.
 
@@ -798,7 +799,7 @@ async def control_screenshot(
     agent_id: uuid.UUID,
     data: ScreenshotRequest,
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: Any = None,
 ):
     """Get an immediate screenshot from the AgentBay session.
 
@@ -845,7 +846,7 @@ async def control_lock(
     agent_id: uuid.UUID,
     data: LockRequest,
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: Any = None,
 ):
     """Enter Take Control mode — locks the session against automatic tool execution.
 
@@ -887,7 +888,7 @@ async def control_unlock(
     agent_id: uuid.UUID,
     data: UnlockRequest,
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: Any = None,
 ):
     """Exit Take Control mode — unlock session and optionally export cookies.
 
@@ -1058,7 +1059,7 @@ let browser;
     encrypted_cookies = encrypt_data(cookies_json_str, settings.SECRET_KEY)
 
     # Try to find existing credential for this platform
-    result = await db.execute(
+    result = await query_dao.execute(db, 
         select(AgentCredential).where(
             AgentCredential.agent_id == agent_id,
             AgentCredential.platform == platform_hint,
@@ -1086,7 +1087,7 @@ let browser;
             last_login_at=now,
             status="active",
         )
-        db.add(new_cred)
+        query_dao.add(db, new_cred)
 
-    await db.commit()
+    await query_dao.commit(db)
     return len(cookies)

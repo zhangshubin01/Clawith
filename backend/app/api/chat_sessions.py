@@ -6,7 +6,7 @@ import json
 import re
 import uuid
 from datetime import UTC, datetime
-from typing import Annotated, Literal
+from typing import Any, Annotated, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field
@@ -218,7 +218,7 @@ async def list_sessions(
     agent_id: uuid.UUID,
     scope: Annotated[str, Query(description="'mine' or 'all'")] = "mine",
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: Any = None,
 ):
     """List active sessions on the legacy Agent session surface."""
     agent, tenant_id = await _check_direct_agent_access(db, current_user, agent_id)
@@ -360,7 +360,7 @@ async def create_session(
     agent_id: uuid.UUID,
     body: CreateSessionIn = CreateSessionIn(),
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: Any = None,
 ):
     """Create a direct session for the active current-tenant User."""
     _, tenant_id = await _check_direct_agent_access(db, current_user, agent_id)
@@ -402,7 +402,7 @@ async def get_session_runtime_state(
     agent_id: uuid.UUID,
     session_id: uuid.UUID,
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: Any = None,
 ) -> SessionRuntimeStateOut:
     """Return the one exact Direct Chat lane holder, if one exists."""
     _agent, tenant_id = await _check_direct_agent_access(
@@ -570,7 +570,7 @@ async def reconcile_direct_tool_execution(
     execution_id: uuid.UUID,
     body: ReconcileToolExecutionIn,
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: Any = None,
 ) -> ReconcileToolExecutionOut:
     """Settle a Direct Chat unknown receipt before the user resumes its Run."""
     agent, tenant_id = await _check_direct_agent_access(db, current_user, agent_id)
@@ -673,7 +673,7 @@ async def rename_session(
     session_id: uuid.UUID,
     body: PatchSessionIn,
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: Any = None,
 ):
     """Rename one active direct session."""
     agent, tenant_id = await _check_direct_agent_access(db, current_user, agent_id)
@@ -699,7 +699,7 @@ async def delete_session(
     agent_id: uuid.UUID,
     session_id: uuid.UUID,
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: Any = None,
 ):
     """Soft-delete a direct session and cancel only its foreground collaboration."""
     agent, tenant_id = await _check_direct_agent_access(db, current_user, agent_id)
@@ -713,8 +713,6 @@ async def delete_session(
     if session is None:
         raise HTTPException(status_code=404, detail="Session not found")
     _authorize_session_owner(current_user, agent, session)
-    if session.user_id is None:
-        raise HTTPException(status_code=404, detail="Session not found")
 
     deleted = await soft_delete_direct_session(
         db,
@@ -801,7 +799,7 @@ async def get_session_messages(
         Query(description="Cursor '<created_at>|<id>' for the first excluded position"),
     ] = None,
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: Any = None,
 ):
     """Return associated session messages by authoritative `(created_at, id)` position."""
     agent, tenant_id = await _check_direct_agent_access(db, current_user, agent_id)
