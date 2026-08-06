@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING
 from loguru import logger
 
 from app.core.logging_config import new_trace_id
+from app.services.agent_runtime.adapter import RuntimeAdapterError
 from app.services.heartbeat_runtime import (
     HeartbeatRuntimeIntakeError,
     enqueue_oneshot_runtime,
@@ -306,11 +307,24 @@ async def _heartbeat_tick():
                     )
                     continue
                 except Exception as exc:
-                    logger.exception(
-                        "Heartbeat claim failed for {}: {}",
-                        agent_name,
-                        exc,
-                    )
+                    if (
+                        isinstance(exc, RuntimeAdapterError)
+                        and getattr(exc, "code", "") == "model_unavailable"
+                    ):
+                        # Expected config state (tenant has no active model):
+                        # heartbeat cannot run, so keep the tick quiet instead
+                        # of spamming ERROR every heartbeat interval.
+                        logger.debug(
+                            "Heartbeat skipped for {}: no active model "
+                            "configured in tenant",
+                            agent_name,
+                        )
+                    else:
+                        logger.exception(
+                            "Heartbeat claim failed for {}: {}",
+                            agent_name,
+                            exc,
+                        )
                     continue
 
                 logger.info(
