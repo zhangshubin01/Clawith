@@ -84,6 +84,28 @@ def _is_platform_admin_user(user: User) -> bool:
     return user.role == "platform_admin" or bool(getattr(getattr(user, "identity", None), "is_platform_admin", False))
 
 
+def _llm_management_tenant_id(current_user: User, requested_tenant_id: str | None = None) -> uuid.UUID | None:
+    """Resolve an LLM-management tenant without letting org admins switch tenants."""
+    raw_tenant_id = requested_tenant_id or current_user.tenant_id
+    if raw_tenant_id is None:
+        return None
+    try:
+        tenant_id = uuid.UUID(str(raw_tenant_id))
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail="Invalid tenant ID") from exc
+    if not _is_platform_admin_user(current_user) and tenant_id != current_user.tenant_id:
+        raise HTTPException(status_code=403, detail="Cannot manage another tenant's models")
+    return tenant_id
+
+
+def _llm_model_scope(model_id: uuid.UUID, current_user: User):
+    """Build the tenant-scoped model lookup used by all mutable LLM routes."""
+    conditions = [LLMModel.id == model_id, LLMModel.deleted_at.is_(None)]
+    if not _is_platform_admin_user(current_user):
+        conditions.append(LLMModel.tenant_id == current_user.tenant_id)
+    return select(LLMModel).where(*conditions)
+
+
 # ─── Public: Check Email Exists ────────────────────────
 
 class CheckEmailRequest(BaseModel):
@@ -369,12 +391,7 @@ async def list_llm_models(
     db: AsyncSession = Depends(get_db),
 ):
     """List LLM models scoped to the selected tenant."""
-    # Authorization: non-platform admins can only see their own tenant's models
-    if tenant_id and current_user.role != "platform_admin":
-        if str(current_user.tenant_id) != tenant_id:
-            raise HTTPException(status_code=403, detail="Cannot access other tenant's models")
-
-    tid = tenant_id or str(current_user.tenant_id) if current_user.tenant_id else None
+    tid = _llm_management_tenant_id(current_user, tenant_id)
     query = (
         select(LLMModel)
         .where(LLMModel.deleted_at.is_(None))
@@ -401,7 +418,7 @@ async def add_llm_model(
     db: AsyncSession = Depends(get_db),
 ):
     """Add a new LLM model to the tenant's pool (admin)."""
-    tid = tenant_id or (str(current_user.tenant_id) if current_user.tenant_id else None)
+    tid = _llm_management_tenant_id(current_user, tenant_id)
     model = LLMModel(
         provider=data.provider,
         model=data.model,
@@ -414,7 +431,7 @@ async def add_llm_model(
         supports_vision=data.supports_vision,
         max_output_tokens=data.max_output_tokens,
         request_timeout=data.request_timeout,
-        tenant_id=uuid.UUID(tid) if tid else None,
+        tenant_id=tid,
     )
     db.add(model)
     await db.flush()
@@ -438,12 +455,7 @@ async def set_default_llm_model(
     db: AsyncSession = Depends(get_db),
 ):
     """Mark this model as the tenant's default for new agents."""
-    result = await db.execute(
-        select(LLMModel).where(
-            LLMModel.id == model_id,
-            LLMModel.deleted_at.is_(None),
-        )
-    )
+    result = await db.execute(_llm_model_scope(model_id, current_user))
     model = result.scalar_one_or_none()
     if not model:
         raise HTTPException(status_code=404, detail="Model not found")
@@ -527,12 +539,7 @@ async def update_llm_model(
     db: AsyncSession = Depends(get_db),
 ):
     """Update an existing LLM model in the pool (admin)."""
-    result = await db.execute(
-        select(LLMModel).where(
-            LLMModel.id == model_id,
-            LLMModel.deleted_at.is_(None),
-        )
-    )
+    result = await db.execute(_llm_model_scope(model_id, current_user))
     model = result.scalar_one_or_none()
     if not model:
         raise HTTPException(status_code=404, detail="Model not found")
@@ -585,8 +592,14 @@ async def list_enterprise_info(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """List all enterprise information entries."""
-    result = await db.execute(select(EnterpriseInfo).order_by(EnterpriseInfo.info_type))
+    """List enterprise information entries for current tenant."""
+    if not current_user.tenant_id:
+        return []
+    result = await db.execute(
+        select(EnterpriseInfo)
+        .where(EnterpriseInfo.tenant_id == current_user.tenant_id)
+        .order_by(EnterpriseInfo.info_type)
+    )
     return [EnterpriseInfoOut.model_validate(e) for e in result.scalars().all()]
 
 
@@ -597,12 +610,15 @@ async def update_enterprise_info(
     current_user: User = Depends(get_current_admin),
     db: AsyncSession = Depends(get_db),
 ):
-    """Create or update enterprise information. Triggers sync to agents."""
+    """Create or update enterprise information for current tenant. Triggers sync to tenant agents."""
+    if not current_user.tenant_id:
+        raise HTTPException(status_code=403, detail="User must belong to a tenant")
+
     info = await enterprise_sync_service.update_enterprise_info(
-        db, info_type, data.content, data.visible_roles, current_user.id
+        db, current_user.tenant_id, info_type, data.content, data.visible_roles, current_user.id
     )
-    # Sync to all running agents
-    await enterprise_sync_service.sync_to_all_agents(db)
+    # Sync only to running agents in the current tenant
+    await enterprise_sync_service.sync_to_all_agents(db, tenant_id=current_user.tenant_id)
     return EnterpriseInfoOut.model_validate(info)
 
 
@@ -939,6 +955,27 @@ class RuntimeModelSettingsUpdate(BaseModel):
     compact_model_id: uuid.UUID
 
 
+def _require_system_setting_access(key: str, current_user: User) -> None:
+    """Authorize access to a platform setting or a tenant company introduction.
+
+    ``system_settings`` is a global key/value table and can contain credentials.
+    The sole tenant-scoped key family exposed through this API is
+    ``company_intro_<tenant UUID>``; organization administrators may manage
+    only their own tenant's entry. All other keys require a platform admin.
+    """
+    company_intro_prefix = "company_intro_"
+    if key.startswith(company_intro_prefix):
+        try:
+            tenant_id = uuid.UUID(key.removeprefix(company_intro_prefix))
+        except ValueError:
+            tenant_id = None
+        if tenant_id is not None and current_user.role == "org_admin" and current_user.tenant_id == tenant_id:
+            return
+    if _is_platform_admin_user(current_user):
+        return
+    raise HTTPException(status_code=403, detail="Platform admin access required for system settings")
+
+
 def _runtime_settings_tenant_id(current_user: User, requested_tenant_id: str | None) -> uuid.UUID:
     raw_tenant_id = requested_tenant_id or current_user.tenant_id
     if raw_tenant_id is None:
@@ -1072,6 +1109,7 @@ async def get_system_setting(
     db: AsyncSession = Depends(get_db),
 ):
     """Get a system setting by key."""
+    _require_system_setting_access(key, current_user)
     result = await db.execute(select(SystemSetting).where(SystemSetting.key == key))
     setting = result.scalar_one_or_none()
     if not setting:
@@ -1087,9 +1125,7 @@ async def update_system_setting(
     db: AsyncSession = Depends(get_db),
 ):
     """Create or update a system setting."""
-    # Platform-level settings (e.g. PUBLIC_BASE_URL) require platform_admin
-    if key == "platform" and not _is_platform_admin_user(current_user):
-        raise HTTPException(status_code=403, detail="Only platform admin can modify platform settings")
+    _require_system_setting_access(key, current_user)
     result = await db.execute(select(SystemSetting).where(SystemSetting.key == key))
     setting = result.scalar_one_or_none()
     if setting:
