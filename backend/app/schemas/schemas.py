@@ -3,8 +3,7 @@
 import uuid
 from datetime import datetime
 
-from pydantic import BaseModel, EmailStr, Field
-
+from pydantic import BaseModel, EmailStr, Field, field_serializer
 
 # ─── Auth ───────────────────────────────────────────────
 
@@ -461,9 +460,6 @@ class ChannelConfigOut(BaseModel):
     agent_id: uuid.UUID
     channel_type: str
     app_id: str | None = None
-    app_secret: str | None = None
-    encrypt_key: str | None = None
-    verification_token: str | None = None
     is_configured: bool
     is_connected: bool
     last_tested_at: datetime | None = None
@@ -471,6 +467,44 @@ class ChannelConfigOut(BaseModel):
     created_at: datetime
 
     model_config = {"from_attributes": True}
+
+    @field_serializer("extra_config")
+    def serialize_extra_config(self, value: dict | None) -> dict | None:
+        """Keep channel credentials out of every API response.
+
+        Channel integrations store provider-specific settings in ``extra_config``.
+        Those settings can include bot tokens and signing secrets, so applying this
+        at the shared response schema prevents a newly added channel endpoint from
+        accidentally disclosing them.
+        """
+        if value is None:
+            return None
+        return _redact_channel_secrets(value)
+
+
+_CHANNEL_SECRET_KEY_PARTS = (
+    "secret",
+    "token",
+    "password",
+    "credential",
+    "private_key",
+    "api_key",
+    "encrypt_key",
+    "verification_key",
+)
+
+
+def _redact_channel_secrets(value: object) -> object:
+    """Return a recursively redacted copy of provider-specific configuration."""
+    if isinstance(value, dict):
+        return {
+            key: _redact_channel_secrets(item)
+            for key, item in value.items()
+            if not any(part in key.lower() for part in _CHANNEL_SECRET_KEY_PARTS)
+        }
+    if isinstance(value, list):
+        return [_redact_channel_secrets(item) for item in value]
+    return value
 
 
 # ─── Approval ───────────────────────────────────────────
