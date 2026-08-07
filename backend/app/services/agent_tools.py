@@ -9256,6 +9256,11 @@ async def _resolve_a2a_target_by_id(
     return target, None
 
 
+def _has_parent_path_segment(path: str) -> bool:
+    """Return whether a user-supplied storage-relative path traverses upward."""
+    return any(segment == ".." for segment in path.replace("\\", "/").split("/"))
+
+
 async def _send_file_to_agent_outcome(
     from_agent_id: uuid.UUID,
     args: dict,
@@ -9289,6 +9294,11 @@ async def _send_file_to_agent_outcome(
         return _typed_failure(
             "send_file_to_agent requires target_agent_id and file_path.",
             "invalid_tool_arguments",
+        )
+    if _has_parent_path_segment(rel_path):
+        return _typed_failure(
+            "send_file_to_agent file_path must not contain parent directory traversal.",
+            "workspace_path_invalid",
         )
 
     storage = get_storage_backend()
