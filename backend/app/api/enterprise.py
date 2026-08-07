@@ -592,8 +592,14 @@ async def list_enterprise_info(
     current_user: User = Depends(get_current_user),
     db: Any = None,
 ):
-    """List all enterprise information entries."""
-    result = await db.execute(select(EnterpriseInfo).order_by(EnterpriseInfo.info_type))
+    """List enterprise information entries for current tenant."""
+    if not current_user.tenant_id:
+        return []
+    result = await db.execute(
+        select(EnterpriseInfo)
+        .where(EnterpriseInfo.tenant_id == current_user.tenant_id)
+        .order_by(EnterpriseInfo.info_type)
+    )
     return [EnterpriseInfoOut.model_validate(e) for e in result.scalars().all()]
 
 
@@ -604,12 +610,15 @@ async def update_enterprise_info(
     current_user: User = Depends(get_current_admin),
     db: Any = None,
 ):
-    """Create or update enterprise information. Triggers sync to agents."""
+    """Create or update enterprise information for current tenant. Triggers sync to tenant agents."""
+    if not current_user.tenant_id:
+        raise HTTPException(status_code=403, detail="User must belong to a tenant")
+
     info = await enterprise_sync_service.update_enterprise_info(
-        db, info_type, data.content, data.visible_roles, current_user.id
+        db, current_user.tenant_id, info_type, data.content, data.visible_roles, current_user.id
     )
-    # Sync to all running agents
-    await enterprise_sync_service.sync_to_all_agents(db)
+    # Sync only to running agents in the current tenant
+    await enterprise_sync_service.sync_to_all_agents(db, tenant_id=current_user.tenant_id)
     return EnterpriseInfoOut.model_validate(info)
 
 
