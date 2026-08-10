@@ -181,9 +181,19 @@ def _sql(statement) -> str:
         ("succeeded", "externally_confirmed_applied"),
     ],
 )
-async def test_unknown_conditional_write_can_be_reconciled_by_user(
+@pytest.mark.parametrize(
+    ("tool_name", "effect", "retry_policy"),
+    [
+        ("write_file", "write", "conditional"),
+        ("generate_image_openai", "external_write", "never"),
+    ],
+)
+async def test_user_reconcilable_unknown_receipt_can_be_settled(
     confirmed_status: str,
     expected_error_code: str,
+    tool_name: str,
+    effect: str,
+    retry_policy: str,
 ) -> None:
     tenant_id = uuid.uuid4()
     run_id = uuid.uuid4()
@@ -192,10 +202,10 @@ async def test_unknown_conditional_write_can_be_reconciled_by_user(
         tenant_id=tenant_id,
         run_id=run_id,
         status="unknown",
-        effect="write",
-        retry_policy="conditional",
+        effect=effect,
+        retry_policy=retry_policy,
     )
-    execution.tool_name = "write_file"
+    execution.tool_name = tool_name
     execution.completed_at = _NOW
     db = _FakeSession(execution)
 
@@ -234,7 +244,7 @@ async def test_unknown_reconciliation_rejects_unsupported_tool() -> None:
 
     with pytest.raises(
         tool_execution.ToolExecutionError,
-        match="only supported for conditional write_file",
+        match="only supported for conditional write_file or image-generation",
     ):
         await tool_execution.reconcile_unknown_tool_execution(
             db,  # type: ignore[arg-type]

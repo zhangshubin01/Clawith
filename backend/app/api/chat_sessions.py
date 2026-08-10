@@ -35,6 +35,7 @@ from app.services.agent_runtime.run_state_reader import (
 )
 from app.services.agent_runtime.tool_execution import (
     ToolExecutionError,
+    is_user_reconcilable_unknown_execution,
     reconcile_unknown_tool_execution,
 )
 from app.services.participant_identity import get_or_create_user_participant
@@ -547,11 +548,7 @@ async def get_session_runtime_state(
                         and isinstance(execution.result_metadata.get("error_code"), str)
                         else None
                     ),
-                    can_reconcile=(
-                        execution.tool_name == "write_file"
-                        and execution.effect == "write"
-                        and execution.retry_policy == "conditional"
-                    ),
+                    can_reconcile=is_user_reconcilable_unknown_execution(execution),
                 )
                 for execution in pending_reconciliations
             ],

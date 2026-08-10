@@ -239,6 +239,59 @@ async def test_runtime_state_exposes_unknown_write_and_blocks_plain_resume() -> 
 
 
 @pytest.mark.asyncio
+async def test_runtime_state_exposes_unknown_image_generation_for_user_confirmation() -> None:
+    agent, user, session, run = _records()
+    reader = SimpleNamespace(get_run_state=AsyncMock(return_value=_view(run)))
+    execution = AgentToolExecution(
+        id=uuid.uuid4(),
+        tenant_id=run.tenant_id,
+        run_id=run.id,
+        tool_call_id="call-image-1",
+        tool_name="generate_image_openai",
+        assistant_message_id="assistant-1",
+        arguments_hash="hash",
+        sanitized_arguments={},
+        effect="external_write",
+        retry_policy="never",
+        attempt_count=1,
+        status="unknown",
+        result_summary="The image generation outcome is unknown.",
+        result_metadata={"error_code": "image_generation_outcome_unknown"},
+        started_at=run.created_at,
+        completed_at=run.updated_at,
+    )
+    db = _Session(
+        _Result(scalar=session),
+        _Result(values=[run]),
+        _Result(scalar=None),
+        _Result(values=[execution]),
+        _Result(scalar=None),
+    )
+
+    with (
+        patch(
+            "app.api.chat_sessions.check_agent_access",
+            new=AsyncMock(return_value=(agent, None)),
+        ),
+        patch(
+            "app.api.chat_sessions._open_run_state_reader",
+            return_value=_ReaderContext(reader),
+        ),
+    ):
+        response = await get_session_runtime_state(
+            agent.id,
+            session.id,
+            current_user=user,
+            db=db,  # type: ignore[arg-type]
+        )
+
+    assert response.active_run is not None
+    assert response.active_run.can_resume is False
+    assert response.active_run.pending_tool_reconciliations[0].tool_name == "generate_image_openai"
+    assert response.active_run.pending_tool_reconciliations[0].can_reconcile is True
+
+
+@pytest.mark.asyncio
 async def test_runtime_state_disables_resume_and_cancel_while_cancel_is_inflight() -> None:
     agent, user, session, run = _records()
     reader = SimpleNamespace(get_run_state=AsyncMock(return_value=_view(run)))
