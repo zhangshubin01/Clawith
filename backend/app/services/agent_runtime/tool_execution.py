@@ -37,6 +37,18 @@ SideEffectClassification = Literal["read", "write", "external_write"]
 RetryPolicy = Literal["safe", "conditional", "never"]
 SAFE_READ_MAX_ATTEMPTS = 3
 
+# These tools dispatch an external image-generation request and can therefore
+# leave the provider outcome uncertain after a response timeout.  Direct Chat
+# offers an explicit human confirmation before allowing the Run to continue.
+_IMAGE_GENERATION_TOOL_NAMES = frozenset(
+    {
+        "generate_image_siliconflow",
+        "generate_image_openai",
+        "generate_image_google",
+        "generate_image_custom",
+    }
+)
+
 _PERSISTED_STATUSES = frozenset({"started", "succeeded", "failed", "unknown"})
 _SIDE_EFFECT_CLASSIFICATIONS = frozenset({"read", "write", "external_write"})
 _RETRY_POLICIES = frozenset({"safe", "conditional", "never"})
@@ -1856,15 +1868,10 @@ async def reconcile_unknown_tool_execution(
             "tool_execution_scope_mismatch",
             "tool execution does not belong to the requested run",
         )
-    effect, retry_policy = _execution_metadata(execution)
-    if (
-        execution.tool_name != "write_file"
-        or effect != "write"
-        or retry_policy != "conditional"
-    ):
+    if not is_user_reconcilable_unknown_execution(execution):
         raise ToolExecutionError(
             "tool_execution_reconciliation_not_supported",
-            "manual reconciliation is only supported for conditional write_file receipts",
+            "manual reconciliation is only supported for conditional write_file or image-generation receipts",
         )
 
     prior_metadata = (
@@ -1921,3 +1928,22 @@ async def reconcile_unknown_tool_execution(
     execution.completed_at = reconciled_at
     await db.flush()
     return execution
+
+
+def is_user_reconcilable_unknown_execution(execution: AgentToolExecution) -> bool:
+    """Return whether Direct Chat can safely settle this unknown receipt.
+
+    The user must explicitly decide whether a dispatched operation took effect.
+    A ``not_applied`` decision closes only the old receipt; any retry remains a
+    new tool call, so the original provider request is never replayed.
+    """
+    effect, retry_policy = _execution_metadata(execution)
+    return (
+        execution.tool_name == "write_file"
+        and effect == "write"
+        and retry_policy == "conditional"
+    ) or (
+        execution.tool_name in _IMAGE_GENERATION_TOOL_NAMES
+        and effect == "external_write"
+        and retry_policy == "never"
+    )
