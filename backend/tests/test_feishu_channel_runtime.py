@@ -191,7 +191,7 @@ async def test_feishu_event_commits_runtime_before_provider_ack(monkeypatch) -> 
         calls["accept"] = kwargs
         return intake
 
-    feishu._event_dedup._store.pop(event_id, None)
+    feishu._processed_events.discard(event_id)
     monkeypatch.setattr(feishu, "_async_session", _SessionFactory(config_db))
     monkeypatch.setattr(feishu, "_accept_feishu_runtime_message", accept)
 
@@ -221,7 +221,7 @@ async def test_feishu_event_commits_runtime_before_provider_ack(monkeypatch) -> 
     )
 
     assert result == {"code": 0, "msg": "ok"}
-    assert feishu._event_dedup.is_duplicate(event_id)
+    assert event_id in feishu._processed_events
     accepted = calls["accept"]
     assert isinstance(accepted, dict)
     assert accepted["external_event_id"] == event_id
