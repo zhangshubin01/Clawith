@@ -50,9 +50,8 @@ async def create_sso_session(
 async def get_sso_session_status(
     sid: uuid.UUID,
     request: Request,
-    db: AsyncSession = None,
+    db: Any = None
 ):
-async def get_sso_session_status(sid: uuid.UUID, db: Any = None):
     """Check the status of an SSO scan session."""
     if not is_valid_sso_browser_binding(sid, request.cookies.get(sso_browser_cookie_name(sid))):
         raise HTTPException(status_code=403, detail="SSO session is not bound to this browser")
