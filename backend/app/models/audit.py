@@ -3,7 +3,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, Enum, ForeignKey, Integer, String, Text, func, text
+from sqlalchemy import DateTime, Enum, ForeignKey, Integer, String, Text, UniqueConstraint, func, text
 from sqlalchemy.dialects.postgresql import JSON, JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -83,9 +83,14 @@ class EnterpriseInfo(Base):
     """Centralized enterprise information with versioning for sync."""
 
     __tablename__ = "enterprise_info"
+    __tenant_scoped__ = True
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "info_type", name="uq_enterprise_info_tenant_type"),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    info_type: Mapped[str] = mapped_column(String(50), nullable=False, unique=True)  # org_structure, company_profile, etc.
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False, index=True)
+    info_type: Mapped[str] = mapped_column(String(50), nullable=False)  # org_structure, company_profile, etc.
     content: Mapped[dict] = mapped_column(JSON, nullable=False)
     version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
     visible_roles: Mapped[list] = mapped_column(JSON, default=[])  # Which agent roles can see this

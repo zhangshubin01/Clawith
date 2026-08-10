@@ -1,3 +1,4 @@
+from typing import Any
 """Messages API — inbox, unread count, mark as read.
 
 After the Participant abstraction migration, agent-to-agent messages are stored
@@ -26,7 +27,7 @@ router = APIRouter(tags=["messages"])
 async def get_inbox(
     limit: int = Query(50, le=200),
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: Any = None,
 ):
     """Get agent-to-agent messages for agents the current user manages.
 
@@ -84,7 +85,7 @@ async def get_inbox(
 @router.get("/messages/unread-count")
 async def get_unread_count(
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: Any = None,
 ):
     """Get count of unread agent-to-agent messages for the current user's agents."""
     agent_ids_q = await query_dao.execute(db, select(Agent.id).where(Agent.creator_id == current_user.id))

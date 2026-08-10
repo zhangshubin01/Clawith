@@ -1,3 +1,4 @@
+from typing import Any
 """Agent (Digital Employee) API routes."""
 
 import hashlib
@@ -136,7 +137,7 @@ def _serialize_agent_out(agent: Agent, unread_count: int = 0) -> AgentOut:
 @router.get("/templates")
 async def list_templates(
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: Any = None,
 ):
     """List all available agent templates."""
     from app.models.agent import AgentTemplate
@@ -195,7 +196,7 @@ async def _agents_to_out(
 @router.get("/", response_model=list[AgentOut])
 async def list_agents(
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: Any = None,
 ):
     """List all agents the current user has access to."""
     stmt = build_visible_agents_query(
@@ -390,7 +391,7 @@ async def create_agent(
     data: AgentCreate,
     background_tasks: BackgroundTasks,
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: Any = None,
 ):
     """Create a new digital employee (any authenticated user)."""
     # Check agent creation quota
@@ -573,7 +574,7 @@ async def create_agent(
 async def get_agent(
     agent_id: uuid.UUID,
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: Any = None,
 ):
     """Get agent details."""
     agent, access_level = await check_agent_access(db, current_user, agent_id)
@@ -607,7 +608,7 @@ async def get_agent(
 async def get_agent_permissions(
     agent_id: uuid.UUID,
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: Any = None,
 ):
     """Get agent permission scope."""
     agent, access_level = await check_agent_access(db, current_user, agent_id)
@@ -705,7 +706,7 @@ async def update_agent_permissions(
     agent_id: uuid.UUID,
     data: dict,
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: Any = None,
 ):
     """Update agent permission scope (owner or platform_admin only)."""
     agent, access_level = await check_agent_access(db, current_user, agent_id)
@@ -803,7 +804,7 @@ async def get_agent_permission_candidates(
     agent_id: uuid.UUID,
     search: str | None = None,
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: Any = None,
 ):
     """Return org members that can be granted custom access.
 
@@ -884,7 +885,7 @@ async def update_agent(
     agent_id: uuid.UUID,
     data: AgentUpdate,
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: Any = None,
 ):
     """Update agent settings (creator or admin)."""
     agent, _access = await check_agent_access(db, current_user, agent_id)
@@ -1000,7 +1001,7 @@ async def update_agent(
 async def delete_agent(
     agent_id: uuid.UUID,
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: Any = None,
 ):
     """Logically delete an Agent while retaining its history and Workspace."""
     agent, _access = await check_agent_access(
@@ -1091,7 +1092,7 @@ async def delete_agent(
 async def start_agent(
     agent_id: uuid.UUID,
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: Any = None,
 ):
     """Start an agent's container."""
     agent, access_level = await check_agent_access(db, current_user, agent_id)
@@ -1109,7 +1110,7 @@ async def start_agent(
 async def stop_agent(
     agent_id: uuid.UUID,
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: Any = None,
 ):
     """Stop an agent's container."""
     agent, access_level = await check_agent_access(db, current_user, agent_id)
@@ -1131,7 +1132,7 @@ async def list_agent_approvals(
     agent_id: uuid.UUID,
     status_filter: str | None = None,
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: Any = None,
 ):
     """List approval requests for a specific agent. Only creator or admin can view."""
     agent, _access = await check_agent_access(db, current_user, agent_id)
@@ -1170,7 +1171,7 @@ async def resolve_agent_approval(
     approval_id: uuid.UUID,
     data: dict,
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: Any = None,
 ):
     """Approve or reject a pending approval for a specific agent."""
     agent, _access = await check_agent_access(db, current_user, agent_id)
@@ -1198,7 +1199,7 @@ async def resolve_agent_approval(
 async def generate_or_reset_api_key(
     agent_id: uuid.UUID,
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: Any = None,
 ):
     """Generate or regenerate API key for an OpenClaw agent."""
     agent, _access = await check_agent_access(db, current_user, agent_id)
@@ -1218,7 +1219,7 @@ async def generate_or_reset_api_key(
 async def list_gateway_messages(
     agent_id: uuid.UUID,
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: Any = None,
 ):
     """List recent gateway messages for an OpenClaw agent."""
     agent, _access = await check_agent_access(db, current_user, agent_id)

@@ -1,9 +1,14 @@
+from typing import Any
 """Feishu OAuth and Channel API routes."""
 
+import hashlib
+import hmac
+import json
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, Response
+from lark_oapi.core.utils import AESCipher
 from loguru import logger
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -31,6 +36,50 @@ _USER_RESOLUTION_ERROR_TIP = (
 )
 
 
+def _verify_and_decode_feishu_callback(
+    body_bytes: bytes,
+    headers: dict[str, str],
+    config: ChannelConfig,
+) -> dict | None:
+    """Authenticate a Feishu callback before any event data is consumed."""
+    try:
+        envelope = json.loads(body_bytes)
+        if not isinstance(envelope, dict):
+            return None
+
+        encrypt_key = (config.encrypt_key or "").strip()
+        encrypted = envelope.get("encrypt")
+        if encrypted:
+            if not encrypt_key:
+                return None
+            payload = json.loads(AESCipher(encrypt_key).decrypt_str(encrypted))
+        else:
+            payload = envelope
+        if not isinstance(payload, dict):
+            return None
+
+        verification_token = (config.verification_token or "").strip()
+        actual_token = str((payload.get("header") or {}).get("token") or "")
+        if not verification_token or not hmac.compare_digest(actual_token, verification_token):
+            return None
+
+        event_type = str((payload.get("header") or {}).get("event_type") or "")
+        if encrypt_key and event_type != "url_verification":
+            timestamp = headers.get("x-lark-request-timestamp", "")
+            nonce = headers.get("x-lark-request-nonce", "")
+            signature = headers.get("x-lark-signature", "")
+            if not timestamp or not nonce or not signature:
+                return None
+            expected = hashlib.sha256(
+                (timestamp + nonce + encrypt_key).encode() + body_bytes
+            ).hexdigest()
+            if not hmac.compare_digest(signature, expected):
+                return None
+        return payload
+    except (UnicodeDecodeError, ValueError, TypeError):
+        return None
+
+
 # ─── OAuth ──────────────────────────────────────────────
 
 @router.get("/auth/feishu/callback")
@@ -38,7 +87,7 @@ _USER_RESOLUTION_ERROR_TIP = (
 async def feishu_oauth_callback(
     code: str, 
     state: str = None, 
-    db: AsyncSession = Depends(get_db)
+    db: Any = None
 ):
     """Handle Feishu OAuth callback — exchange code for user session."""
     # Parse state if it's a UUID (session ID) or other context
@@ -132,7 +181,7 @@ async def configure_channel(
     agent_id: uuid.UUID,
     data: ChannelConfigCreate,
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: Any = None,
 ):
     """Configure Feishu bot credentials for a digital employee (wizard step 5)."""
     agent, _access = await check_agent_access(db, current_user, agent_id)
@@ -192,7 +241,7 @@ async def configure_channel(
 async def get_channel_config(
     agent_id: uuid.UUID,
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: Any = None,
 ):
     """Get Feishu channel configuration for an agent."""
     await check_agent_access(db, current_user, agent_id)
@@ -207,7 +256,7 @@ async def get_channel_config(
 
 
 @router.get("/agents/{agent_id}/channel/webhook-url")
-async def get_webhook_url(agent_id: uuid.UUID, request: Request, db: AsyncSession = Depends(get_db)):
+async def get_webhook_url(agent_id: uuid.UUID, request: Request, db: Any = None):
     """Get the webhook URL for this agent's Feishu bot."""
     from app.services.platform_service import platform_service
     public_base = await platform_service.get_public_base_url(db, request)
@@ -218,7 +267,7 @@ async def get_webhook_url(agent_id: uuid.UUID, request: Request, db: AsyncSessio
 async def delete_channel_config(
     agent_id: uuid.UUID,
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: Any = None,
 ):
     """Remove Feishu bot configuration for an agent."""
     agent, _access = await check_agent_access(db, current_user, agent_id)
@@ -391,7 +440,22 @@ async def feishu_event_webhook(
     request: Request,
 ):
     """Handle Feishu event callback for a specific agent's bot."""
-    body = await request.json()
+    body_bytes = await request.body()
+    async with _async_session() as db:
+        result = await db.execute(
+            select(ChannelConfig).where(
+                ChannelConfig.agent_id == agent_id,
+                ChannelConfig.channel_type == "feishu",
+            )
+        )
+        config = result.scalar_one_or_none()
+    if not config:
+        return Response(status_code=status.HTTP_404_NOT_FOUND)
+
+    body = _verify_and_decode_feishu_callback(body_bytes, dict(request.headers), config)
+    if body is None:
+        logger.warning("[Feishu] Rejected unauthenticated callback for {}", agent_id)
+        return Response(status_code=status.HTTP_401_UNAUTHORIZED)
 
     # Handle verification challenge
     if "challenge" in body:

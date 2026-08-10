@@ -4,6 +4,7 @@ Provides endpoints for platform admins to manage companies, view stats,
 and control platform-level settings.
 """
 
+from typing import Any
 import secrets
 import uuid
 from datetime import datetime
@@ -69,7 +70,7 @@ class PlatformSettingsUpdate(BaseModel):
 @router.get("/companies", response_model=list[CompanyStats])
 async def list_companies(
     current_user: User = Depends(require_role("platform_admin")),
-    db: AsyncSession = Depends(get_db),
+    db: Any = None,
 ):
     """List all companies with stats."""
     tenants = await query_dao.execute(db, select(Tenant).order_by(Tenant.created_at.desc()))
@@ -142,7 +143,7 @@ async def list_companies(
 async def create_company(
     data: CompanyCreateRequest,
     current_user: User = Depends(require_role("platform_admin")),
-    db: AsyncSession = Depends(get_db),
+    db: Any = None,
 ):
     """Create a new company and generate an admin invitation code (max_uses=1)."""
     import re
@@ -183,7 +184,7 @@ async def create_company(
 async def toggle_company(
     company_id: uuid.UUID,
     current_user: User = Depends(require_role("platform_admin")),
-    db: AsyncSession = Depends(get_db),
+    db: Any = None,
 ):
     """Enable or disable a company."""
     result = await query_dao.execute(db, select(Tenant).where(Tenant.id == company_id))
@@ -220,7 +221,7 @@ async def get_platform_timeseries(
     start_date: datetime,
     end_date: datetime,
     current_user: User = Depends(require_role("platform_admin")),
-    db: AsyncSession = Depends(get_db),
+    db: Any = None,
 ):
     """Get daily platform metrics within a date range.
 
@@ -385,7 +386,7 @@ async def get_platform_timeseries(
 @router.get("/metrics/leaderboards")
 async def get_platform_leaderboards(
     current_user: User = Depends(require_role("platform_admin")),
-    db: AsyncSession = Depends(get_db),
+    db: Any = None,
 ):
     """Get Top 20 token consuming companies and agents."""
     # Top 20 Companies by total tokens
@@ -437,7 +438,7 @@ async def get_platform_leaderboards(
 @router.get("/metrics/enhanced")
 async def get_enhanced_metrics(
     current_user: User = Depends(require_role("platform_admin")),
-    db: AsyncSession = Depends(get_db),
+    db: Any = None,
 ):
     """Enhanced platform metrics: retention, avg tokens/session,
     channel distribution, tool categories, and churn warnings.
@@ -588,7 +589,7 @@ async def get_enhanced_metrics(
 @router.get("/platform-settings", response_model=PlatformSettingsOut)
 async def get_platform_settings(
     current_user: User = Depends(require_role("platform_admin")),
-    db: AsyncSession = Depends(get_db),
+    db: Any = None,
 ):
     """Get platform-level settings."""
     settings: dict[str, bool] = {}
@@ -609,7 +610,7 @@ async def get_platform_settings(
 async def update_platform_settings(
     data: PlatformSettingsUpdate,
     current_user: User = Depends(require_role("platform_admin")),
-    db: AsyncSession = Depends(get_db),
+    db: Any = None,
 ):
     """Update platform-level settings."""
     updates = data.model_dump(exclude_unset=True)

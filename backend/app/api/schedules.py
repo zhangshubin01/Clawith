@@ -1,3 +1,4 @@
+from typing import Any
 """Schedule API — CRUD for agent cron jobs."""
 
 import uuid
@@ -55,7 +56,7 @@ class ScheduleOut(BaseModel):
 async def list_schedules(
     agent_id: uuid.UUID,
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: Any = None,
 ):
     """List all schedules for an agent."""
     await check_agent_access(db, current_user, agent_id)
@@ -84,7 +85,7 @@ async def create_schedule(
     agent_id: uuid.UUID,
     data: ScheduleCreate,
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: Any = None,
 ):
     """Create a new schedule for an agent."""
     agent, _access = await check_agent_access(db, current_user, agent_id)
@@ -116,7 +117,7 @@ async def update_schedule(
     schedule_id: uuid.UUID,
     data: ScheduleUpdate,
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: Any = None,
 ):
     """Update a schedule."""
     agent, _access = await check_agent_access(db, current_user, agent_id)
@@ -150,7 +151,7 @@ async def delete_schedule(
     agent_id: uuid.UUID,
     schedule_id: uuid.UUID,
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: Any = None,
 ):
     """Delete a schedule."""
     agent, _access = await check_agent_access(db, current_user, agent_id)
@@ -173,7 +174,7 @@ async def trigger_schedule(
     agent_id: uuid.UUID,
     schedule_id: uuid.UUID,
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: Any = None,
 ):
     """Manually trigger a schedule execution."""
     agent, _access = await check_agent_access(db, current_user, agent_id)
@@ -216,7 +217,7 @@ async def get_schedule_history(
     agent_id: uuid.UUID,
     schedule_id: uuid.UUID,
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: Any = None,
 ):
     """Get execution history for a schedule from activity logs."""
     await check_agent_access(db, current_user, agent_id)
