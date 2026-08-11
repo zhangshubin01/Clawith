@@ -6,6 +6,7 @@ from collections.abc import AsyncIterator, Mapping, Sequence
 import asyncio
 from copy import deepcopy
 import math
+import time as time_module
 from typing import cast
 
 from sqlalchemy import and_, or_, select
@@ -138,12 +139,16 @@ class DatabaseRuntimeEventStream:
         session_factory: RuntimeSessionFactory,
         poll_interval_seconds: float = 0.25,
         batch_size: int = 100,
+        idle_timeout_seconds: float | None = None,
     ) -> None:
         if poll_interval_seconds <= 0 or batch_size <= 0:
             raise ValueError("event stream polling settings must be positive")
+        if idle_timeout_seconds is not None and idle_timeout_seconds <= 0:
+            raise ValueError("idle_timeout_seconds must be positive")
         self._session_factory = session_factory
         self._poll_interval_seconds = poll_interval_seconds
         self._batch_size = batch_size
+        self._idle_timeout_seconds = idle_timeout_seconds
 
     @staticmethod
     def _validate_handle(handle: RunHandle) -> None:
@@ -187,6 +192,7 @@ class DatabaseRuntimeEventStream:
         await self._require_run(handle)
         cursor = after
         terminal_seen = False
+        last_event_time = time_module.monotonic()
 
         while True:
             async with self._session_factory() as db:
@@ -222,12 +228,24 @@ class DatabaseRuntimeEventStream:
                 cursor = RuntimeEventCursor(event.created_at, event.event_id)
                 terminal_seen = terminal_seen or event.event_type in _TERMINAL_EVENT_TYPES
                 delivery_event_seen = delivery_event_seen or event.event_type in _DELIVERY_EVENT_TYPES
+                last_event_time = time_module.monotonic()
                 yield event
 
             if terminal_seen and (
                 delivery_event_seen or delivery_status in _SETTLED_DELIVERY_STATUSES
             ):
                 return
+
+            if (
+                self._idle_timeout_seconds is not None
+                and time_module.monotonic() - last_event_time > self._idle_timeout_seconds
+            ):
+                raise RuntimeEventStreamError(
+                    "runtime_event_stream_idle_timeout",
+                    f"No Runtime events received for {self._idle_timeout_seconds:.0f}s; "
+                    "the command worker may not be processing this Run",
+                )
+
             await asyncio.sleep(self._poll_interval_seconds)
 
 
