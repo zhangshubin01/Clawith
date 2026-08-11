@@ -121,7 +121,10 @@ async def stream_web_chat_run(
     trace_id: str | None = None,
 ) -> ChatRuntimeStreamOutcome:
     """Stream one start/resume attachment until terminal or waiting-user delivery."""
-    source = event_source or DatabaseRuntimeEventStream(session_factory=session_factory)
+    source = event_source or DatabaseRuntimeEventStream(
+        session_factory=session_factory,
+        idle_timeout_seconds=120.0,
+    )
     terminal_status: ChatStreamStatus | None = None
     waiting_correlation_id: str | None = None
     latest_cursor = after

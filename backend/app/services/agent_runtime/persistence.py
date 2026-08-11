@@ -576,6 +576,7 @@ def _claim_statement(now: datetime, *, max_attempts: int):
         select(AgentRunCommand)
         .join(candidate_run, candidate_run.id == AgentRunCommand.run_id)
         .where(
+            AgentRunCommand.attempt_count < max_attempts,
             or_(
                 AgentRunCommand.status == "pending",
                 and_(
@@ -619,6 +620,11 @@ async def claim_next_command(
     if command is None:
         return None
     if command.command_type == "start" and command.attempt_count >= max_attempts:
+        # SQL layer filters attempt_count now; this is a safety net.
+        # Reject the exhausted command so it does not block the queue.
+        command.status = "rejected"
+        command.error_code = "max_attempts_exceeded"
+        await db.flush()
         return None
 
     command.claimed_by = claimant
