@@ -1,14 +1,3 @@
 {
-  "mcpServers": {
-    "git": {
-      "command": "docker",
-      "args": [
-        "run", "--rm",
-        "-v", "/Users/shubinzhang/Documents/agent/Clawith:/repo",
-        "git-mcp-go:latest",
-        "serve",
-        "-r=/repo"
-      ]
-    }
-  }
+  "mcpServers": {}
 }
