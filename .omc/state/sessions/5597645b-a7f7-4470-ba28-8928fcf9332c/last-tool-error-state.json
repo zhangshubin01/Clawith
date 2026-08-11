@@ -1,0 +1,7 @@
+{
+  "tool_name": "Bash",
+  "tool_input_preview": "{\"command\":\"TOKEN=\\\"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiI2NzhkZjA3OS02NDAwLTQzYjMtYTlkZC1mYjAyMWFhMDE4NmMiLCJyb2xlIjoicGxhdGZvcm1fYWRtaW4iLCJleHAiOjE3ODYxMTczNzYsInRlbmFudF9pZCI6ImI4OTgyNmJ...",
+  "error": "Exit code 1\nTraceback (most recent call last):\n  File \"<string>\", line 3, in <module>\n    data = json.load(sys.stdin)\n  File \"/opt/homebrew/Cellar/python@3.14/3.14.5/Frameworks/Python.framework/Versions/3.14/lib/python3.14/json/__init__.py\", line 298, in load\n    return loads(fp.read(),\n        cls=cls, object_hook=object_hook,\n        parse_float=parse_float, parse_int=parse_int,\n        parse_constant=parse_constant, object_pairs_hook=object_pairs_hook, **kw)\n  File \"/opt/homebrew/Cellar/pytho...",
+  "timestamp": "2026-08-06T15:43:14.419Z",
+  "retry_count": 2
+}
