@@ -234,9 +234,8 @@ class AcpSessionManager:
                                 created_at=now,
                             )
                         )
-                    sess.message_count = (sess.message_count or 0) + (
-                        (1 if user_text else 0) + (1 if assistant_text else 0)
-                    )
+                    # message_count is a dynamic API-layer value computed from ChatMessage table;
+                    # ChatSession does not have a message_count ORM column.
             logger.info(
                 f"[ACP] persist: session={session_id} "
                 f"user_len={len(user_text)} reply_len={len(assistant_text)}"
