@@ -39,9 +39,9 @@ RUN dpkg --add-architecture amd64 && \
     && apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
-# ─── 第二层：Android cmdline-tools（运行时 SDKeyError 下载 SDK 到共享卷） ───
+# ─── 第二层：Android cmdline-tools（国内镜像源下载 SDK 组件到共享卷） ───
 ARG CMDLINE_TOOLS_VERSION=15859902
-ARG CMDLINE_TOOLS_URL=https://dl.google.com/android/repository/commandlinetools-linux-${CMDLINE_TOOLS_VERSION}_latest.zip
+ARG CMDLINE_TOOLS_URL=https://mirrors.cloud.tencent.com/AndroidSDK/commandlinetools-linux-${CMDLINE_TOOLS_VERSION}_latest.zip
 
 RUN mkdir -p ${ANDROID_HOME}/cmdline-tools && \
     wget --timeout=300 --tries=3 ${CMDLINE_TOOLS_URL} -O /tmp/android_tools.zip && \
@@ -56,17 +56,28 @@ LABEL clawith.sdk-version="${CMDLINE_TOOLS_VERSION}"
 RUN yes | ${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager --licenses >/dev/null 2>&1 || true
 
 # ─── 第二层补充：预装 SDK 组件（build-tools / platforms） ───
-# 背景: 运行时容器 rootfs 只读 + 出网受限时, AGP 自动下载缺失 SDK 组件会失败
-# （dl.google.com 不可达 / $ANDROID_USER_HOME 权限问题）。
+# 背景: 运行时容器 rootfs 只读 + 出网受限时, AGP 自动下载缺失 SDK 组件会失败。
 # 预装组件利用 Docker 空卷初始化机制: 共享卷 global_android_sdk 首次挂载到 /opt/android-sdk
 # 时, 镜像层内容自动拷贝进卷 → 新部署/删卷重建后无需联网即可构建。
-# 注意: 已存在的 global_android_sdk 卷不会被镜像层刷新, 需手动 sdkmanager 补齐或删卷重建。
-# 版本通过 --build-arg 覆盖, 例如: --build-arg ANDROID_BUILD_TOOLS_VERSION=36.0.0
+# 注意: 已存在的 global_android_sdk 卷不会被镜像层刷新, 需手动补齐或删卷重建。
+# 下载源: 腾讯云镜像 (dl.google.com 直连慢/不可达)。版本通过 --build-arg 覆盖。
+# 换版本时需同步更新下方 zip 文件名与解压包装目录:
+#   build-tools → build-tools_r${API}_linux.zip（内含 android-${API} 包装目录）
+#   platforms   → platform-${API}_r${REV}.zip（内含 android-${API} 包装目录）
 ARG ANDROID_BUILD_TOOLS_VERSION=36.0.0
 ARG ANDROID_PLATFORM_VERSION=android-36
-RUN yes | ${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager \
-        "build-tools;${ANDROID_BUILD_TOOLS_VERSION}" \
-        "platforms;${ANDROID_PLATFORM_VERSION}" >/dev/null 2>&1 || true
+RUN set -eux; \
+    MIRROR="https://mirrors.cloud.tencent.com/AndroidSDK"; \
+    curl -fsSL -o /tmp/bt.zip "$MIRROR/build-tools_r36_linux.zip"; \
+    mkdir -p "${ANDROID_HOME}/build-tools/${ANDROID_BUILD_TOOLS_VERSION}"; \
+    unzip -q /tmp/bt.zip -d /tmp/bt; \
+    mv /tmp/bt/android-*/* "${ANDROID_HOME}/build-tools/${ANDROID_BUILD_TOOLS_VERSION}/"; \
+    rm -rf /tmp/bt /tmp/bt.zip; \
+    curl -fsSL -o /tmp/pl.zip "$MIRROR/platform-36_r02.zip"; \
+    mkdir -p "${ANDROID_HOME}/platforms/${ANDROID_PLATFORM_VERSION}"; \
+    unzip -q /tmp/pl.zip -d /tmp/pl; \
+    mv /tmp/pl/android-*/* "${ANDROID_HOME}/platforms/${ANDROID_PLATFORM_VERSION}/"; \
+    rm -rf /tmp/pl /tmp/pl.zip
 
 # ─── 第三层：清理 JDK 构建依赖（缩小运行时镜像） ───
 # JDK 运行时由 entrypoint.sh 的重试下载到共享卷

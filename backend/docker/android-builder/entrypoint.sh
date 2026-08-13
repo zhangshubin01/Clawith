@@ -59,7 +59,23 @@ if [ ! -d "${JDK_HOME}/bin" ]; then
     mkdir -p "${JDK_CACHE_DIR}"
     TMP_DIR=$(mktemp -d)
 
-    # 主下载尝试：Adoptium CDN（强重试参数）
+    # 主下载尝试 1：清华 tuna Adoptium 镜像（国内直连快，动态解析最新版本）
+    JDK_MIRROR_LISTING="https://mirrors.tuna.tsinghua.edu.cn/Adoptium/${JAVA_VERSION}/jdk/${ADOPTIUM_ARCH}/linux/"
+    JDK_MIRROR_FILE=$(curl -fsSL --connect-timeout 15 --max-time 30 "${JDK_MIRROR_LISTING}" 2>/dev/null \
+        | grep -oE "OpenJDK${JAVA_VERSION}U-jdk_${ADOPTIUM_ARCH}_linux_hotspot_[0-9._]+\.tar\.gz" \
+        | sort -V | tail -1 || true)
+    JDK_MIRROR_DOWNLOADED=false
+    if [ -n "$JDK_MIRROR_FILE" ]; then
+        JDK_MIRROR_URL="${JDK_MIRROR_LISTING}${JDK_MIRROR_FILE}"
+        echo "[INFO] 主下载源(国内镜像): $JDK_MIRROR_URL"
+        if curl -fsSL --retry 3 --retry-delay 5 --connect-timeout 30 --max-time 300 \
+             "$JDK_MIRROR_URL" -o "${TMP_DIR}/jdk.tar.gz"; then
+            JDK_MIRROR_DOWNLOADED=true
+        fi
+    fi
+
+    # 主下载尝试 2：Adoptium CDN（tuna 不可用时回退）
+    if [ "$JDK_MIRROR_DOWNLOADED" != "true" ]; then
     echo "[INFO] 主下载源: $JDK_URL"
     curl -fsSL --retry 3 --retry-delay 5 --connect-timeout 30 --max-time 300 \
          "$JDK_URL" -o "${TMP_DIR}/jdk.tar.gz" || {
@@ -85,6 +101,7 @@ if [ ! -d "${JDK_HOME}/bin" ]; then
             exit 1
         fi
     }
+    fi
 
     # sha256 校验（tar 之前，非阻塞：校验和下载失败时跳过）
     curl -fsSL "${JDK_URL}.sha256.txt" -o "${TMP_DIR}/jdk.sha256" 2>/dev/null || true
