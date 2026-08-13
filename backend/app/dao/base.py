@@ -174,7 +174,7 @@ def _inject_tenant_on_insert(session: Any, flush_context: Any, instances: Any) -
 
 
 @contextmanager
-def tenant_context(tenant_id: uuid.UUID):
+def tenant_context(tenant_id: uuid.UUID | None):
     """Explicitly bind a tenant_id to the current coroutine context.
 
     Use this in background workers, Celery tasks, trigger daemons, and any
@@ -182,6 +182,13 @@ def tenant_context(tenant_id: uuid.UUID):
 
         with tenant_context(tenant_id):
             agents = await agent_dao.list_scoped()
+
+    Pass ``None`` to run *without* a tenant scope (cross-tenant / platform-level
+    queries such as "which companies does this identity belong to" or resolving
+    a target user across tenants)::
+
+        with tenant_context(None):
+            users = await user_dao.get_by_identity_id(identity_id)
 
     HTTP requests are handled automatically by TenantContextMiddleware.
     """
