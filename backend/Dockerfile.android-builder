@@ -67,8 +67,8 @@ RUN apt-get remove -y --purge default-jdk-headless ca-certificates-java && \
 
 # ─── 第五层：非 root 用户 + 卷权限 ───
 RUN groupadd -r builduser -g 1000 && useradd -r -g builduser -u 1000 builduser && \
-    mkdir -p /opt/jdks /opt/android-sdk /home/builduser/.gradle && \
-    chown -R builduser:builduser /opt/jdks /opt/android-sdk /home/builduser/.gradle
+    mkdir -p /opt/jdks /opt/android-sdk /home/builduser/.gradle /home/builduser/.android && \
+    chown -R builduser:builduser /opt/jdks /opt/android-sdk /home/builduser/.gradle /home/builduser/.android
 
 # ─── P5 Fix 1: 全局强制 sqlite-jdbc aarch64 兼容版本 ───
 # 解决 Room KSP DatabaseVerifier 在 ARM64 容器的原生库缺失问题
