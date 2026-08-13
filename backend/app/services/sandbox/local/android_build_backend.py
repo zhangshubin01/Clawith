@@ -142,7 +142,7 @@ class AndroidBuildBackend(BaseSandboxBackend):
         try:
             self.client.ping()
             return True
-        except Exception as e:
+        except Exception:
             logger.opt(exception=True).error("[AndroidBuild] health_check 失败：Docker daemon 不可用")
             return False
 
@@ -272,6 +272,22 @@ class AndroidBuildBackend(BaseSandboxBackend):
                 if key.lower() in kwargs:
                     env[key] = str(kwargs[key.lower()])
 
+            # 代理透传（与 docker_backend/subprocess_backend 对齐）：
+            # 容器内 sdkmanager/AGP 联网下载缺失 SDK 组件依赖代理出口，
+            # 否则 dl.google.com 不可达导致自动下载失败
+            http_proxy = self.config.http_proxy or os.environ.get("http_proxy") or os.environ.get("HTTP_PROXY")
+            https_proxy = self.config.https_proxy or os.environ.get("https_proxy") or os.environ.get("HTTPS_PROXY")
+            no_proxy = self.config.no_proxy or os.environ.get("no_proxy") or os.environ.get("NO_PROXY")
+            if http_proxy:
+                env["http_proxy"] = http_proxy
+                env["HTTP_PROXY"] = http_proxy
+            if https_proxy:
+                env["https_proxy"] = https_proxy
+                env["HTTPS_PROXY"] = https_proxy
+            if no_proxy:
+                env["no_proxy"] = no_proxy
+                env["NO_PROXY"] = no_proxy
+
             # 卷挂载（SDK 卷只读，避免并发写入损坏）
             volumes = {
                 host_project_path: {"bind": "/workspace", "mode": "rw"},
@@ -347,7 +363,9 @@ class AndroidBuildBackend(BaseSandboxBackend):
                         "/workspace/build": "rw,exec,noatime,size=2g",
                         "/dev/shm": "rw,noexec,nosuid,size=1g",
                         "/tmp": "rw,noexec,nosuid,size=1g",
-                        "/home/builduser/.android": "rw,noexec,nosuid,size=128m",
+                        # uid/gid 必填: tmpfs 默认 root 所有, builduser (uid=1000) 写失败 →
+                        # sdkmanager 写 $ANDROID_USER_HOME 报 Permission denied (P5 Fix 2 遗漏项)
+                        "/home/builduser/.android": "rw,noexec,nosuid,size=128m,uid=1000,gid=1000",
                         # P5 Fix 2: tmpfs 覆盖冲突缓存子目录（优先级高于 volume）
                         # modules-2/ (依赖 JAR) 和 wrapper/dists/ (Gradle 发行版) 由全局卷持久化
                         "/home/builduser/.gradle/caches/build-cache-1": "rw,exec,noatime,size=1g,uid=1000,gid=1000",
