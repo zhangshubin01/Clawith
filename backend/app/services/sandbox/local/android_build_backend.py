@@ -344,10 +344,10 @@ class AndroidBuildBackend(BaseSandboxBackend):
                     # app/build 和 .gradle 不挂 tmpfs — APK 产物 + 配置缓存落在 bind mount 持久化
                     # /dev/shm 和 /tmp 也挂 tmpfs 避免容器默认的 64M shm 溢出
                     tmpfs={
-                        "/workspace/build": "rw,exec,noatime,size=2g",
+                        "/workspace/build": "rw,exec,noatime,size=2g,uid=1000,gid=1000",
                         "/dev/shm": "rw,noexec,nosuid,size=1g",
                         "/tmp": "rw,noexec,nosuid,size=1g",
-                        "/home/builduser/.android": "rw,noexec,nosuid,size=128m",
+                        "/home/builduser/.android": "rw,noexec,nosuid,size=128m,uid=1000,gid=1000",
                         # P5 Fix 2: tmpfs 覆盖冲突缓存子目录（优先级高于 volume）
                         # modules-2/ (依赖 JAR) 和 wrapper/dists/ (Gradle 发行版) 由全局卷持久化
                         "/home/builduser/.gradle/caches/build-cache-1": "rw,exec,noatime,size=1g,uid=1000,gid=1000",
