@@ -1,9 +1,10 @@
 # clawith-android-builder/Dockerfile
 # ARM64 原生构建镜像 — 零 QEMU 模拟开销
 # 构建: docker build -t clawith-android-builder:latest -f backend/Dockerfile.android-builder backend/
-# 大小: ~1.6GB（sdkmanager + 许可证 + 预装 build-tools/platforms，组件可选 --build-arg 覆盖）
+# 大小: ~2.3GB（cmdline-tools + 预装 build-tools/platforms，组件可选 --build-arg 覆盖）
+# 基础镜像走国内加速（docker.m.daocloud.io），加速器不可用时回退 docker.io
 
-FROM debian:bookworm-slim
+FROM docker.m.daocloud.io/library/debian:bookworm-slim
 
 ENV DEBIAN_FRONTEND=noninteractive \
     ANDROID_HOME=/opt/android-sdk \
