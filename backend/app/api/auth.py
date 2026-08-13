@@ -783,8 +783,16 @@ async def get_my_tenants(
     current_user: User = Depends(get_current_user),
 ):
     """Get all tenants associated with the current user's identity."""
-    # 1. Get all user records for this identity
-    users = await user_dao.get_by_identity_id(current_user.identity_id)
+    # Cross-tenant lookup: list every company this identity belongs to, so the
+    # tenant auto-injection (dao/base._inject_tenant_scope) must not filter it
+    # down to the currently-active tenant. Safe: rows are scoped to the caller's
+    # own identity_id, never another user's.
+    # arch-guard: allow (identity-scoped cross-tenant listing)
+    from app.dao.base import tenant_context
+
+    with tenant_context(None):
+        # 1. Get all user records for this identity
+        users = await user_dao.get_by_identity_id(current_user.identity_id)
 
     # 2. Extract tenant IDs
     tenant_ids = [u.tenant_id for u in users if u.tenant_id]
@@ -812,16 +820,24 @@ async def switch_tenant(
     current_user: User = Depends(get_current_user),
 ):
     """Switch to a different tenant and return a new token and redirect URL."""
-    # 1. Verify membership
-    target_user = await user_dao.get_by_identity_and_tenant(current_user.identity_id, data.tenant_id)
+    # Cross-tenant lookup: the target user record belongs to the requested
+    # tenant, which may differ from the currently-active one, so the tenant
+    # auto-injection (dao/base._inject_tenant_scope) must not filter it out.
+    # Safe: resolution is restricted to the caller's own identity_id.
+    # arch-guard: allow (identity-scoped cross-tenant switch)
+    from app.dao.base import tenant_context
 
-    if not target_user:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN, detail="You do not have access to this organization."
-        )
+    with tenant_context(None):
+        # 1. Verify membership
+        target_user = await user_dao.get_by_identity_and_tenant(current_user.identity_id, data.tenant_id)
 
-    # 2. Get tenant details
-    tenant = await tenant_dao.get(data.tenant_id)
+        if not target_user:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN, detail="You do not have access to this organization."
+            )
+
+        # 2. Get tenant details
+        tenant = await tenant_dao.get(data.tenant_id)
 
     if not tenant or not tenant.is_active:
         raise HTTPException(
