@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.audit import ChatMessage
@@ -167,8 +168,17 @@ async def ensure_primary_direct_session(
         is_primary=True,
         now=now,
     )
-    db.add(session)
-    await db.flush()
+    try:
+        async with db.begin_nested():
+            db.add(session)
+            await db.flush()
+    except IntegrityError:
+        # Advisory lock is still held on the outer transaction.
+        # Another path already created a matching session — re-query it.
+        primary = await get_primary_direct_session(db, tenant_id, agent_id, user_id)
+        if primary is not None:
+            return primary
+        raise
     return session
 
 
