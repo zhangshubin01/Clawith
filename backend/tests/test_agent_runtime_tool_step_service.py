@@ -1,5 +1,6 @@
 """Receipt-backed Runtime tool-step tests."""
 
+import asyncio
 from contextlib import asynccontextmanager
 from collections import deque
 import uuid
@@ -280,6 +281,7 @@ def _service(
     *,
     a2a_service=None,
     tool_result_reconciler=None,
+    lease_ttl_seconds: int = 300,
 ) -> tool_step_service.RuntimeToolStepService:
     return tool_step_service.RuntimeToolStepService(
         session_factory=_session_factory(agent),
@@ -288,6 +290,7 @@ def _service(
         tool_executor=executor,
         a2a_service=a2a_service,
         tool_result_reconciler=tool_result_reconciler,
+        lease_ttl_seconds=lease_ttl_seconds,
     )
 
 
@@ -3635,4 +3638,159 @@ async def test_group_cross_space_policy_does_not_change_other_tool_paths(
 
     assert result.error is None
     assert dispatched == [tool_name]
+    assert result.messages[0]["execution_status"] == "succeeded"
+
+
+async def _renewal_test_setup(
+    monkeypatch,
+    *,
+    executor_sleep: float,
+    lease_ttl_seconds: int,
+) -> tuple[list[dict], object, dict]:
+    tenant_id = uuid.uuid4()
+    agent = _agent(tenant_id)
+    call = _call("call-1", "read_file")
+    state = _state(tenant_id, agent, (call,))
+    context = _context(state)
+    run_id = context.run_id
+    execution = _execution(tenant_id, uuid.UUID(run_id), "call-1", "read_file")
+    state.pop("registry")
+
+    async def reserve(db, **kwargs):
+        del db
+        return _reservation(execution)
+
+    async def execute(name, arguments, agent_id, user_id, session_id="", on_output=None):
+        del name, arguments, agent_id, user_id, session_id, on_output
+        await asyncio.sleep(executor_sleep)
+        return ToolExecutionOutcome(
+            status="succeeded",
+            result_summary="file contents",
+            result_ref=None,
+        )
+
+    async def mark(db, **kwargs):
+        del db, kwargs
+        execution.status = "succeeded"
+        execution.result_summary = "file contents"
+        return execution
+
+    monkeypatch.setattr(tool_step_service, "reserve_tool_execution", reserve)
+    monkeypatch.setattr(tool_step_service, "mark_tool_execution_succeeded", mark)
+
+    calls: list[dict] = []
+
+    async def renew_counting(db, **kwargs):
+        del db
+        calls.append(dict(kwargs))
+        return execution
+
+    monkeypatch.setattr(tool_step_service, "renew_tool_execution_lease", renew_counting)
+
+    service = _service(
+        agent,
+        _CancelSource(None),
+        execute,
+        lease_ttl_seconds=lease_ttl_seconds,
+    )
+    return calls, service, {
+        "state": state,
+        "context": context,
+        "call": call,
+        "execution": execution,
+    }
+
+
+@pytest.mark.asyncio
+async def test_tool_lease_is_renewed_while_long_handler_runs(monkeypatch) -> None:
+    """A live executor keeps its lease fresh so the reconciler leaves it alone."""
+    calls, service, args = await _renewal_test_setup(
+        monkeypatch,
+        executor_sleep=2.6,
+        lease_ttl_seconds=2,
+    )
+
+    result = await service.execute_pending(args["state"], args["context"], (args["call"],))
+
+    assert result.error is None
+    assert result.messages[0]["execution_status"] == "succeeded"
+    # interval = max(1.0, 2/3) = 1.0s; a 2.6s handler must renew at least once.
+    assert len(calls) >= 1
+    assert all(
+        c["lease_ttl_seconds"] == 2
+        and c["execution_id"] == args["execution"].id
+        and c["tenant_id"] == uuid.UUID(args["context"].tenant_id)
+        and isinstance(c["lease_owner"], str)
+        for c in calls
+    )
+
+
+@pytest.mark.asyncio
+async def test_tool_lease_renewal_stops_after_handler_returns(monkeypatch) -> None:
+    calls, service, args = await _renewal_test_setup(
+        monkeypatch,
+        executor_sleep=1.6,
+        lease_ttl_seconds=2,
+    )
+
+    await service.execute_pending(args["state"], args["context"], (args["call"],))
+    renewals_at_settle = len(calls)
+
+    # The renewal task must be stopped after settlement: no more DB renewals.
+    await asyncio.sleep(1.6)
+    assert len(calls) == renewals_at_settle
+
+
+@pytest.mark.asyncio
+async def test_tool_lease_renewal_failure_does_not_break_the_tool(monkeypatch) -> None:
+    """Renewal failures (e.g. takeover) must not corrupt the tool outcome."""
+
+    def _setup() -> tuple[list[dict], object, dict]:
+        tenant_id = uuid.uuid4()
+        agent = _agent(tenant_id)
+        call = _call("call-1", "read_file")
+        state = _state(tenant_id, agent, (call,))
+        context = _context(state)
+        run_id = context.run_id
+        execution = _execution(tenant_id, uuid.UUID(run_id), "call-1", "read_file")
+        state.pop("registry")
+
+        async def reserve(db, **kwargs):
+            del db
+            return _reservation(execution)
+
+        async def execute(name, arguments, agent_id, user_id, session_id="", on_output=None):
+            del name, arguments, agent_id, user_id, session_id, on_output
+            await asyncio.sleep(1.6)
+            return ToolExecutionOutcome(
+                status="succeeded",
+                result_summary="file contents",
+                result_ref=None,
+            )
+
+        async def mark(db, **kwargs):
+            del db, kwargs
+            execution.status = "succeeded"
+            execution.result_summary = "file contents"
+            return execution
+
+        async def renew_raising(db, **kwargs):
+            del db, kwargs
+            raise RuntimeError("lease lost")
+
+        monkeypatch.setattr(tool_step_service, "reserve_tool_execution", reserve)
+        monkeypatch.setattr(tool_step_service, "mark_tool_execution_succeeded", mark)
+        monkeypatch.setattr(tool_step_service, "renew_tool_execution_lease", renew_raising)
+
+        return [], _service(agent, _CancelSource(None), execute, lease_ttl_seconds=2), {
+            "state": state,
+            "context": context,
+            "call": call,
+        }
+
+    _, service, args = _setup()
+
+    result = await service.execute_pending(args["state"], args["context"], (args["call"],))
+
+    assert result.error is None
     assert result.messages[0]["execution_status"] == "succeeded"
