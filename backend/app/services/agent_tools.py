@@ -40,6 +40,7 @@ from app.core.permissions import (
     evaluate_roster_human_visibility,
 )
 from app.database import async_session
+from urllib.parse import urlsplit
 
 from app.config import get_settings
 _FEISHU_BASE = get_settings().FEISHU_DOMAIN
@@ -747,7 +748,7 @@ async def _agent_has_any_channel(agent_id: uuid.UUID) -> bool:
             r = await db.execute(
                 select(ChannelConfig).where(
                     ChannelConfig.agent_id == agent_id,
-                    ChannelConfig.is_configured == True,
+                    ChannelConfig.is_configured,
                 )
             )
             return r.scalar_one_or_none() is not None
@@ -817,7 +818,7 @@ async def get_agent_tools_for_llm(agent_id: uuid.UUID) -> list[dict]:
 
             visible_clauses = [Tool.source == "builtin"]
             # Admin tools: visible if they are global (tenant_id is NULL) or belong to the agent's tenant
-            admin_cond = (Tool.tenant_id == None)
+            admin_cond = (Tool.tenant_id is None)
             if agent_tenant_id:
                 admin_cond = admin_cond | (Tool.tenant_id == agent_tenant_id)
             visible_clauses.append((Tool.source == "admin") & admin_cond)
@@ -827,7 +828,7 @@ async def get_agent_tools_for_llm(agent_id: uuid.UUID) -> list[dict]:
 
             # Get all tools visible within this agent's tenant boundary.
             all_tools_r = await db.execute(
-                select(Tool).where(Tool.enabled == True, or_(*visible_clauses))
+                select(Tool).where(Tool.enabled, or_(*visible_clauses))
             )
             all_tools = all_tools_r.scalars().all()
 
@@ -2819,7 +2820,7 @@ async def _android_compile_outcome(
 
     # 沙箱路由：合并四层配置（builtin → DB → env）
     from app.config import get_sandbox_config
-    from app.services.sandbox.config import SandboxConfig, SandboxType
+    from app.services.sandbox.config import SandboxConfig
     from app.services.sandbox.registry import get_sandbox_backend
 
     tool_config = await _get_tool_config(agent_id, "android_compile")
@@ -9288,7 +9289,7 @@ async def _send_slack_message(
                 select(ChannelConfig).where(
                     ChannelConfig.agent_id == agent_id,
                     ChannelConfig.channel_type == "slack",
-                    ChannelConfig.is_configured == True,
+                    ChannelConfig.is_configured,
                 )
             )
             config = config_result.scalar_one_or_none()
@@ -9371,7 +9372,7 @@ async def _send_teams_channel_message(
                 select(ChannelConfig).where(
                     ChannelConfig.agent_id == agent_id,
                     ChannelConfig.channel_type == "microsoft_teams",
-                    ChannelConfig.is_configured == True,
+                    ChannelConfig.is_configured,
                 )
             )
             config = config_result.scalar_one_or_none()
@@ -9396,7 +9397,7 @@ async def _send_teams_channel_message(
                     ChatSession.agent_id == agent_id,
                     ChatSession.user_id == platform_user.id,
                     ChatSession.source_channel == "microsoft_teams",
-                    ChatSession.is_group == False,
+                    not ChatSession.is_group,
                 )
                 .order_by(ChatSession.last_message_at.desc(), ChatSession.created_at.desc())
                 .limit(1)
@@ -9451,7 +9452,7 @@ async def _send_wechat_channel_message(
                 select(ChannelConfig).where(
                     ChannelConfig.agent_id == agent_id,
                     ChannelConfig.channel_type == "wechat",
-                    ChannelConfig.is_configured == True,
+                    ChannelConfig.is_configured,
                 )
             )
             config = config_result.scalar_one_or_none()
@@ -10220,7 +10221,6 @@ async def _plaza_add_comment(agent_id: uuid.UUID, arguments: dict) -> str:
                 mentions = re.findall(r'@(\S+)', content)
                 if mentions:
                     from app.services.notification_service import send_notification
-                    from app.models.user import User
                     # Load agents in tenant
                     a_q = select(AgentModel).where(AgentModel.id != agent_id)
                     if agent.tenant_id:
@@ -11017,7 +11017,7 @@ async def _handle_set_trigger_outcome(
             result = await db.execute(
                 select(sa_func.count()).select_from(AgentTrigger).where(
                     AgentTrigger.agent_id == agent_id,
-                    AgentTrigger.is_enabled == True,
+                    AgentTrigger.is_enabled,
                 )
             )
             count = result.scalar() or 0
@@ -11214,7 +11214,7 @@ async def _handle_update_trigger_outcome(
                         "invalid_tool_arguments",
                     )
                 trigger.reason = new_reason
-                changes.append(f"reason updated")
+                changes.append("reason updated")
 
             commit_started = True
             await db.commit()
@@ -12478,7 +12478,7 @@ async def _get_feishu_token(agent_id: uuid.UUID) -> tuple[str, str] | None:
             select(ChannelConfig).where(
                 ChannelConfig.agent_id == agent_id,
                 ChannelConfig.channel_type == "feishu",
-                ChannelConfig.is_configured == True,
+                ChannelConfig.is_configured,
             )
         )
         config = result.scalar_one_or_none()
@@ -12591,6 +12591,19 @@ async def _get_feishu_credentials(agent_id: uuid.UUID) -> tuple[str, str]:
     return app_id, app_secret
 
 
+def _feishu_site_domain(base: str | None = None) -> str:
+    """Derive the user-facing site domain from the API gateway domain.
+
+    open.larksuite.com -> larksuite.com ; open.feishu.cn -> feishu.cn.
+    Used as fallback when tenant domain resolution fails; returns feishu.cn
+    when the gateway domain cannot be parsed.
+    """
+    netloc = urlsplit(base or _FEISHU_BASE).netloc
+    if netloc.startswith("open."):
+        netloc = netloc[len("open.") :]
+    return netloc or "feishu.cn"
+
+
 async def _get_feishu_tenant_doc_url(tenant_token: str, doc_token: str, doc_type: str = "docx") -> str:
     """Build a user-accessible document URL using the tenant's actual domain.
 
@@ -12620,7 +12633,7 @@ async def _get_feishu_tenant_doc_url(tenant_token: str, doc_token: str, doc_type
     except Exception:
         pass
     # Fallback: construct a search URL so the user can locate the document
-    return f"https://feishu.cn/{doc_type}/{doc_token}"
+    return f"https://{_feishu_site_domain()}/{doc_type}/{doc_token}"
 
 
 
@@ -12629,7 +12642,7 @@ async def _get_feishu_bitable_url(tenant_token: str, app_token: str, table_id: s
     """Build a user-accessible Bitable URL using the tenant's actual domain.
 
     Constructs https://{tenant_domain}/base/{app_token}?table={table_id}
-    Falls back to https://feishu.cn/base/{app_token} if domain resolution fails.
+    Falls back to the site domain derived from FEISHU_DOMAIN if resolution fails.
 
     Args:
         tenant_token: A valid tenant_access_token.
@@ -12656,7 +12669,7 @@ async def _get_feishu_bitable_url(tenant_token: str, app_token: str, table_id: s
     except Exception:
         pass
     # Fallback
-    base_url = f"https://feishu.cn/base/{app_token}"
+    base_url = f"https://{_feishu_site_domain()}/base/{app_token}"
     if table_id:
         base_url += f"?table={table_id}"
     return base_url
@@ -12679,7 +12692,7 @@ def _parse_feishu_url(url: str) -> dict:
         result['table_id'] = table_match.group(1)
 
     # support URL with /tblxxxxxx
-    if not 'table_id' in result:
+    if 'table_id' not in result:
         tbl_match = re.search(r'/(tbl[a-zA-Z0-9_]+)', url)
         if tbl_match:
             result['table_id'] = tbl_match.group(1)
@@ -14900,7 +14913,7 @@ async def _feishu_wiki_list(agent_id: uuid.UUID, arguments: dict) -> str:
 
     space_id = node_info["space_id"]
     if not space_id:
-        return f"❌ 无法获取知识库 space_id，请检查 token 是否正确。"
+        return "❌ 无法获取知识库 space_id，请检查 token 是否正确。"
 
     async def _list_children(parent_token: str, depth: int) -> list[dict]:
         """Return flat list of {title, node_token, obj_token, has_child, depth}."""
@@ -15491,8 +15504,8 @@ async def _feishu_drive_share(agent_id: uuid.UUID, arguments: dict) -> str:
                         # Feishu platform policy: you cannot add yourself as a collaborator via API.
                         # Permissions must be granted by others, or set manually in the UI.
                         results.append(
-                            f"⚠️ 飞书平台安全限制：无法通过 API 为自己添加协作权限。\n"
-                            f"请手动操作：打开文档 → 右上角「分享」→ 添加自己并设置权限。"
+                            "⚠️ 飞书平台安全限制：无法通过 API 为自己添加协作权限。\n"
+                            "请手动操作：打开文档 → 右上角「分享」→ 添加自己并设置权限。"
                         )
                     elif _c in (99991672, 99991668):
                         return (
@@ -15602,7 +15615,7 @@ async def _feishu_drive_delete(agent_id: uuid.UUID, arguments: dict) -> str:
         elif code == 1061007:
             return f"❌ 文件 `{file_token}` 已被删除。"
         elif code == 1061045:
-            return f"⚠️ 接口频率限制，请稍后重试。（每秒最多 5 次）"
+            return "⚠️ 接口频率限制，请稍后重试。（每秒最多 5 次）"
         else:
             return f"❌ 删除{type_label}失败：{msg} (code {code})"
 
@@ -16141,7 +16154,7 @@ async def _feishu_calendar_list(agent_id: uuid.UUID, arguments: dict) -> str:
                             busy_lines.append(f"  🔴 {s}–{e}")
                         except Exception:
                             busy_lines.append(f"  🔴 {slot.get('start_time')}–{slot.get('end_time')}")
-                    freebusy_section = f"\n📌 **用户真实日历（忙碌时段）**：\n" + "\n".join(busy_lines)
+                    freebusy_section = "\n📌 **用户真实日历（忙碌时段）**：\n" + "\n".join(busy_lines)
                 else:
                     freebusy_section = "\n📌 **用户真实日历**：该时段全部空闲。"
         except Exception as _fe:
@@ -18761,7 +18774,7 @@ async def _agentbay_browser_click(agent_id: Optional[uuid.UUID], ws: Path, argum
     except RuntimeError as e:
         return f"❌ {str(e)}"
     except Exception as e:
-        logger.exception(f"[AgentBay] Browser click failed")
+        logger.exception("[AgentBay] Browser click failed")
         return f"❌ 点击失败: {str(e)[:200]}"
 
 
@@ -18783,7 +18796,7 @@ async def _agentbay_browser_type(agent_id: Optional[uuid.UUID], ws: Path, argume
     except RuntimeError as e:
         return f"❌ {str(e)}"
     except Exception as e:
-        logger.exception(f"[AgentBay] Browser type failed")
+        logger.exception("[AgentBay] Browser type failed")
         return f"❌ 输入失败: {str(e)[:200]}"
 
 
@@ -19821,7 +19834,7 @@ async def _agentbay_computer_click(agent_id: Optional[uuid.UUID], ws: Path, argu
     except RuntimeError as e:
         return f"{str(e)}"
     except Exception as e:
-        logger.exception(f"[AgentBay] Computer click failed")
+        logger.exception("[AgentBay] Computer click failed")
         return f"Click failed: {str(e)[:200]}"
 
 
@@ -19842,11 +19855,11 @@ async def _agentbay_computer_input_text(agent_id: Optional[uuid.UUID], ws: Path,
         result = await client.computer_input_text(text)
         if result.get("success"):
             return f"Typed text: {text[:100]}"
-        return f"Text input failed"
+        return "Text input failed"
     except RuntimeError as e:
         return f"{str(e)}"
     except Exception as e:
-        logger.exception(f"[AgentBay] Computer input_text failed")
+        logger.exception("[AgentBay] Computer input_text failed")
         return f"Text input failed: {str(e)[:200]}"
 
 
@@ -19874,7 +19887,7 @@ async def _agentbay_computer_press_keys(agent_id: Optional[uuid.UUID], ws: Path,
     except RuntimeError as e:
         return f"{str(e)}"
     except Exception as e:
-        logger.exception(f"[AgentBay] Computer press_keys failed")
+        logger.exception("[AgentBay] Computer press_keys failed")
         return f"Key press failed: {str(e)[:200]}"
 
 
@@ -19896,11 +19909,11 @@ async def _agentbay_computer_scroll(agent_id: Optional[uuid.UUID], ws: Path, arg
         result = await client.computer_scroll(x, y, direction=direction, amount=amount)
         if result.get("success"):
             return f"Scrolled {direction} by {amount} step(s) at ({x}, {y})"
-        return f"Scroll failed"
+        return "Scroll failed"
     except RuntimeError as e:
         return f"{str(e)}"
     except Exception as e:
-        logger.exception(f"[AgentBay] Computer scroll failed")
+        logger.exception("[AgentBay] Computer scroll failed")
         return f"Scroll failed: {str(e)[:200]}"
 
 
@@ -19920,11 +19933,11 @@ async def _agentbay_computer_move_mouse(agent_id: Optional[uuid.UUID], ws: Path,
         result = await client.computer_move_mouse(x, y)
         if result.get("success"):
             return f"Mouse moved to ({x}, {y})"
-        return f"Mouse move failed"
+        return "Mouse move failed"
     except RuntimeError as e:
         return f"{str(e)}"
     except Exception as e:
-        logger.exception(f"[AgentBay] Computer move_mouse failed")
+        logger.exception("[AgentBay] Computer move_mouse failed")
         return f"Mouse move failed: {str(e)[:200]}"
 
 
@@ -19947,11 +19960,11 @@ async def _agentbay_computer_drag_mouse(agent_id: Optional[uuid.UUID], ws: Path,
         result = await client.computer_drag_mouse(from_x, from_y, to_x, to_y, button=button)
         if result.get("success"):
             return f"Dragged from ({from_x}, {from_y}) to ({to_x}, {to_y})"
-        return f"Drag failed"
+        return "Drag failed"
     except RuntimeError as e:
         return f"{str(e)}"
     except Exception as e:
-        logger.exception(f"[AgentBay] Computer drag_mouse failed")
+        logger.exception("[AgentBay] Computer drag_mouse failed")
         return f"Drag failed: {str(e)[:200]}"
 
 
@@ -19975,7 +19988,7 @@ async def _agentbay_computer_get_screen_size(agent_id: Optional[uuid.UUID], ws: 
     except RuntimeError as e:
         return f"{str(e)}"
     except Exception as e:
-        logger.exception(f"[AgentBay] Computer get_screen_size failed")
+        logger.exception("[AgentBay] Computer get_screen_size failed")
         return f"Get screen size failed: {str(e)[:200]}"
 
 
@@ -20019,7 +20032,7 @@ async def _agentbay_computer_start_app(agent_id: Optional[uuid.UUID], ws: Path, 
     except RuntimeError as e:
         return f"{str(e)}"
     except Exception as e:
-        logger.exception(f"[AgentBay] Computer start_app failed")
+        logger.exception("[AgentBay] Computer start_app failed")
         return f"Start application failed: {str(e)[:200]}"
 
 
@@ -20055,7 +20068,7 @@ async def _agentbay_computer_get_installed_apps(agent_id: Optional[uuid.UUID], w
     except RuntimeError as e:
         return f"{str(e)}"
     except Exception as e:
-        logger.exception(f"[AgentBay] Computer get_installed_apps failed")
+        logger.exception("[AgentBay] Computer get_installed_apps failed")
         return f"Get installed applications failed: {str(e)[:200]}"
 
 
@@ -20079,7 +20092,7 @@ async def _agentbay_computer_get_cursor_position(agent_id: Optional[uuid.UUID], 
     except RuntimeError as e:
         return f"{str(e)}"
     except Exception as e:
-        logger.exception(f"[AgentBay] Computer get_cursor_position failed")
+        logger.exception("[AgentBay] Computer get_cursor_position failed")
         return f"Get cursor position failed: {str(e)[:200]}"
 
 
@@ -20103,7 +20116,7 @@ async def _agentbay_computer_get_active_window(agent_id: Optional[uuid.UUID], ws
     except RuntimeError as e:
         return f"{str(e)}"
     except Exception as e:
-        logger.exception(f"[AgentBay] Computer get_active_window failed")
+        logger.exception("[AgentBay] Computer get_active_window failed")
         return f"Get active window failed: {str(e)[:200]}"
 
 
@@ -20128,7 +20141,7 @@ async def _agentbay_computer_activate_window(agent_id: Optional[uuid.UUID], ws: 
     except RuntimeError as e:
         return f"{str(e)}"
     except Exception as e:
-        logger.exception(f"[AgentBay] Computer activate_window failed")
+        logger.exception("[AgentBay] Computer activate_window failed")
         return f"Activate window failed: {str(e)[:200]}"
 
 
@@ -20163,7 +20176,7 @@ async def _agentbay_computer_list_windows(agent_id: Optional[uuid.UUID], ws: Pat
     except RuntimeError as e:
         return f"{str(e)}"
     except Exception as e:
-        logger.exception(f"[AgentBay] Computer list_windows failed")
+        logger.exception("[AgentBay] Computer list_windows failed")
         return f"List windows failed: {str(e)[:200]}"
 
 
@@ -20232,7 +20245,7 @@ async def _agentbay_computer_close_window(agent_id: Optional[uuid.UUID], ws: Pat
         except RuntimeError as e:
             return f"{str(e)}"
         except Exception as e:
-            logger.exception(f"[AgentBay] Computer close_window candidate lookup failed")
+            logger.exception("[AgentBay] Computer close_window candidate lookup failed")
             return f"Close window requires window_id. Candidate lookup failed: {str(e)[:200]}"
 
     try:
@@ -20248,7 +20261,7 @@ async def _agentbay_computer_close_window(agent_id: Optional[uuid.UUID], ws: Pat
     except RuntimeError as e:
         return f"{str(e)}"
     except Exception as e:
-        logger.exception(f"[AgentBay] Computer close_window failed")
+        logger.exception("[AgentBay] Computer close_window failed")
         return f"Close window failed: {str(e)[:200]}"
 
 
@@ -20294,7 +20307,7 @@ async def _agentbay_computer_dismiss_dialog(agent_id: Optional[uuid.UUID], ws: P
     except RuntimeError as e:
         return f"{str(e)}"
     except Exception as e:
-        logger.exception(f"[AgentBay] Computer dismiss_dialog failed")
+        logger.exception("[AgentBay] Computer dismiss_dialog failed")
         return f"Dismiss dialog failed: {str(e)[:200]}"
 
 
@@ -20320,7 +20333,7 @@ async def _agentbay_computer_list_visible_apps(agent_id: Optional[uuid.UUID], ws
     except RuntimeError as e:
         return f"{str(e)}"
     except Exception as e:
-        logger.exception(f"[AgentBay] Computer list_visible_apps failed")
+        logger.exception("[AgentBay] Computer list_visible_apps failed")
         return f"List applications failed: {str(e)[:200]}"
 
 
@@ -22790,7 +22803,7 @@ async def _update_any_kr_progress(agent_id: uuid.UUID | None, user_id: uuid.UUID
 
             return f"Successfully updated KR '{kr.title}'. Progress: {old_val} -> {kr.current_value} {kr.unit or ''}. Status: {kr.status}"
     except Exception as e:
-        logger.exception(f"[OKR] update_any_kr_progress failed")
+        logger.exception("[OKR] update_any_kr_progress failed")
         return f"Failed to update kr progress: {str(e)[:200]}"
 
 
