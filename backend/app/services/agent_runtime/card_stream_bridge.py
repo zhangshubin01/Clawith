@@ -294,8 +294,10 @@ class CardStreamBridge:
 
         MD5-deduplicated; no-op if the bridge is no longer streaming.
         """
-        await self._card_ready.wait()  # wait for card creation (no-op once set)
-        if not self._streaming or not self.card_id:
+        if not self._streaming:
+            return
+        await self._card_ready.wait()  # no-op once set by start()
+        if not self.card_id:
             return
 
         # Truncate at 100K chars (Feishu practical limit, per deepthink).
@@ -562,9 +564,9 @@ class CardStreamBridge:
 
     async def push_thinking(self, content: str) -> None:
         """累积思考增量；由 aux flush 统一推送到思考面板。"""
-        await self._card_ready.wait()
         if not self._streaming:
             return
+        await self._card_ready.wait()
         self._thinking_text += content
         if not self._thinking_text.strip():
             return
