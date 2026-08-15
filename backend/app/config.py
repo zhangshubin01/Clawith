@@ -146,6 +146,7 @@ class Settings(BaseSettings):
     AGENT_RUNTIME_RECURSION_LIMIT: int = Field(default=200, gt=0)
     AGENT_RUNTIME_COMMAND_MAX_ATTEMPTS: int = Field(default=5, gt=0)
     AGENT_RUNTIME_ASYNC_TOOL_POLL_SCAN_SECONDS: float = Field(default=0.25, gt=0)
+    AGENT_RUNTIME_TOOL_LEASE_RECONCILE_SCAN_SECONDS: float = Field(default=1.0, gt=0)
     AGENT_RUNTIME_CHANNEL_DELIVERY_CLAIM_TTL_SECONDS: int = Field(default=120, gt=0)
     AGENT_RUNTIME_CHANNEL_DELIVERY_MAX_ATTEMPTS: int = Field(default=8, gt=0)
     AGENT_RUNTIME_CHANNEL_DELIVERY_SCAN_SECONDS: float = Field(default=0.5, gt=0)
