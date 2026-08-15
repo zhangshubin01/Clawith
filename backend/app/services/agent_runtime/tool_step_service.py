@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Awaitable, Callable, Mapping, Sequence
+from contextlib import suppress
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 import hashlib
@@ -11,6 +13,7 @@ import time
 from typing import Protocol, cast
 import uuid
 
+from loguru import logger
 from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert
 
@@ -67,6 +70,7 @@ from app.services.agent_runtime.tool_execution import (
     mark_tool_execution_succeeded,
     mark_tool_execution_unknown,
     normalize_tool_outcome,
+    renew_tool_execution_lease,
     reserve_tool_execution,
     sanitize_tool_arguments,
     settle_async_operation_executions,
@@ -1003,6 +1007,70 @@ class RuntimeToolStepService:
                     lease_ttl_seconds=self._lease_ttl_seconds,
                 )
 
+    def _start_tool_lease_renewal(
+        self,
+        *,
+        tenant_id: uuid.UUID,
+        execution_id: uuid.UUID,
+        lease_owner: str,
+    ) -> tuple[asyncio.Event, asyncio.Task[None]]:
+        """Renew a started execution's lease while its handler runs.
+
+        Long-running tools (android_compile allows up to 30 minutes) outlive
+        the default 300-second lease. The tool lease reconciler treats an
+        expired lease as a dead executor, so a live executor must keep its
+        lease fresh. A background task renews every ``lease_ttl / 3``
+        seconds; a failed renewal (for example the execution was taken over)
+        logs a warning and stops the loop without interrupting the tool call.
+        """
+        interval = max(1.0, self._lease_ttl_seconds / 3)
+        stop = asyncio.Event()
+
+        async def _renew_loop() -> None:
+            while not stop.is_set():
+                try:
+                    await asyncio.wait_for(stop.wait(), timeout=interval)
+                except asyncio.TimeoutError:
+                    pass
+                if stop.is_set():
+                    break
+                try:
+                    async with self._session_factory() as db:
+                        async with db.begin():
+                            await renew_tool_execution_lease(
+                                db,
+                                tenant_id=tenant_id,
+                                execution_id=execution_id,
+                                lease_owner=lease_owner,
+                                lease_ttl_seconds=self._lease_ttl_seconds,
+                            )
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    logger.warning(
+                        "[ToolLeaseRenewal] execution={} stopped renewing: {}",
+                        execution_id,
+                        exc,
+                    )
+                    break
+
+        task = asyncio.create_task(
+            _renew_loop(),
+            name=f"tool-lease-renew:{execution_id}",
+        )
+        return stop, task
+
+    async def _stop_tool_lease_renewal(
+        self,
+        stop: asyncio.Event,
+        task: asyncio.Task[None],
+    ) -> None:
+        """Stop the renewal loop and wait for it to exit."""
+        stop.set()
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+
     async def _mark_exception(
         self,
         *,
@@ -1736,6 +1804,11 @@ class RuntimeToolStepService:
                         )
                         continue
 
+                renew_stop, renew_task = self._start_tool_lease_renewal(
+                    tenant_id=tenant_id,
+                    execution_id=reservation.execution.id,
+                    lease_owner=lease_owner,
+                )
                 try:
                     if tool_name in GROUP_TOOL_NAMES:
                         if tool_name in GROUP_WORKSPACE_MUTATION_TOOL_NAMES:
@@ -1907,6 +1980,8 @@ class RuntimeToolStepService:
                                 "Group workspace ledger settlement requires reconciliation"
                             ) from exc
                         raise
+                finally:
+                    await self._stop_tool_lease_renewal(renew_stop, renew_task)
                 if outcome.status == "pending":
                     return _async_pending_step_result(
                         run_id=run_id,
