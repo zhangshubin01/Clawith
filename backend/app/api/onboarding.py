@@ -1,6 +1,6 @@
-from typing import Any
 """Company onboarding APIs."""
 
+import logging
 import uuid
 from datetime import datetime, timezone
 
@@ -11,6 +11,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.dao import query_dao
+from app.config import get_settings
 from app.core.security import get_current_user
 from app.database import get_db
 from app.models.agent import Agent, AgentPermission, AgentTemplate
@@ -22,6 +23,9 @@ from app.models.user import User
 from app.services.access_relationships import ensure_access_granted_platform_relationships
 
 router = APIRouter(prefix="/onboarding", tags=["onboarding"])
+
+settings = get_settings()
+logger = logging.getLogger(__name__)
 
 
 class OnboardingStartRequest(BaseModel):
