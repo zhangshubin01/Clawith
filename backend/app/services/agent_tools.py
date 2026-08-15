@@ -818,7 +818,7 @@ async def get_agent_tools_for_llm(agent_id: uuid.UUID) -> list[dict]:
 
             visible_clauses = [Tool.source == "builtin"]
             # Admin tools: visible if they are global (tenant_id is NULL) or belong to the agent's tenant
-            admin_cond = (Tool.tenant_id is None)
+            admin_cond = Tool.tenant_id.is_(None)
             if agent_tenant_id:
                 admin_cond = admin_cond | (Tool.tenant_id == agent_tenant_id)
             visible_clauses.append((Tool.source == "admin") & admin_cond)
@@ -9397,7 +9397,7 @@ async def _send_teams_channel_message(
                     ChatSession.agent_id == agent_id,
                     ChatSession.user_id == platform_user.id,
                     ChatSession.source_channel == "microsoft_teams",
-                    not ChatSession.is_group,
+                    ChatSession.is_group.is_(False),
                 )
                 .order_by(ChatSession.last_message_at.desc(), ChatSession.created_at.desc())
                 .limit(1)
