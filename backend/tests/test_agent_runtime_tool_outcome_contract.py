@@ -90,7 +90,9 @@ class _DB:
         self.results = deque(results)
 
     async def execute(self, statement):
-        del statement
+        if "agent_run_commands" in str(statement):
+            # Stale-resume supersede UPDATE issued by terminal settle helpers.
+            return _ScalarResult(None)
         value = self.results.popleft()
         return value
 

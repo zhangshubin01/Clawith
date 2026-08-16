@@ -63,6 +63,10 @@ class _FakeSession:
     async def execute(self, statement):
         self.statements.append(statement)
         if not self.results:
+            if "agent_run_commands" in str(statement):
+                # Supersede UPDATE issued by terminal settle helpers; benign
+                # for legacy tests that only queue the ledger query results.
+                return _ScalarResult(None)
             raise AssertionError("unexpected database execute")
         return _ScalarResult(self.results.popleft())
 
@@ -746,7 +750,45 @@ async def test_expired_safe_read_closes_only_after_result_probe_is_unavailable()
     assert closed.lease_owner is None
     assert closed.lease_expires_at is None
     assert closed.completed_at == _NOW
-    assert db.flush_count == 1
+    # Ledger row flush + stale-resume supersede flush.
+    assert db.flush_count == 2
+
+
+@pytest.mark.asyncio
+async def test_safe_read_probe_close_rejects_pending_resume_commands():
+    tenant_id = uuid.uuid4()
+    run_id = uuid.uuid4()
+    execution = _execution(
+        tenant_id=tenant_id,
+        run_id=run_id,
+        status="started",
+        effect="read",
+        retry_policy="safe",
+    )
+    execution.attempt_count = 1
+    execution.lease_expires_at = _NOW - timedelta(seconds=1)
+    db = _FakeSession(execution)
+
+    closed = await tool_execution.mark_expired_safe_read_result_unavailable(
+        db,
+        tenant_id=tenant_id,
+        execution_id=execution.id,
+        probe_error_code="tool_result_unreadable",
+        clock=lambda: _NOW,
+    )
+
+    assert closed.status == "failed"
+    supersede_updates = [
+        statement
+        for statement in db.statements
+        if "agent_run_commands" in str(statement)
+    ]
+    assert len(supersede_updates) == 1
+    supersede_sql = _sql(supersede_updates[0])
+    assert "UPDATE agent_run_commands" in supersede_sql
+    assert "superseded_tool_execution" in supersede_sql
+    assert "'rejected'" in supersede_sql
+    assert "tool_call_id" in supersede_sql
 
 
 @pytest.mark.asyncio
@@ -890,7 +932,8 @@ async def test_terminal_transition_requires_row_lock_and_current_owner():
     assert execution.result_ref == "message://42"
     assert execution.completed_at == _NOW
     assert execution.lease_expires_at is None
-    assert db.flush_count == 1
+    # Ledger row flush + stale-resume supersede flush.
+    assert db.flush_count == 2
     sql = _sql(db.statements[0])
     assert "agent_tool_executions.tenant_id" in sql
     assert "agent_tool_executions.id" in sql
@@ -908,6 +951,37 @@ async def test_terminal_transition_requires_row_lock_and_current_owner():
         )
     assert exc_info.value.code == "tool_execution_lease_lost"
     assert wrong_owner_db.flush_count == 0
+
+
+@pytest.mark.asyncio
+async def test_terminal_settle_rejects_pending_resume_commands():
+    tenant_id = uuid.uuid4()
+    run_id = uuid.uuid4()
+    execution = _execution(tenant_id=tenant_id, run_id=run_id, status="started")
+    db = _FakeSession(execution)
+
+    closed = await tool_execution.mark_tool_execution_failed(
+        db,
+        tenant_id=tenant_id,
+        execution_id=execution.id,
+        lease_owner="worker-1",
+        result_summary="provider error",
+        error_code="provider_call_failed",
+        clock=lambda: _NOW,
+    )
+
+    assert closed.status == "failed"
+    supersede_updates = [
+        statement
+        for statement in db.statements
+        if "agent_run_commands" in str(statement)
+    ]
+    assert len(supersede_updates) == 1
+    supersede_sql = _sql(supersede_updates[0])
+    assert "UPDATE agent_run_commands" in supersede_sql
+    assert "superseded_tool_execution" in supersede_sql
+    assert "'rejected'" in supersede_sql
+    assert "tool_call_id" in supersede_sql
 
 
 @pytest.mark.asyncio

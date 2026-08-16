@@ -18,11 +18,12 @@ from typing import Any, Callable, Literal
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 import uuid
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.agent_run import AgentRun
+from app.models.agent_run_command import AgentRunCommand
 from app.models.agent_tool_execution import AgentToolExecution
 
 
@@ -36,6 +37,10 @@ ToolExecutionStatus = Literal[
 SideEffectClassification = Literal["read", "write", "external_write"]
 RetryPolicy = Literal["safe", "conditional", "never"]
 SAFE_READ_MAX_ATTEMPTS = 3
+
+# Stable rejection code for resume Commands whose referenced tool execution
+# settled before the resume could be claimed (settle-side supersede).
+SUPERSEDED_RESUME_ERROR_CODE = "superseded_tool_execution"
 
 # These tools dispatch an external image-generation request and can therefore
 # leave the provider outcome uncertain after a response timeout.  Direct Chat
@@ -1639,7 +1644,58 @@ async def mark_expired_safe_read_result_unavailable(
     execution.lease_expires_at = None
     execution.completed_at = now
     await db.flush()
+    # 事故根因路径：Run 自驱的重放（safe-read 结果探针）在租约对账 enqueue 的
+    # resume 被领取前把调用 settle——该 resume 已成为悬空命令，就此清掉。
+    await _supersede_stale_resume_commands(
+        db,
+        tenant_id=execution.tenant_id,
+        run_id=execution.run_id,
+        tool_call_id=execution.tool_call_id,
+    )
     return execution
+
+
+async def _supersede_stale_resume_commands(
+    db: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    run_id: uuid.UUID,
+    tool_call_id: str,
+) -> None:
+    """Reject pending resumes whose referenced tool call already settled.
+
+    The lease reconciler enqueues a timer resume to re-drive a parked Run, but
+    the Run can settle the same execution through its own re-drive (e.g. a
+    safe-read result probe) before that resume is claimed. Such commands would
+    otherwise linger as pending until the Run's earlier input order lets the
+    worker reach them. Only pending resumes carrying this exact tool_call_id
+    are touched; user resumes and other Runs are unaffected.
+
+    ``agent_run_commands.status`` has a check constraint
+    (pending/claimed/applied/rejected), so the command is settled as
+    ``rejected`` with the stable ``superseded_tool_execution`` code instead of
+    a new status value.
+    """
+    await db.execute(
+        update(AgentRunCommand)
+        .where(
+            AgentRunCommand.tenant_id == tenant_id,
+            AgentRunCommand.run_id == run_id,
+            AgentRunCommand.command_type == "resume",
+            AgentRunCommand.status == "pending",
+            AgentRunCommand.payload["payload"]["tool_call_id"].astext
+            == tool_call_id,
+        )
+        .values(
+            status="rejected",
+            error_code=SUPERSEDED_RESUME_ERROR_CODE,
+            claimed_by=None,
+            claim_expires_at=None,
+            applied_checkpoint_id=None,
+            applied_at=datetime.now(UTC),
+        )
+    )
+    await db.flush()
 
 
 async def _mark_terminal(
@@ -1731,6 +1787,12 @@ async def _mark_terminal(
     execution.lease_expires_at = None
     execution.completed_at = (clock or (lambda: datetime.now(UTC)))()
     await db.flush()
+    await _supersede_stale_resume_commands(
+        db,
+        tenant_id=execution.tenant_id,
+        run_id=execution.run_id,
+        tool_call_id=execution.tool_call_id,
+    )
     return execution
 
 
