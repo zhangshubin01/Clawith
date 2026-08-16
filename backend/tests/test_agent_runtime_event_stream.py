@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections import deque
+from contextlib import suppress
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 import uuid
 
 import pytest
@@ -19,12 +22,19 @@ from app.services.agent_runtime.event_stream import (
 
 
 class _Result:
-    def __init__(self, *, scalar=None, rows=()) -> None:
-        self.scalar = scalar
+    def __init__(self, *, scalar=None, rows=(), one=None) -> None:
+        self.scalar_value = scalar
         self.rows = list(rows)
+        self.one_value = one
 
     def scalar_one_or_none(self):
-        return self.scalar
+        return self.scalar_value
+
+    def scalar(self):
+        return self.scalar_value
+
+    def one_or_none(self):
+        return self.one_value
 
     def scalars(self):
         return self
@@ -55,6 +65,52 @@ class _SessionFactory:
 
     def __call__(self) -> _Session:
         return self.sessions.popleft()
+
+
+class _DispatchSession:
+    """Reusable fake session whose results follow the queried table.
+
+    The idle-liveness loop polls an unbounded number of times, so results are
+    dispatched by statement shape instead of being queued in fixed order.
+    """
+
+    def __init__(
+        self,
+        *,
+        run: AgentRun | None = None,
+        event_batches: tuple[tuple[AgentRunEvent, ...], ...] = (),
+        delivery_status: str = "pending",
+        command_row: SimpleNamespace | None = None,
+        lease_active: bool = False,
+    ) -> None:
+        self.run = run
+        self.event_batches = deque(event_batches)
+        self.delivery_status = delivery_status
+        self.command_row = command_row
+        self.lease_active = lease_active
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, traceback):
+        return False
+
+    async def execute(self, statement):
+        columns = list(statement.selected_columns)
+        table = None
+        if columns:
+            table = getattr(columns[0], "table", None)
+            table = table.name if table is not None else None
+        if table == "agent_run_events":
+            batch = self.event_batches.popleft() if self.event_batches else []
+            return _Result(rows=batch)
+        if table == "agent_runs":
+            if len(columns) == 1:
+                return _Result(scalar=self.delivery_status)
+            return _Result(scalar=self.run)
+        if table == "agent_run_commands":
+            return _Result(one=self.command_row)
+        return _Result(scalar=self.lease_active)
 
 
 def _run() -> tuple[AgentRun, RunHandle]:
@@ -316,3 +372,135 @@ async def test_event_stream_rejects_handle_outside_stored_tenant_run_scope(
         await anext(stream.stream_run(invalid))
 
     assert exc_info.value.code == "run_not_found"
+
+
+@pytest.mark.asyncio
+async def test_idle_stream_waits_while_command_claim_is_fresh_then_raises_once_it_expires() -> None:
+    run, handle = _run()
+    base = datetime.now(UTC)
+    first_event = _event(run, "status_changed", created_at=base)
+    session = _DispatchSession(
+        run=run,
+        event_batches=((first_event,),),
+        command_row=SimpleNamespace(
+            status="claimed",
+            claim_expires_at=base + timedelta(minutes=30),
+        ),
+        lease_active=False,
+    )
+    stream = DatabaseRuntimeEventStream(
+        session_factory=lambda: session,  # type: ignore[arg-type]
+        poll_interval_seconds=0.001,
+        idle_timeout_seconds=0.05,
+    )
+    agent = stream.stream_run(handle)
+    assert (await anext(agent)).event_id == first_event.id
+
+    waiter = asyncio.create_task(anext(agent))
+    await asyncio.sleep(0.3)
+    assert not waiter.done(), "a live command claim must keep the idle stream open"
+
+    session.command_row = SimpleNamespace(
+        status="claimed",
+        claim_expires_at=base - timedelta(seconds=1),
+    )
+    with pytest.raises(RuntimeEventStreamError) as exc_info:
+        await asyncio.wait_for(waiter, timeout=2)
+    assert exc_info.value.code == "runtime_event_stream_idle_timeout"
+
+
+@pytest.mark.asyncio
+async def test_idle_stream_keeps_waiting_while_command_is_pending() -> None:
+    run, handle = _run()
+    base = datetime.now(UTC)
+    first_event = _event(run, "status_changed", created_at=base)
+    session = _DispatchSession(
+        run=run,
+        event_batches=((first_event,),),
+        command_row=SimpleNamespace(status="pending", claim_expires_at=None),
+        lease_active=False,
+    )
+    stream = DatabaseRuntimeEventStream(
+        session_factory=lambda: session,  # type: ignore[arg-type]
+        poll_interval_seconds=0.001,
+        idle_timeout_seconds=0.05,
+    )
+    agent = stream.stream_run(handle)
+    assert (await anext(agent)).event_id == first_event.id
+
+    waiter = asyncio.create_task(anext(agent))
+    try:
+        await asyncio.sleep(0.3)
+        assert not waiter.done(), "a queued command must keep the idle stream open"
+    finally:
+        waiter.cancel()
+        with suppress(asyncio.CancelledError):
+            await waiter
+    with suppress(Exception):
+        await agent.aclose()
+
+
+@pytest.mark.asyncio
+async def test_idle_stream_keeps_waiting_while_active_tool_lease_outlives_command_claim() -> None:
+    run, handle = _run()
+    base = datetime.now(UTC)
+    first_event = _event(run, "status_changed", created_at=base)
+    session = _DispatchSession(
+        run=run,
+        event_batches=((first_event,),),
+        command_row=SimpleNamespace(
+            status="claimed",
+            claim_expires_at=base - timedelta(seconds=1),
+        ),
+        lease_active=True,
+    )
+    stream = DatabaseRuntimeEventStream(
+        session_factory=lambda: session,  # type: ignore[arg-type]
+        poll_interval_seconds=0.001,
+        idle_timeout_seconds=0.05,
+    )
+    agent = stream.stream_run(handle)
+    assert (await anext(agent)).event_id == first_event.id
+
+    waiter = asyncio.create_task(anext(agent))
+    try:
+        await asyncio.sleep(0.3)
+        assert not waiter.done(), "an active tool lease must keep the idle stream open"
+    finally:
+        waiter.cancel()
+        with suppress(asyncio.CancelledError):
+            await waiter
+    with suppress(Exception):
+        await agent.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("command_present", [True, False])
+async def test_idle_stream_raises_when_no_liveness_signal_remains(command_present: bool) -> None:
+    run, handle = _run()
+    base = datetime.now(UTC)
+    first_event = _event(run, "status_changed", created_at=base)
+    session = _DispatchSession(
+        run=run,
+        event_batches=((first_event,),),
+        command_row=(
+            SimpleNamespace(
+                status="claimed",
+                claim_expires_at=base - timedelta(seconds=1),
+            )
+            if command_present
+            else None
+        ),
+        lease_active=False,
+    )
+    stream = DatabaseRuntimeEventStream(
+        session_factory=lambda: session,  # type: ignore[arg-type]
+        poll_interval_seconds=0.001,
+        idle_timeout_seconds=0.05,
+    )
+    agent = stream.stream_run(handle)
+    assert (await anext(agent)).event_id == first_event.id
+
+    with pytest.raises(RuntimeEventStreamError) as exc_info:
+        await asyncio.wait_for(anext(agent), timeout=2)
+    assert exc_info.value.code == "runtime_event_stream_idle_timeout"
