@@ -79,7 +79,7 @@ services:
       # Password reset token lifetime in minutes (default: 30)
       PASSWORD_RESET_TOKEN_EXPIRE_MINUTES: ${PASSWORD_RESET_TOKEN_EXPIRE_MINUTES:-30}
     ports:
-      - "${BACKEND_PORT:-8008}:8000"
+      - "127.0.0.1:${BACKEND_PORT:-8008}:8000"
     volumes:
       - agentdata:/data/agents
       - /var/run/docker.sock:/var/run/docker.sock
