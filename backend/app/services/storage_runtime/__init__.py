@@ -17,10 +17,12 @@ from app.services.storage_runtime.agent_files import (
     tenant_storage_key,
 )
 from app.services.storage_runtime.facade import (
+    InvalidStorageKeyError,
     agent_storage_prefix,
     ensure_local_path,
     get_storage_backend,
     guess_content_type,
+    join_storage_key,
     normalize_storage_key,
     tenant_storage_prefix,
 )
@@ -37,6 +39,7 @@ __all__ = [
     "FallbackStorageBackend",
     "LocalStorageBackend",
     "S3StorageBackend",
+    "InvalidStorageKeyError",
     "agent_storage_key",
     "agent_storage_prefix",
     "agent_upload_key",
@@ -44,6 +47,7 @@ __all__ = [
     "ensure_local_path",
     "get_storage_backend",
     "guess_content_type",
+    "join_storage_key",
     "normalize_storage_key",
     "sanitize_filename",
     "store_agent_bytes",

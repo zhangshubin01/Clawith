@@ -221,8 +221,29 @@ async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONR
     )
 
 
+async def invalid_storage_key_handler(request: Request, exc: Exception) -> JSONResponse:
+    """Map storage-key traversal rejection to a 400 with a stable error code."""
+    trace_id = get_request_trace_id(request)
+    body = _error_body(
+        detail=str(exc),
+        code="invalid_storage_key",
+        message="Storage key contains path traversal semantics",
+        trace_id=trace_id,
+    )
+    return JSONResponse(
+        status_code=400,
+        content=jsonable_encoder(body),
+        headers={TRACE_ID_HEADER: trace_id},
+    )
+
+
 def register_error_handlers(app: FastAPI) -> None:
     """Install the canonical handlers on a FastAPI application."""
+    # Imported lazily: storage_runtime imports core modules, importing it at
+    # module level here would create a circular dependency.
+    from app.services.storage_runtime.utils import InvalidStorageKeyError
+
+    app.add_exception_handler(InvalidStorageKeyError, invalid_storage_key_handler)
     app.add_exception_handler(HTTPException, http_exception_handler)
     app.add_exception_handler(RequestValidationError, request_validation_error_handler)
     app.add_exception_handler(Exception, unhandled_exception_handler)
