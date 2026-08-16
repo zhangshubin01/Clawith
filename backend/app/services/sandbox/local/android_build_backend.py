@@ -331,10 +331,15 @@ class AndroidBuildBackend(BaseSandboxBackend):
                         )
                     except Exception as e:
                         logger.error(f"[AndroidBuild] 镜像拉取失败: {e}")
+                        hint = (
+                            f"该镜像通常是宿主机本地构建的（仓库内无同名可拉取镜像），"
+                            f"请在宿主机重建: docker build -t {self.DEFAULT_IMAGE} "
+                            f"-f backend/Dockerfile.android-builder backend/"
+                        )
                         return ExecutionResult(
                             success=False, stdout="", stderr="",
                             exit_code=1, duration_ms=0,
-                            error=f"构建镜像不可用: {self.DEFAULT_IMAGE}",
+                            error=f"构建镜像不可用: {self.DEFAULT_IMAGE}，拉取失败原因: {e}。{hint}",
                         )
 
                 container = self.client.containers.run(
