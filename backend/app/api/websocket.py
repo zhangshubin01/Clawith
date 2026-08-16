@@ -207,6 +207,23 @@ def _runtime_error_packet(
     }
 
 
+_DB_CONNECTION_EXHAUSTED_CODE = "db_connection_exhausted"
+
+
+def _classify_runtime_intake_error(exc: BaseException) -> str:
+    """Map known infrastructure failures to stable machine codes.
+
+    PostgreSQL SQLSTATE 53300 (too_many_connections) is raised both by psycopg
+    and asyncpg, directly or wrapped in SQLAlchemy's ``OperationalError``
+    (``.orig``). Everything else keeps the generic ``runtime_intake_failed``.
+    """
+    candidates = [exc, getattr(exc, "orig", None)]
+    for candidate in candidates:
+        if candidate is not None and getattr(candidate, "sqlstate", None) == "53300":
+            return _DB_CONNECTION_EXHAUSTED_CODE
+    return "runtime_intake_failed"
+
+
 async def maybe_mark_session_read_for_active_viewer(
     db: AsyncSession,
     *,
@@ -809,10 +826,16 @@ class WebSocketChatHandler:
                 await self._handle_onboarding_trigger_guard()
                 return None
             logger.exception(f"[WS] Runtime chat intake failed ({error_code}): {exc}")
+            resolved_code = _classify_runtime_intake_error(exc)
+            message = (
+                "The durable Runtime database is at its connection limit. Please retry in a moment."
+                if resolved_code == _DB_CONNECTION_EXHAUSTED_CODE
+                else "Message could not be accepted by the durable Runtime."
+            )
             await self.websocket.send_json(
                 _runtime_error_packet(
-                    code="runtime_intake_failed",
-                    message="Message could not be accepted by the durable Runtime.",
+                    code=resolved_code,
+                    message=message,
                     agent_id=self.agent_id,
                     stage="intake",
                     run_id=resume_run_id,

@@ -2,15 +2,21 @@
 
 from __future__ import annotations
 
-from contextlib import AbstractAsyncContextManager
-from typing import Any, cast
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+from typing import Any
 from urllib.parse import quote, unquote, urlsplit, urlunsplit
+import asyncio
 import uuid
 
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from langgraph.checkpoint.serde.base import SerializerProtocol
 from langgraph.checkpoint.serde.encrypted import EncryptedSerializer
 from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
+
+from psycopg import AsyncConnection
+from psycopg.rows import DictRow, dict_row
+from psycopg_pool import AsyncConnectionPool
 
 from app.config import Settings, get_settings
 
@@ -166,12 +172,76 @@ def checkpoint_serializer(
         raise CheckpointerConfigurationError("Checkpoint AES encryption requires pycryptodome") from exc
 
 
-def create_checkpointer(
+@asynccontextmanager
+async def create_checkpointer(
     settings: Settings | None = None,
-) -> AbstractAsyncContextManager[AsyncPostgresSaver]:
-    """Create a lazy saver context; schema setup is an explicit migration concern."""
-    manager = AsyncPostgresSaver.from_conn_string(
-        checkpoint_database_url(settings),
+) -> AsyncIterator[AsyncPostgresSaver]:
+    """Yield a saver bound to the process-level shared checkpoint pool.
+
+    The pool outlives every saver: ``AsyncPostgresSaver`` acquires and releases
+    connections per operation and never closes an externally supplied pool.
+    Closing the pool once at application shutdown is handled by
+    ``close_checkpointer_pool``.
+    """
+    pool = await get_shared_checkpoint_pool(settings)
+    yield AsyncPostgresSaver(
+        conn=pool,
         serde=checkpoint_serializer(settings),
     )
-    return cast(AbstractAsyncContextManager[AsyncPostgresSaver], manager)
+
+
+# ---------------------------------------------------------------------------
+# Process-level shared checkpoint pool
+#
+# LangGraph's ``AsyncPostgresSaver.from_conn_string`` opens a brand-new psycopg
+# connection per context manager. Chat intake enters one checkpointer per
+# message, so that pattern competes with the SQLAlchemy pool and per-session
+# MCP runtimes for PostgreSQL ``max_connections`` slots. A single shared pool
+# pins the checkpoint demand to a fixed, configurable budget instead.
+# ---------------------------------------------------------------------------
+
+_checkpoint_pool: AsyncConnectionPool[AsyncConnection[DictRow]] | None = None
+_checkpoint_pool_dsn: str | None = None
+_checkpoint_pool_lock = asyncio.Lock()
+
+
+async def get_shared_checkpoint_pool(
+    settings: Settings | None = None,
+) -> AsyncConnectionPool[AsyncConnection[DictRow]]:
+    """Return the process-level checkpoint pool, opening it lazily once."""
+    global _checkpoint_pool, _checkpoint_pool_dsn
+    resolved_dsn = checkpoint_database_url(settings)
+    if _checkpoint_pool is not None:
+        if _checkpoint_pool_dsn != resolved_dsn:
+            raise CheckpointerConfigurationError("Checkpoint pool was already opened for a different database URL")
+        return _checkpoint_pool
+    async with _checkpoint_pool_lock:
+        if _checkpoint_pool is None:
+            runtime_settings = settings or get_settings()
+            pool: AsyncConnectionPool[AsyncConnection[DictRow]] = AsyncConnectionPool(
+                resolved_dsn,
+                min_size=runtime_settings.CHECKPOINT_POOL_MIN_SIZE,
+                max_size=runtime_settings.CHECKPOINT_POOL_MAX_SIZE,
+                timeout=runtime_settings.CHECKPOINT_POOL_TIMEOUT_SECONDS,
+                open=False,
+                # Mirror AsyncPostgresSaver.from_conn_string's connection setup.
+                kwargs={
+                    "autocommit": True,
+                    "prepare_threshold": 0,
+                    "row_factory": dict_row,
+                },
+            )
+            await pool.open()
+            _checkpoint_pool = pool
+            _checkpoint_pool_dsn = resolved_dsn
+        return _checkpoint_pool
+
+
+async def close_checkpointer_pool() -> None:
+    """Close the shared checkpoint pool; idempotent and safe after shutdown."""
+    global _checkpoint_pool, _checkpoint_pool_dsn
+    pool = _checkpoint_pool
+    _checkpoint_pool = None
+    _checkpoint_pool_dsn = None
+    if pool is not None:
+        await pool.close()

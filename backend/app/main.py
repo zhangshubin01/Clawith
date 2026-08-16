@@ -134,6 +134,14 @@ async def lifespan(app: FastAPI):
             "This is insecure for production. Set unique secrets in your .env file."
         )
 
+    # Compare the configured connection budget against PostgreSQL max_connections.
+    try:
+        from app.database import warn_on_connection_budget
+
+        await warn_on_connection_budget()
+    except Exception as e:  # pragma: no cover - budget check must never block boot
+        logger.warning(f"[startup] connection budget check failed: {e}")
+
     import asyncio
     import os
     from contextlib import AsyncExitStack
@@ -344,6 +352,9 @@ async def lifespan(app: FastAPI):
         # Runtime shutdown cancels the active command task before closing its
         # Checkpointer, which releases the advisory lock and claim heartbeat.
         await runtime_stack.aclose()
+        from app.services.agent_runtime.checkpointer import close_checkpointer_pool
+
+        await close_checkpointer_pool()
         await realtime_router.stop()
         await close_redis()
 

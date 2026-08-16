@@ -181,27 +181,72 @@ def test_aes_key_length_is_validated_as_encoded_bytes() -> None:
 
 
 @pytest.mark.asyncio
-async def test_factory_is_lazy_and_never_runs_checkpointer_setup() -> None:
+async def test_factory_binds_shared_pool_and_never_runs_checkpointer_setup() -> None:
     saver = AsyncMock()
+    pool = AsyncMock()
+    test_settings = _settings()
 
-    class FakeManager:
-        async def __aenter__(self) -> AsyncMock:
-            return saver
-
-        async def __aexit__(self, *args: object) -> None:
-            return None
-
-    manager = FakeManager()
-    with patch(
-        "app.services.agent_runtime.checkpointer.AsyncPostgresSaver.from_conn_string",
-        return_value=manager,
-    ) as factory:
-        created = create_checkpointer(_settings())
+    with (
+        patch(
+            "app.services.agent_runtime.checkpointer.AsyncPostgresSaver",
+            return_value=saver,
+        ) as saver_cls,
+        patch(
+            "app.services.agent_runtime.checkpointer.get_shared_checkpoint_pool",
+            new=AsyncMock(return_value=pool),
+        ) as pool_factory,
+    ):
+        created = create_checkpointer(test_settings)
+        # Lazy: the shared pool is only requested once the context is entered.
+        pool_factory.assert_not_awaited()
         async with created as yielded:
             assert yielded is saver
 
-    factory.assert_called_once()
-    call = factory.call_args
-    assert call.args == ("postgresql://app:secret@db.example/clawith?options=-c%20search_path%3Dlanggraph_checkpoint%2Cpublic",)
+    pool_factory.assert_awaited_once_with(test_settings)
+    saver_cls.assert_called_once()
+    call = saver_cls.call_args
+    assert call.kwargs["conn"] is pool
     assert isinstance(call.kwargs["serde"], JsonPlusSerializer)
     saver.setup.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_shared_pool_opens_once_and_is_reused() -> None:
+    import app.services.agent_runtime.checkpointer as ckpt
+
+    pool = AsyncMock()
+    test_settings = _settings()
+    try:
+        with patch(
+            "app.services.agent_runtime.checkpointer.AsyncConnectionPool",
+            return_value=pool,
+        ) as pool_cls:
+            first = await ckpt.get_shared_checkpoint_pool(test_settings)
+            second = await ckpt.get_shared_checkpoint_pool(test_settings)
+            assert first is pool
+            assert second is pool
+
+        pool_cls.assert_called_once()
+        call = pool_cls.call_args
+        assert call.kwargs["min_size"] == 1
+        assert call.kwargs["max_size"] == 4
+        assert call.kwargs["timeout"] == 10
+        assert call.kwargs["open"] is False
+        pool.open.assert_awaited_once()
+    finally:
+        await ckpt.close_checkpointer_pool()
+
+
+@pytest.mark.asyncio
+async def test_shared_pool_rejects_a_different_database_url_after_open() -> None:
+    import app.services.agent_runtime.checkpointer as ckpt
+
+    stale_pool = AsyncMock()
+    ckpt._checkpoint_pool = stale_pool
+    ckpt._checkpoint_pool_dsn = "postgresql://app:secret@db.example/old"
+    try:
+        with pytest.raises(CheckpointerConfigurationError):
+            await ckpt.get_shared_checkpoint_pool(_settings())
+    finally:
+        ckpt._checkpoint_pool = None
+        ckpt._checkpoint_pool_dsn = None

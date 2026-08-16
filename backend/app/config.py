@@ -95,8 +95,20 @@ class Settings(BaseSettings):
     # Database
     DATABASE_URL: str = "postgresql+asyncpg://clawith:clawith@localhost:5432/clawith"
     DATABASE_AUTO_CREATE_TABLES: bool = False
-    DB_POOL_SIZE: int = 20
-    DB_MAX_OVERFLOW: int = 10
+    # Connection budget: the SQLAlchemy pool and the checkpoint pool share one
+    # PostgreSQL max_connections limit with per-session MCP runtimes. Keep the
+    # primary pool small — chat latency does not scale with pool size, and an
+    # oversized base pool idles out the whole database.
+    DB_POOL_SIZE: int = 8
+    DB_MAX_OVERFLOW: int = 4
+    # Connections reserved for consumers the backend does not own (per-session
+    # MCP runtimes, admin tooling, migration jobs). Used by the startup budget
+    # check to warn before PostgreSQL max_connections is exhausted.
+    DB_RESERVED_CONNECTIONS: int = 20
+    # Process-level shared checkpoint pool (LangGraph AsyncPostgresSaver).
+    CHECKPOINT_POOL_MIN_SIZE: int = 1
+    CHECKPOINT_POOL_MAX_SIZE: int = 4
+    CHECKPOINT_POOL_TIMEOUT_SECONDS: int = 10
 
     # Redis
     REDIS_URL: str = "redis://localhost:6379/0"

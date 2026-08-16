@@ -4,6 +4,8 @@ from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
 
+from loguru import logger
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase
 
@@ -19,6 +21,48 @@ engine = create_async_engine(
 )
 
 async_session = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+
+
+async def warn_on_connection_budget() -> None:
+    """Compare configured connection demand against PostgreSQL ``max_connections``.
+
+    The backend owns three budget lines: the SQLAlchemy pool
+    (``DB_POOL_SIZE`` + ``DB_MAX_OVERFLOW``), the shared checkpoint pool
+    (``CHECKPOINT_POOL_MAX_SIZE``) and the connections reserved for consumers
+    outside the backend (``DB_RESERVED_CONNECTIONS`` — per-session MCP runtimes,
+    admin tooling). Warn at startup when the configured demand would exhaust the
+    database, so budget mismatches surface at deploy time instead of as
+    ``runtime_intake_failed`` chat errors.
+    """
+    try:
+        async with engine.connect() as conn:
+            raw_max = (await conn.execute(text("SHOW max_connections"))).scalar_one()
+        max_connections = int(raw_max)
+    except Exception as exc:  # pragma: no cover - database may be down at boot
+        logger.warning(f"[startup] connection budget check skipped (cannot read max_connections): {exc}")
+        return
+
+    demand = (
+        settings.DB_POOL_SIZE
+        + settings.DB_MAX_OVERFLOW
+        + settings.CHECKPOINT_POOL_MAX_SIZE
+        + settings.DB_RESERVED_CONNECTIONS
+    )
+    context = (
+        f"demand={demand} (sqlalchemy={settings.DB_POOL_SIZE}+{settings.DB_MAX_OVERFLOW}, "
+        f"checkpoint={settings.CHECKPOINT_POOL_MAX_SIZE}, reserved={settings.DB_RESERVED_CONNECTIONS}) "
+        f"vs max_connections={max_connections}"
+    )
+    if demand > max_connections:
+        logger.error(
+            f"[startup] connection budget EXCEEDED: {context}. "
+            "Raise max_connections or shrink DB_POOL_SIZE/DB_MAX_OVERFLOW/"
+            "CHECKPOINT_POOL_MAX_SIZE/DB_RESERVED_CONNECTIONS."
+        )
+    elif demand > int(max_connections * 0.8):
+        logger.warning(f"[startup] connection budget is tight: {context}.")
+    else:
+        logger.info(f"[startup] connection budget OK: {context}")
 
 
 class Base(DeclarativeBase):
