@@ -17,6 +17,54 @@ from app.core.middleware import TenantContextMiddleware, TraceIdMiddleware
 from app.schemas.schemas import HealthResponse
 from app.services.realtime import realtime_router
 
+from app.api.auth import router as auth_router
+from app.api.agents import router as agents_router
+from app.api.tasks import router as tasks_router
+from app.api.files import router as files_router
+from app.api.websocket import router as ws_router
+from app.api.group_websocket import router as group_ws_router
+from app.api.feishu import router as feishu_router
+from app.api.sso import router as sso_router
+from app.api.organization import router as org_router
+from app.api.enterprise import router as enterprise_router
+from app.api.advanced import router as advanced_router
+from app.api.upload import router as upload_router
+from app.api.relationships import router as relationships_router
+from app.api.directory import router as directory_router
+from app.api.files import upload_router as files_upload_router, enterprise_kb_router
+from app.api.activity import router as activity_router
+from app.api.messages import router as messages_router
+from app.api.tenants import router as tenants_router
+from app.api.schedules import router as schedules_router
+from app.api.tools import router as tools_router
+from app.api.plaza import router as plaza_router
+from app.api.experience import router as experience_router
+from app.api.skills import router as skills_router
+from app.api.users import router as users_router
+from app.api.chat_sessions import router as chat_sessions_router
+from app.api.groups import router as groups_router
+from app.api.slack import router as slack_router
+from app.api.discord_bot import router as discord_router
+from app.api.dingtalk import router as dingtalk_router
+from app.api.google_workspace import router as google_workspace_router
+from app.api.wecom import router as wecom_router
+from app.api.wechat import router as wechat_router
+from app.api.teams import router as teams_router
+from app.api.triggers import router as triggers_router
+from app.api.ide_plugin import router as ide_plugin_router
+from app.plugins.clawith_acp.router import router as acp_router
+from app.api.focus import router as focus_router
+from app.api.atlassian import router as atlassian_router
+from app.api.webhooks import router as webhooks_router
+from app.api.notification import router as notification_router
+from app.api.gateway import router as gateway_router
+from app.api.admin import router as admin_router
+from app.api.pages import router as pages_router, public_router as pages_public_router
+from app.api.agent_credentials import router as credentials_router
+from app.api.agentbay_control import router as agentbay_control_router
+from app.api.okr import router as okr_router
+from app.api.onboarding import router as onboarding_router
+
 settings = get_settings()
 
 
@@ -79,12 +127,16 @@ def _log_bwrap_startup_status() -> None:
 
 async def _start_ss_local() -> None:
     """Start ss-local SOCKS5 proxy for Discord API calls. Tries nodes in priority order."""
-    import asyncio, json, os, shutil, tempfile
+    import asyncio
+    import json
+    import os
+    import shutil
+    import tempfile
+
     if not shutil.which("ss-local"):
         logger.info("[Proxy] ss-local not found — Discord proxy disabled")
         return
     # Load proxy nodes from config file (gitignored, mounted as Docker volume)
-    import json as _json
     cfg_file = os.environ.get("SS_CONFIG_FILE", "/data/ss-nodes.json")
     if os.path.isfile(cfg_file):
         # Guard against empty or malformed config file — both produce a clear
@@ -94,7 +146,7 @@ async def _start_ss_local() -> None:
             if not raw:
                 logger.warning(f"[Proxy] {cfg_file} exists but is empty — skipping proxy")
                 return
-            nodes = _json.loads(raw)
+            nodes = json.loads(raw)
         except (json.JSONDecodeError, ValueError) as exc:
             logger.warning(f"[Proxy] Failed to parse {cfg_file}: {exc} — skipping proxy")
             return
@@ -109,7 +161,8 @@ async def _start_ss_local() -> None:
         cfg = {"server": node["server"], "server_port": node["port"], "local_address": "127.0.0.1",
                "local_port": 1080, "password": node["password"], "method": node["method"], "timeout": 10}
         tf = tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False)
-        json.dump(cfg, tf); tf.close()
+        json.dump(cfg, tf)
+        tf.close()
         try:
             proc = await asyncio.create_subprocess_exec(
                 "ss-local", "-c", tf.name,
@@ -400,56 +453,6 @@ app.add_middleware(
 )
 
 # Register API routes
-from app.api.auth import router as auth_router
-from app.api.agents import router as agents_router
-from app.api.tasks import router as tasks_router
-from app.api.files import router as files_router
-from app.api.websocket import router as ws_router
-from app.api.group_websocket import router as group_ws_router
-from app.api.feishu import router as feishu_router
-from app.api.sso import router as sso_router
-from app.api.organization import router as org_router
-from app.api.enterprise import router as enterprise_router
-from app.api.advanced import router as advanced_router
-from app.api.upload import router as upload_router
-from app.api.relationships import router as relationships_router
-from app.api.directory import router as directory_router
-from app.api.files import upload_router as files_upload_router, enterprise_kb_router
-from app.api.activity import router as activity_router
-from app.api.messages import router as messages_router
-from app.api.tenants import router as tenants_router
-from app.api.schedules import router as schedules_router
-from app.api.tools import router as tools_router
-from app.api.plaza import router as plaza_router
-from app.api.experience import router as experience_router
-from app.api.skills import router as skills_router
-from app.api.users import router as users_router
-from app.api.chat_sessions import router as chat_sessions_router
-from app.api.groups import router as groups_router
-from app.api.slack import router as slack_router
-from app.api.discord_bot import router as discord_router
-from app.api.dingtalk import router as dingtalk_router
-from app.api.google_workspace import router as google_workspace_router
-from app.api.wecom import router as wecom_router
-from app.api.wechat import router as wechat_router
-from app.api.teams import router as teams_router
-from app.api.triggers import router as triggers_router
-from app.api.ide_plugin import router as ide_plugin_router
-from app.plugins.clawith_acp.router import router as acp_router
-from app.api.focus import router as focus_router
-
-from app.api.atlassian import router as atlassian_router
-
-from app.api.webhooks import router as webhooks_router
-from app.api.notification import router as notification_router
-from app.api.gateway import router as gateway_router
-from app.api.admin import router as admin_router
-from app.api.pages import router as pages_router, public_router as pages_public_router
-from app.api.agent_credentials import router as credentials_router
-from app.api.agentbay_control import router as agentbay_control_router
-from app.api.okr import router as okr_router
-from app.api.onboarding import router as onboarding_router
-
 app.include_router(auth_router, prefix=settings.API_PREFIX)
 app.include_router(agents_router, prefix=settings.API_PREFIX)
 app.include_router(tasks_router, prefix=settings.API_PREFIX)
