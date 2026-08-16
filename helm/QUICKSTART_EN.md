@@ -7,7 +7,6 @@ helm/
 ├── clawith/                    # Helm Chart Main Directory
 │   ├── Chart.yaml             # Chart Metadata
 │   ├── values.yaml            # Configuration File
-│   ├── README.md              # Detailed Documentation
 │   └── templates/             # Kubernetes Resource Templates
 │       ├── _helpers.tpl       # Template Helper Functions
 │       ├── namespace.yaml     # Namespace
@@ -662,7 +661,6 @@ helm get values clawith -n clawith > backup-values-$(date +%Y%m%d).yaml
 
 ## 📚 More Information
 
-- **Detailed Configuration**: `helm/clawith/README.md`
 - **Helm Official Documentation**: https://helm.sh/docs/
 - **Kubernetes Documentation**: https://kubernetes.io/docs/
 
