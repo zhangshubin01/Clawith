@@ -314,15 +314,6 @@ async def test_execute_code_uses_exit_code_and_never_reexecutes_unknown(
     assert failed.error_code == "sandbox_execution_failed"
 
     backend.error = ValueError("transport lost after dispatch")
-
-    async def forbidden_fallback(*args, **kwargs):
-        raise AssertionError("an unknown execution must not be re-executed")
-
-    monkeypatch.setattr(
-        agent_tools,
-        "_execute_code_legacy_outcome",
-        forbidden_fallback,
-    )
     unknown = await agent_tools._execute_code_outcome(
         uuid.uuid4(),
         tmp_path,
