@@ -1,7 +1,0 @@
-{
-  "tool_name": "Bash",
-  "tool_input_preview": "{\"command\":\"npm pack @thedotmack/claude-mem@13.12.2 --pack-destination /tmp 2>&1 && ls /tmp/thedotmack-claude-mem-*.tgz\",\"description\":\"Download latest claude-mem from npm\"}",
-  "error": "Exit code 1\nnpm error code E404\nnpm error 404 Not Found - GET https://registry.npmjs.org/@thedotmack%2fclaude-mem - Not found\nnpm error 404\nnpm error 404  The requested resource '@thedotmack/claude-mem@13.12.2' could not be found or you do not have permission to access it.\nnpm error 404\nnpm error 404 Note that you can also install from a\nnpm error 404 tarball, folder, http url, or git url.\nnpm error A complete log of this run can be found in: /Users/shubinzhang/.npm/_logs/2026-07-23T12_02_47_670...",
-  "timestamp": "2026-07-23T12:02:48.512Z",
-  "retry_count": 2
-}

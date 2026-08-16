@@ -53,3 +53,10 @@ backend/tests/test_agent_runtime_benchmark.py
 # Prevent accidental commit of database dumps and backups
 .pgdata/
 backups/
+
+# Agent tool-state scratch dirs (never tracked)
+.omc/
+.reasonix/
+.playwright-mcp/
+.opencode/
+.omo/

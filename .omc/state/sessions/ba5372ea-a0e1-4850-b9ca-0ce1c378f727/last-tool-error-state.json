@@ -1,7 +1,0 @@
-{
-  "tool_name": "Bash",
-  "tool_input_preview": "{\"command\":\"sed -n '14,17p' /Users/shubinzhang/Documents/agent/Clawith/docs/feishu-card-mode-design.md | cat -A\",\"description\":\"Show exact bytes of lines 14-17\"}",
-  "error": "Exit code 1\ncat: illegal option -- A\nusage: cat [-belnstuv] [file ...]",
-  "timestamp": "2026-07-26T10:38:13.905Z",
-  "retry_count": 1
-}
