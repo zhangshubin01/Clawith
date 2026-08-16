@@ -195,13 +195,27 @@ async def send_email(
     if attachments and workspace_path:
         from app.services.storage import get_storage_backend, normalize_storage_key
         storage = get_storage_backend()
+        ws_root = Path(workspace_path).resolve()
 
         for rel_path in attachments:
-            clean_rel = rel_path.replace("\\", "/").strip().lstrip("/")
+            if not isinstance(rel_path, str) or not rel_path.strip():
+                continue
+            # Normalize the RELATIVE path before joining the agent prefix.
+            # normalize_storage_key rejects `..` (InvalidStorageKeyError, a
+            # ValueError): a traversal attempt is skipped, never resolved.
+            try:
+                norm_rel = normalize_storage_key(rel_path.replace("\\", "/").strip())
+            except ValueError:
+                continue
+            if not norm_rel:
+                continue
             prefix = str(agent_id) if agent_id else workspace_path.name
-            storage_key = normalize_storage_key(f"{prefix}/{clean_rel}")
+            try:
+                storage_key = normalize_storage_key(f"{prefix}/{norm_rel}")
+            except ValueError:
+                continue
             file_bytes = None
-            filename = Path(clean_rel).name
+            filename = Path(norm_rel).name
 
             # 1. Try to read from the storage backend (e.g. S3 or local storage)
             try:
@@ -210,10 +224,10 @@ async def send_email(
             except Exception:
                 pass
 
-            # 2. Fall back to local disk if not found in storage backend
+            # 2. Fall back to local disk, strictly inside the workspace root
             if file_bytes is None:
-                full_path = workspace_path / rel_path
-                if full_path.exists() and full_path.is_file():
+                full_path = (ws_root / norm_rel).resolve()
+                if full_path.is_relative_to(ws_root) and full_path.is_file():
                     try:
                         with open(full_path, "rb") as f:
                             file_bytes = f.read()

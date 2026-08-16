@@ -14,6 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import exists, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.upload_limits import enforce_content_limit, precheck_content_length
 from app.core.security import decode_access_token, get_current_user
 from app.core.error_contract import build_error_object, get_request_trace_id
 from app.database import get_db
@@ -1478,6 +1479,7 @@ async def put_group_workspace_file(
 
 @router.post("/{group_id}/workspace/upload", response_model=GroupWorkspaceUploadOut)
 async def upload_group_workspace_file(
+    request: Request,
     group_id: uuid.UUID,
     path: Annotated[str, Query(min_length=1, max_length=500)],
     file: UploadFile = File(...),
@@ -1490,13 +1492,16 @@ async def upload_group_workspace_file(
     tenant_id = _tenant_id(current_user)
     participant = await _current_participant(db, current_user)
     try:
+        precheck_content_length(request)
+        content = await file.read()
+        enforce_content_limit(content)
         value = await group_file_service.write_workspace_binary_file(
             db,
             tenant_id=tenant_id,
             group_id=group_id,
             actor_participant_id=participant.id,
             path=path,
-            content=await file.read(),
+            content=content,
             content_type=guess_content_type(path),
             expected_version_token=expected_version_token,
             require_absent=require_absent,

@@ -175,6 +175,11 @@ class Settings(BaseSettings):
     AGENT_RUNTIME_EVENT_PAYLOAD_MAX_BYTES: int = Field(default=16384, gt=0)
     AGENT_RUNTIME_TOOL_RESULT_INLINE_MAX_BYTES: int = Field(default=8192, gt=0)
     MAX_AGENT_CYCLE_COUNT: int = Field(default=5, gt=0)
+    # Hard cap for file-upload endpoints (all of them buffer the whole body
+    # into memory before writing). Without it a single authenticated request
+    # can exhaust the process (see P0 fix plan D3). Override via env if a
+    # tenant legitimately needs larger uploads.
+    MAX_UPLOAD_BYTES: int = Field(default=50 * 1024 * 1024, gt=0)
 
     # Docker (for Agent containers)
     DOCKER_NETWORK: str = "clawith_network"
