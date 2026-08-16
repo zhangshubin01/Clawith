@@ -53,6 +53,10 @@ RUN mkdir -p ${ANDROID_HOME}/cmdline-tools && \
 # SDK 版本标记（P4: 运行时漂移检测依赖 LABEL，卷内文件由 AGP 写入）
 LABEL clawith.sdk-version="${CMDLINE_TOOLS_VERSION}"
 
+# 版本文件随镜像层拷贝进新建卷，供 _check_sdk_version_drift 比对卷内版本 vs 镜像 label
+# （此前缺失导致漂移检测永远走 unknown 分支，形同虚设）
+RUN echo "${CMDLINE_TOOLS_VERSION}" > ${ANDROID_HOME}/.image_version
+
 # 接受 SDK 许可证（写入 $ANDROID_HOME/licenses/，卷初始化时复制到共享卷）
 RUN yes | ${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager --licenses >/dev/null 2>&1 || true
 
