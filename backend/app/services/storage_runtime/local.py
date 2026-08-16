@@ -70,7 +70,21 @@ class LocalStorageBackend(StorageBackend):
                     extra={"entry": str(entry), "error": exc.__class__.__name__},
                 )
                 continue
-            rel = str(entry.resolve().relative_to(self.root.resolve()))
+            try:
+                rel = str(entry.resolve().relative_to(self.root.resolve()))
+            except ValueError:
+                # Symlink resolving outside the storage root: never expose it.
+                logger.debug(
+                    "Skipping storage entry resolving outside storage root",
+                    extra={"entry": str(entry)},
+                )
+                continue
+            if ".." in rel.split("/"):
+                logger.debug(
+                    "Skipping storage entry with traversal segment",
+                    extra={"entry": str(entry)},
+                )
+                continue
             entries.append(
                 StorageEntry(
                     name=entry.name,

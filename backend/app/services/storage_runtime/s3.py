@@ -157,6 +157,8 @@ class S3StorageBackend(StorageBackend):
             for item in response.get("CommonPrefixes", []):
                 raw = item.get("Prefix", "").rstrip("/")
                 rel = _strip_prefix(raw, self.prefix)
+                if ".." in rel.split("/"):
+                    continue
                 name = rel.split("/")[-1]
                 entries.append(StorageEntry(name=name, key=rel, is_dir=True))
             for item in response.get("Contents", []):
@@ -164,6 +166,8 @@ class S3StorageBackend(StorageBackend):
                 if not raw or raw == prefix:
                     continue
                 rel = _strip_prefix(raw, self.prefix)
+                if ".." in rel.split("/"):
+                    continue
                 name = rel.split("/")[-1]
                 entries.append(
                     StorageEntry(

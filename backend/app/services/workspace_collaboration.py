@@ -19,7 +19,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.workspace import WorkspaceEditLock, WorkspaceFileRevision
-from app.services.storage import get_storage_backend, normalize_storage_key
+from app.services.storage import get_storage_backend, join_storage_key
 from app.services.storage_runtime.base import WriteCondition
 from app.services.storage_runtime.local import LocalStorageBackend
 from app.services.workspace_locking import workspace_locks
@@ -568,7 +568,7 @@ async def write_workspace_file(
             )
 
     storage = get_storage_backend()
-    storage_key = normalize_storage_key(f"{agent_id}/{normalized}")
+    storage_key = join_storage_key(agent_id, normalized)
     current_version = await storage.get_version(storage_key)
     if append and not current_version.exists:
         return WorkspaceWriteResult(
@@ -645,7 +645,7 @@ async def delete_workspace_file(
     """Delete a workspace file and record the deleted content."""
     normalized = normalize_workspace_path(path)
     storage = get_storage_backend()
-    storage_key = normalize_storage_key(f"{agent_id}/{normalized}")
+    storage_key = join_storage_key(agent_id, normalized)
     target = None
     if _should_mirror_to_local_filesystem(storage):
         try:
@@ -734,17 +734,17 @@ async def move_workspace_path(
         return WorkspaceWriteResult(False, source_normalized, f"{source_normalized} cannot be moved (protected)")
 
     storage = get_storage_backend()
-    source_key = normalize_storage_key(f"{agent_id}/{source_normalized}")
+    source_key = join_storage_key(agent_id, source_normalized)
     source_exists = await storage.exists(source_key)
     source_is_dir = await storage.is_dir(source_key)
     if not source_exists and not source_is_dir:
         return WorkspaceWriteResult(False, source_normalized, f"File not found: {source_normalized}")
 
-    destination_key = normalize_storage_key(f"{agent_id}/{destination_normalized}")
+    destination_key = join_storage_key(agent_id, destination_normalized)
     destination_is_dir = await storage.is_dir(destination_key)
     if destination_path.replace("\\", "/").strip().endswith("/") or destination_is_dir:
         destination_normalized = normalize_workspace_path(f"{destination_normalized}/{Path(source_normalized).name}")
-        destination_key = normalize_storage_key(f"{agent_id}/{destination_normalized}")
+        destination_key = join_storage_key(agent_id, destination_normalized)
 
     if source_normalized == destination_normalized:
         return WorkspaceWriteResult(False, source_normalized, "Source and destination are the same")
@@ -796,7 +796,7 @@ async def move_workspace_path(
             entries = await _collect_storage_tree_versions(storage, source_key)
             for entry_key, version_token in entries:
                 rel = entry_key.removeprefix(source_key.rstrip("/") + "/")
-                target_key = normalize_storage_key(f"{agent_id}/{destination_normalized}/{rel}")
+                target_key = join_storage_key(agent_id, destination_normalized, rel)
                 current_version = await storage.get_version(entry_key)
                 if current_version.token != version_token:
                     return WorkspaceWriteResult(False, source_normalized, f"Conflict detected while moving {source_normalized}")

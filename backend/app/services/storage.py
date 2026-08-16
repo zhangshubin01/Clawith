@@ -5,6 +5,7 @@ This module remains as the stable import path for existing callers.
 """
 
 from app.services.storage_runtime import (
+    InvalidStorageKeyError,
     LocalStorageBackend,
     S3StorageBackend,
     StorageBackend,
@@ -16,6 +17,7 @@ from app.services.storage_runtime import (
     ensure_local_path,
     get_storage_backend,
     guess_content_type,
+    join_storage_key,
     normalize_storage_key,
     sanitize_filename,
     store_agent_bytes,
@@ -25,6 +27,7 @@ from app.services.storage_runtime import (
 )
 
 __all__ = [
+    "InvalidStorageKeyError",
     "LocalStorageBackend",
     "S3StorageBackend",
     "StorageBackend",
@@ -36,6 +39,7 @@ __all__ = [
     "ensure_local_path",
     "get_storage_backend",
     "guess_content_type",
+    "join_storage_key",
     "normalize_storage_key",
     "sanitize_filename",
     "store_agent_bytes",
