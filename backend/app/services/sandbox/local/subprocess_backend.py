@@ -231,7 +231,10 @@ class SubprocessBackend(BaseSandboxBackend):
             "--unshare-uts",
             "--unshare-cgroup-try",
             *base_binds,
-            "--bind", "/data/agents/.uv-cache", "/uv-cache",
+            # Conditional: /data/agents/.uv-cache only exists in the production
+            # container. Binding unconditionally would make bwrap fail to start
+            # on any other host (Linux dev machines, CI).
+            *self._bind_if_exists("/data/agents/.uv-cache", "/uv-cache", read_only=False),
             "--bind", str(work_path), "/workspace",
             "--bind", str(venv_path), "/workspace/.venv",
             "--dev", "/dev",

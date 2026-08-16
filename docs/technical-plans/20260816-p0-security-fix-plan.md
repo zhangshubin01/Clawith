@@ -3,7 +3,7 @@
 - 日期：2026-08-16
 - 范围：backend（`backend/app/`）三项 P0 —— 沙箱执行回退、存储 key 前缀逃逸、上传文件名穿越
 - 方法：三路子代理并行深研（沙箱 / 存储 key / 上传）+ 主代理逐条复核（含路径穿越实证、死代码确认、调用点清单核对）
-- 状态：已按推荐值实施（D1-D7 完成，D4 实际选择"保留加固"，见「实施状态」章节；D8/D9 部署层待做）。本文所有行号以当前 `f-shubin-0806` 分支为准，实施时以引用代码片段定位。
+- 状态：已按推荐值实施（D1-D8 完成，D4 实际选择"保留加固"；D8 因 macOS 无法安装 bwrap 修正为开发降级引导，见「实施状态」章节；D9 部署层待做）。本文所有行号以当前 `f-shubin-0806` 分支为准，实施时以引用代码片段定位。
 
 ## 0. 总结论
 
@@ -33,9 +33,15 @@
 - **D4**：fallback 分支**保留加固**而非删除。理由：删除需前端 3 处调用点（`AgentDetailPage.tsx`）同步改造并破坏无 agent 上下文的上传场景；加固后（固定 `FALLBACK_UPLOAD_DIR` + sanitize + 50MB 上限）穿越与 OOM 均已消除，风险面与删除等价。
 - **改动 5（`_get_tool_config` 键级白名单）**：未实施。其核心目标（非法 sandbox_type 不静默降级、配置错误不落宿主机）已被 sandbox_type 严格化 + fail-closed 回退删除覆盖；键级白名单本身改动大、收益边际，列为后续可选项。
 
+**D8（2026-08-16 实施，分支 `f-shubin-0806`，与原建议有修正）**：
+
+- 原建议 `brew install bubblewrap` 在 macOS **不可行**（bwrap 依赖 Linux user namespaces，Homebrew 无 darwin bottle；开发机为 macOS）。落地内容：
+  - `subprocess_backend.py`：`/data/agents/.uv-cache` bind 条件化（`_bind_if_exists`，read_only=False）——非生产主机缺该路径时不再导致 bwrap 启动失败；生产容器行为不变（实测容器内 bwrap 0.11.0 已装且路径存在）。
+  - `.env.example`：新增沙箱配置段——macOS 开发二选一（`SANDBOX_ALLOW_UNSAFE_FALLBACK_WHEN_BWRAP_MISSING=true` 降级隔离（保留代码安全审查 + rlimits + 环境净化，仅无文件系统隔离；仅限开发）或 `SANDBOX_TYPE=docker`）；Linux 开发机 `apt install bubblewrap`。
+  - `main.py` 启动诊断：darwin 上给出准确指引（bwrap 为 Linux-only），不再泛泛提示"未安装"。
+
 **未完成（部署层，另开任务）**：
 
-- **D8**：开发机 bwrap 引导（Makefile/docs 提示 `brew install bubblewrap` 或设置 `SANDBOX_ALLOW_UNSAFE_FALLBACK_WHEN_BWRAP_MISSING=true`）。
 - **D9**：backend 容器 `/app` 只读化（Dockerfile root 属主交付 + 启动后降权，需验证 bwrap 等运行期写路径）。
 - nginx `client_max_body_size` 下调与 8008 直连治理（D3 附项）。
 
@@ -315,5 +321,5 @@ cd .. && scripts/arch-guard.sh
 | D5 | strict 化范围：`normalize_storage_key` 直接 strict（推荐）vs 双轨并行；`normalize_workspace_path` 保持 pop（保 LLM 工具可用性，推荐） | 前者 strict、后者保持 |
 | D6 | 其余 3 个无大小限制端点（files.py×2、groups.py×1）是否本次一并加统一上限 helper | 本次一并加（改动小） |
 | D7 | 分支与提交粒度：建议新分支 `feat/security-p0`，三步各一个 commit | 建议 |
-| D8 | 开发机 bwrap 安装引导（文档/Makefile 步骤，随 D1 落地） | 做 |
+| D8 | 开发机 bwrap 安装引导（文档/Makefile 步骤，随 D1 落地） | 做（已完成，修正：macOS 无法安装 bwrap，改为开发降级引导；见「实施状态」） |
 | D9 | backend 容器代码目录只读化（`/app` 对运行用户 clawith 可写，穿越写可覆盖平台自身代码）：Dockerfile chmod / root 属主交付，P0-1 修复后实施 | 做 |

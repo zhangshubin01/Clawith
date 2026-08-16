@@ -112,6 +112,31 @@ def test_subprocess_backend_proxy_bwrap_command(monkeypatch, tmp_path: Path) -> 
     assert cmd[idx_https + 1] == "http://proxy.example.com:8443"
 
 
+def test_subprocess_backend_uv_cache_bind_is_conditional(monkeypatch, tmp_path: Path) -> None:
+    """The production-only /data/agents/.uv-cache bind must be skipped when absent.
+
+    bwrap fails to start when a --bind source path does not exist, so hosts
+    without the production uv-cache directory must not get that argument.
+    """
+    monkeypatch.setattr("shutil.which", lambda cmd: "/usr/bin/bwrap" if cmd == "bwrap" else None)
+    backend = SubprocessBackend(SandboxConfig())
+
+    # Path absent (local dev / CI) — no uv-cache bind source in the command
+    # (note: --setenv UV_CACHE_DIR=/uv-cache is unconditional and unrelated)
+    monkeypatch.setattr(Path, "exists", lambda self: False)
+    cmd = backend._build_bwrap_command(["python3", "-c", "print(1)"], tmp_path, tmp_path / ".venv")
+    assert cmd is not None
+    assert "/data/agents/.uv-cache" not in cmd
+
+    # Path present (production container) — read-write bind preserved
+    monkeypatch.setattr(Path, "exists", lambda self: True)
+    cmd2 = backend._build_bwrap_command(["python3", "-c", "print(1)"], tmp_path, tmp_path / ".venv")
+    assert cmd2 is not None
+    idx = cmd2.index("/data/agents/.uv-cache")
+    assert cmd2[idx - 1] == "--bind"
+    assert cmd2[idx + 1] == "/uv-cache"
+
+
 def test_sandbox_config_proxy_parsing() -> None:
     data = {
         "http_proxy": "http://10.0.0.1:3128",

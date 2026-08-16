@@ -3,6 +3,7 @@
 from contextlib import asynccontextmanager
 from pathlib import Path
 import shutil
+import sys
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -61,6 +62,13 @@ def _log_bwrap_startup_status() -> None:
         logger.warning(
             "[startup] bubblewrap (bwrap) is not installed on the host. "
             "Local execute_code will use the reduced-isolation fallback."
+        )
+    elif sys.platform == "darwin":
+        logger.warning(
+            "[startup] bubblewrap (bwrap) is unavailable on macOS (Linux-only tool). "
+            "For local development set SANDBOX_ALLOW_UNSAFE_FALLBACK_WHEN_BWRAP_MISSING=true "
+            "(reduced isolation) or SANDBOX_TYPE=docker (Docker Desktop). "
+            "execute_code will fail closed otherwise."
         )
     else:
         logger.warning(
