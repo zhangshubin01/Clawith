@@ -11,6 +11,7 @@ import uuid
 import pytest
 
 from app.models.agent import Agent
+from app.models.agent_tool_execution import AgentToolExecution
 from app.models.llm import LLMModel
 from app.services.agent_runtime.context_builder import RuntimeContextBuild
 from app.services.agent_runtime.group_handoff import GroupAgentHandoffIntent
@@ -2788,3 +2789,115 @@ async def test_retryable_primary_error_without_fallback_pauses_for_resume() -> N
     assert str(result.waiting_request["correlation_id"]).startswith("model-provider-retry:")
     assert "4 attempts" in str(result.waiting_request["reason"])
     assert calls == 4
+
+
+@pytest.mark.asyncio
+async def test_failed_prior_run_execution_merges_into_new_run_ledger() -> None:
+    """The deadlock fix: a dangling call from a failed prior Run must resolve."""
+    tenant_id = uuid.uuid4()
+    model = _model(tenant_id)
+    agent = _agent(tenant_id)
+    state = _state(tenant_id, model, agent)
+    context = _context(state)
+    prior_run_id = uuid.uuid4()
+    state["messages"] = [
+        {
+            "id": "prior-assistant",
+            "role": "assistant",
+            "runtime_run_id": str(prior_run_id),
+            "tool_calls": [
+                {
+                    "id": "prior-failed-call",
+                    "type": "function",
+                    "function": {
+                        "name": "android_compile",
+                        "arguments": '{"project_path":"workspace/NotesApp"}',
+                    },
+                }
+            ],
+            "content": "",
+        },
+        {
+            "id": "current-input",
+            "role": "user",
+            "runtime_input": "current",
+            "runtime_run_id": context.run_id,
+            "content": "Continue",
+        },
+    ]
+    state.pop("registry")
+    builder = _ContextBuilder(_build())
+
+    prior_execution = AgentToolExecution(
+        id=uuid.uuid4(),
+        tenant_id=tenant_id,
+        run_id=prior_run_id,
+        tool_call_id="prior-failed-call",
+        tool_name="android_compile",
+        assistant_message_id="prior-assistant",
+        arguments_hash="hash",
+        sanitized_arguments={},
+        effect="write",
+        retry_policy="never",
+        status="failed",
+        result_metadata={},
+        result_summary="The tool executor's lease expired before this execution settled.",
+        started_at=datetime(2026, 8, 15, 7, 39, tzinfo=UTC),
+    )
+
+    class _FailedPriorRunDB:
+        def __init__(self) -> None:
+            self.results = iter(
+                (
+                    _Result([model]),
+                    _Result([agent]),
+                    _Result(),
+                    _Result(),
+                    _Result([prior_execution]),
+                )
+            )
+
+        async def execute(self, statement):
+            del statement
+            return next(self.results)
+
+    @asynccontextmanager
+    async def session_factory():
+        yield _FailedPriorRunDB()
+
+    async def complete(_model_arg, _messages, **_kwargs):
+        return LLMCompletionStep(
+            content="",
+            tool_calls=(
+                {
+                    "id": "finish-after-recovery",
+                    "type": "function",
+                    "function": {
+                        "name": "finish",
+                        "arguments": '{"content":"recovered"}',
+                    },
+                },
+            ),
+            reasoning_content=None,
+            retry_instruction=None,
+            usage=TokenUsage(),
+        )
+
+    service = RuntimeModelStepService(
+        session_factory=session_factory,
+        context_builder=builder,  # type: ignore[arg-type]
+        completion=complete,
+        tool_provider=_tools,
+        prompt_builder=_prompt,
+    )
+    result = await service.complete_once(state, context)
+
+    assert result.intent == "finish"
+    assert len(builder.calls) == 2
+    for call in builder.calls:
+        recovered = call["tool_execution_ledger"]["prior-failed-call"]
+        assert recovered["status"] == "failed"
+        assert recovered["may_have_side_effect"] is True
+        assert recovered["result_summary"].startswith(
+            "The tool executor's lease expired"
+        )

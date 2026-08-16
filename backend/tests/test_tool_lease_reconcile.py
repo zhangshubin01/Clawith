@@ -32,10 +32,24 @@ class _Result:
     def scalars(self):
         return _Scalars(self._values)
 
+    def first(self):
+        return self._values[0] if self._values else None
+
+    def scalar_one_or_none(self):
+        return self._values[0] if len(self._values) == 1 else None
+
 
 class _Session:
-    def __init__(self, values):
+    def __init__(
+        self,
+        values,
+        *,
+        owner_terminal: bool = False,
+        holder_id=None,
+    ):
         self.values = values
+        self.owner_terminal = owner_terminal
+        self.holder_id = holder_id
         self.flush_count = 0
         self.statements = []
 
@@ -45,6 +59,13 @@ class _Session:
 
     async def execute(self, statement):
         self.statements.append(statement)
+        text = str(statement)
+        if "scheduling_lane_key" in text:
+            # Owner-run liveness probe.
+            return _Result([(not self.owner_terminal, "lane-key")])
+        if "lane_held" in text:
+            # Thread-holder probe.
+            return _Result([self.holder_id] if self.holder_id is not None else [])
         return _Result(self.values)
 
     async def flush(self):
@@ -381,3 +402,114 @@ async def test_missing_lease_is_treated_as_expired(monkeypatch) -> None:
 
     assert result.status == "settled"
     assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_terminal_owner_safe_read_lease_is_settled_failed(monkeypatch) -> None:
+    """A safe read from a dead Run can never self-heal; settle it failed."""
+    execution = _execution(
+        effect="read",
+        retry_policy="safe",
+        lease_expires_at=_NOW - timedelta(seconds=1),
+    )
+    session = _Session([execution], owner_terminal=True)
+    calls = {"takeover": [], "settle": [], "enqueue": []}
+
+    async def takeover(db, **kwargs):
+        assert db is session
+        calls["takeover"].append(kwargs)
+        return SimpleNamespace(acquired=True, active=False, terminal_outcome=None)
+
+    async def settle(db, **kwargs):
+        assert db is session
+        calls["settle"].append(kwargs)
+        return execution
+
+    async def enqueue(db, **kwargs):
+        assert db is session
+        calls["enqueue"].append(kwargs)
+        return object()
+
+    async def wake(db, **kwargs):
+        del db, kwargs
+        calls["enqueue"].append({"wake": True})
+        return None
+
+    monkeypatch.setattr(
+        tool_lease_reconcile,
+        "takeover_tool_execution_for_reconciliation",
+        takeover,
+    )
+    monkeypatch.setattr(
+        tool_lease_reconcile,
+        "mark_tool_execution_failed",
+        settle,
+    )
+    monkeypatch.setattr(tool_lease_reconcile, "enqueue_resume", enqueue)
+    monkeypatch.setattr(
+        tool_lease_reconcile,
+        "enqueue_thread_holder_reconcile_wake",
+        wake,
+    )
+
+    result = await _scheduler(session).run_once()
+
+    assert result.status == "settled"
+    assert len(calls["settle"]) == 1
+    assert calls["settle"][0]["result_summary"] == (
+        tool_lease_reconcile._ORPHAN_READ_FAILED_SUMMARY
+    )
+    assert calls["settle"][0]["error_code"] == "tool_execution_lease_expired"
+
+
+@pytest.mark.asyncio
+async def test_terminal_owner_settlement_wakes_thread_holder(monkeypatch) -> None:
+    """Settling a dead Run's receipt must wake a waiting Run on its Thread."""
+    execution = _execution(lease_expires_at=_NOW - timedelta(seconds=1))
+    holder_id = uuid.uuid4()
+    session = _Session([execution], owner_terminal=True, holder_id=holder_id)
+    wakes = []
+
+    async def takeover(db, **kwargs):
+        del kwargs
+        assert db is session
+        return SimpleNamespace(acquired=True, active=False, terminal_outcome=None)
+
+    async def settle(db, **kwargs):
+        del kwargs
+        assert db is session
+        return execution
+
+    async def enqueue(db, **kwargs):
+        del db, kwargs
+        return object()
+
+    async def wake(db, **kwargs):
+        assert db is session
+        wakes.append(kwargs)
+        return holder_id
+
+    monkeypatch.setattr(
+        tool_lease_reconcile,
+        "takeover_tool_execution_for_reconciliation",
+        takeover,
+    )
+    monkeypatch.setattr(
+        tool_lease_reconcile,
+        "mark_tool_execution_failed",
+        settle,
+    )
+    monkeypatch.setattr(tool_lease_reconcile, "enqueue_resume", enqueue)
+    monkeypatch.setattr(
+        tool_lease_reconcile,
+        "enqueue_thread_holder_reconcile_wake",
+        wake,
+    )
+
+    result = await _scheduler(session).run_once()
+
+    assert result.status == "settled"
+    assert len(wakes) == 1
+    assert wakes[0]["owner_run_id"] == execution.run_id
+    assert wakes[0]["tool_call_id"] == execution.tool_call_id
+    assert wakes[0]["reason"] == "tool_execution_lease_expired"
