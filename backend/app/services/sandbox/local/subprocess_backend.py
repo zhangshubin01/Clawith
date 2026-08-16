@@ -11,87 +11,13 @@ from loguru import logger
 
 from app.services.sandbox.base import BaseSandboxBackend, ExecutionResult, SandboxCapabilities
 from app.services.sandbox.config import SandboxConfig
+from app.services.sandbox.security import check_code_safety
 from app.services.workspace_paths import WorkspacePathError, resolve_path_within_root
 
 MAX_STDOUT_CAPTURE_BYTES = 1_000_000
 MAX_STDERR_CAPTURE_BYTES = 500_000
 VENV_CREATION_TIMEOUT_SECONDS = 120
 
-
-# Security patterns - reused from agent_tools.py
-_DANGEROUS_BASH_ALWAYS = [
-    "rm -rf /", "rm -rf ~", "sudo ", "mkfs", "dd if=",
-    ":(){ :", "chmod 777 /", "chown ", "shutdown", "reboot",
-]
-
-_DANGEROUS_BASH_NETWORK = [
-    "curl ", "wget ", "nc ", "ncat ", "ssh ", "scp ",
-]
-
-_DANGEROUS_PYTHON_IMPORTS_ALWAYS = [
-    "shutil.rmtree", "os.system", "os.popen",
-    "os.exec", "os.spawn",
-]
-
-_DANGEROUS_PYTHON_IMPORTS_NETWORK = [
-    "socket", "http.client", "urllib.request", "requests",
-    "ftplib", "smtplib", "telnetlib", "ctypes",
-]
-
-_DANGEROUS_NODE_ALWAYS = [
-    "fs.rmSync", "fs.rmdirSync", "process.exit",
-]
-
-_DANGEROUS_NODE_NETWORK = [
-    "require('http')", "require('https')", "require('net')"
-]
-
-
-def _check_code_safety(language: str, code: str, allow_network: bool = False) -> str | None:
-    """Check code for dangerous patterns. Returns error message if unsafe, None if ok."""
-    code_lower = code.lower()
-
-    if language == "bash":
-        # Always check dangerous patterns
-        for pattern in _DANGEROUS_BASH_ALWAYS:
-            if pattern.lower() in code_lower:
-                logger.warning(f"Blocked: dangerous command detected ({pattern.strip()})")
-                return f"Blocked: dangerous command detected ({pattern.strip()})"
-        # Network commands only when network is not allowed
-        if not allow_network:
-            for pattern in _DANGEROUS_BASH_NETWORK:
-                if pattern.lower() in code_lower:
-                    logger.warning(f"Blocked: network command not allowed ({pattern.strip()})")        
-                    return f"Blocked: network command not allowed ({pattern.strip()})"
-        if "../../" in code:
-            return "Blocked: directory traversal not allowed"
-
-    elif language == "python":
-        # Always check dangerous patterns
-        for pattern in _DANGEROUS_PYTHON_IMPORTS_ALWAYS:
-            if pattern.lower() in code_lower:
-                logger.warning(f"Blocked: unsafe operation detected ({pattern.strip()})")
-                return f"Blocked: unsafe operation detected ({pattern.strip()})"
-        # Network imports only when network is not allowed
-        if not allow_network:
-            for pattern in _DANGEROUS_PYTHON_IMPORTS_NETWORK:
-                if pattern.lower() in code_lower:
-                    logger.warning(f"Blocked: network operation not allowed ({pattern.strip()})")
-                    return f"Blocked: network operation not allowed ({pattern.strip()})"
-
-    elif language == "node":
-        # Always check dangerous patterns
-        for pattern in _DANGEROUS_NODE_ALWAYS:
-            if pattern.lower() in code_lower:
-                return f"Blocked: unsafe operation detected ({pattern})"
-        # Network requires only when network is not allowed
-        if not allow_network:
-            for pattern in _DANGEROUS_NODE_NETWORK:
-                if pattern.lower() in code_lower:
-                    logger.warning(f"Blocked: network operation not allowed ({pattern.strip()})")
-                    return f"Blocked: network operation not allowed ({pattern.strip()})"
-
-    return None
 
 
 class SubprocessBackend(BaseSandboxBackend):
@@ -388,7 +314,7 @@ class SubprocessBackend(BaseSandboxBackend):
             )
 
         # Security check - pass allow_network config
-        safety_error = _check_code_safety(language, code, self.config.allow_network)
+        safety_error = check_code_safety(language, code, self.config.allow_network)
         if safety_error:
             return ExecutionResult(
                 success=False,

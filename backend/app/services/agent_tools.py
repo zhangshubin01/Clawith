@@ -103,8 +103,6 @@ WORKSPACE_ROOT = Path(_settings.STORAGE_LOCAL_ROOT or _settings.AGENT_DATA_DIR)
 TOOL_MATERIALIZE_MAX_FILE_BYTES = 10 * 1024 * 1024
 TOOL_MATERIALIZE_MAX_TOTAL_BYTES = 100 * 1024 * 1024
 TEMP_WORKSPACE_DEFAULT_PATHS = ["workspace", "memory", "skills", "focus.md", "soul.md", "HEARTBEAT.md"]
-MAX_EXEC_STDOUT_CAPTURE_BYTES = 1_000_000
-MAX_EXEC_STDERR_CAPTURE_BYTES = 500_000
 _READ_FILE_BINARY_EXTENSIONS = frozenset(
     {
         ".7z",
@@ -10252,70 +10250,6 @@ async def _plaza_add_comment(agent_id: uuid.UUID, arguments: dict) -> str:
 
 # ─── Code Execution ─────────────────────────────────────────────
 
-# Dangerous patterns to block (for legacy fallback)
-_DANGEROUS_BASH_ALWAYS = [
-    "rm -rf /", "rm -rf ~", "sudo ", "mkfs", "dd if=",
-    ":(){ :", "chmod 777 /", "chown ", "shutdown", "reboot",
-]
-
-_DANGEROUS_BASH_NETWORK = [
-    "curl ", "wget ", "nc ", "ncat ", "ssh ", "scp ",
-]
-
-_DANGEROUS_PYTHON_IMPORTS_ALWAYS = [
-    "shutil.rmtree", "os.system", "os.popen",
-    "os.exec", "os.spawn",
-]
-
-_DANGEROUS_PYTHON_IMPORTS_NETWORK = [
-    "socket", "http.client", "urllib.request", "requests",
-    "ftplib", "smtplib", "telnetlib", "ctypes",
-]
-
-_DANGEROUS_NODE_ALWAYS = [
-    "fs.rmSync", "fs.rmdirSync", "process.exit",
-]
-
-_DANGEROUS_NODE_NETWORK = [
-    "require('http')", "require('https')", "require('net')",
-]
-
-
-def _check_code_safety(language: str, code: str, allow_network: bool = False) -> str | None:
-    """Check code for dangerous patterns. Returns error message if unsafe, None if ok."""
-    code_lower = code.lower()
-
-    if language == "bash":
-        for pattern in _DANGEROUS_BASH_ALWAYS:
-            if pattern.lower() in code_lower:
-                return f"❌ Blocked: dangerous command detected ({pattern.strip()})"
-        if not allow_network:
-            for pattern in _DANGEROUS_BASH_NETWORK:
-                if pattern.lower() in code_lower:
-                    return f"❌ Blocked: network command not allowed ({pattern.strip()})"
-        if "../../" in code:
-            return "❌ Blocked: directory traversal not allowed"
-
-    elif language == "python":
-        for pattern in _DANGEROUS_PYTHON_IMPORTS_ALWAYS:
-            if pattern.lower() in code_lower:
-                return f"❌ Blocked: unsafe operation detected ({pattern})"
-        if not allow_network:
-            for pattern in _DANGEROUS_PYTHON_IMPORTS_NETWORK:
-                if pattern.lower() in code_lower:
-                    return f"❌ Blocked: network operation not allowed ({pattern})"
-
-    elif language == "node":
-        for pattern in _DANGEROUS_NODE_ALWAYS:
-            if pattern.lower() in code_lower:
-                return f"❌ Blocked: unsafe operation detected ({pattern})"
-        if not allow_network:
-            for pattern in _DANGEROUS_NODE_NETWORK:
-                if pattern.lower() in code_lower:
-                    return f"❌ Blocked: network operation not allowed ({pattern})"
-
-    return None
-
 
 async def _execute_code_outcome(
     agent_id: Optional[uuid.UUID],
@@ -10369,7 +10303,6 @@ async def _execute_code_outcome(
     # the user explicitly chose cloud execution.
     is_e2b_tool = (tool_name == "execute_code_e2b")
 
-    fallback_config = None
     execution_started = False
     try:
         # Import here to avoid circular imports
@@ -10487,18 +10420,12 @@ async def _execute_code_outcome(
                 f"E2B sandbox configuration error: {str(e)[:300]}",
                 "sandbox_configuration_invalid",
             )
-        if fallback_config is None:
-            return _typed_failure(
-                f"Sandbox configuration error: {str(e)[:300]}",
-                "sandbox_configuration_invalid",
-            )
-        logger.warning(f"[Sandbox] Config issue, falling back to legacy subprocess: {e}")
-        return await _execute_code_legacy_outcome(
-            ws,
-            arguments,
-            allow_network=fallback_config.allow_network,
-            max_timeout=fallback_config.max_timeout,
-            on_output=on_output,
+        # Fail closed: any configuration error (invalid sandbox_type,
+        # pydantic ValidationError, disabled sandbox) must never fall back
+        # to bare host execution.
+        return _typed_failure(
+            f"Sandbox configuration error: {str(e)[:300]}",
+            "sandbox_configuration_invalid",
         )
 
     except Exception as e:
@@ -10530,191 +10457,6 @@ async def _execute_code(
         ws,
         arguments,
         tool_name=tool_name,
-        on_output=on_output,
-    )
-    return _legacy_tool_outcome_text(
-        outcome,
-        fallback="Code execution returned no summary.",
-    )
-
-
-async def _execute_code_legacy_outcome(
-    ws: Path,
-    arguments: dict,
-    allow_network: bool = False,
-    max_timeout: int = 60,
-    on_output=None,
-) -> ToolExecutionOutcome:
-    """Legacy subprocess-based code execution (fallback)."""
-    import asyncio
-
-    language = arguments.get("language", "python")
-    code = arguments.get("code", "")
-    try:
-        timeout = min(int(arguments.get("timeout", 30)), max_timeout)
-    except (TypeError, ValueError):
-        return _typed_failure(
-            "execute_code timeout must be an integer.",
-            "invalid_tool_arguments",
-        )
-    if timeout <= 0:
-        return _typed_failure(
-            "execute_code timeout must be positive.",
-            "invalid_tool_arguments",
-        )
-
-    if not isinstance(code, str) or not code.strip():
-        return _typed_failure("No code provided.", "invalid_tool_arguments")
-
-    if language not in ("python", "bash", "node"):
-        return _typed_failure(
-            f"Unsupported language: {language}. Use python, bash, or node.",
-            "invalid_tool_arguments",
-        )
-
-    # Security check
-    safety_error = _check_code_safety(language, code, allow_network)
-    if safety_error:
-        return _typed_failure(safety_error, "sandbox_code_blocked")
-
-    # Working directory is the agent's root directory (must be absolute)
-    # This allows code to access skills/, workspace/, memory/ etc. directly
-    work_dir = ws.resolve()
-    work_dir.mkdir(parents=True, exist_ok=True)
-
-    # Determine command and file extension
-    if language == "python":
-        ext = ".py"
-        cmd_prefix = ["python3"]
-    elif language == "bash":
-        ext = ".sh"
-        cmd_prefix = ["bash"]
-    elif language == "node":
-        ext = ".js"
-        cmd_prefix = ["node"]
-    else:
-        return _typed_failure(
-            f"Unsupported language: {language}.",
-            "invalid_tool_arguments",
-        )
-
-    # Write code to a temp file inside workspace
-    script_path = work_dir / f"_exec_tmp{ext}"
-    proc = None
-    try:
-        script_path.write_text(code, encoding="utf-8")
-
-        # Inherit parent environment but override HOME to workspace
-        safe_env = dict(os.environ)
-        safe_env["HOME"] = str(work_dir)
-        safe_env["PYTHONDONTWRITEBYTECODE"] = "1"
-
-        proc = await asyncio.create_subprocess_exec(
-            *cmd_prefix, str(script_path),
-            cwd=str(work_dir),
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            env=safe_env,
-        )
-
-        stdout_data = bytearray()
-        stderr_data = bytearray()
-
-        async def read_stream(stream, out, label="stdout"):
-            capture_limit = MAX_EXEC_STDERR_CAPTURE_BYTES if label == "stderr" else MAX_EXEC_STDOUT_CAPTURE_BYTES
-            while True:
-                chunk = await stream.read(4096)
-                if not chunk:
-                    break
-                remaining = capture_limit - len(out)
-                if remaining > 0:
-                    out.extend(chunk[:remaining])
-                # Real-time streaming: push each chunk to the WebSocket
-                if on_output:
-                    try:
-                        text = chunk.decode("utf-8", errors="replace")
-                        await on_output(text, label)
-                    except Exception:
-                        pass
-
-        task1 = asyncio.create_task(read_stream(proc.stdout, stdout_data, "stdout"))
-        task2 = asyncio.create_task(read_stream(proc.stderr, stderr_data, "stderr"))
-
-        is_timeout = False
-        try:
-            await asyncio.wait_for(proc.wait(), timeout=timeout)
-        except asyncio.TimeoutError:
-            proc.kill()
-            is_timeout = True
-
-        await asyncio.gather(task1, task2)
-        stdout = bytes(stdout_data)
-        stderr = bytes(stderr_data)
-
-        stdout_str = stdout.decode("utf-8", errors="replace")[:10000] if stdout else ""
-        stderr_str = stderr.decode("utf-8", errors="replace")[:5000] if stderr else ""
-
-        result_parts = []
-        if stdout_str.strip():
-            result_parts.append(f"📤 Output:\n{stdout_str}")
-        if stderr_str.strip():
-            result_parts.append(f"⚠️ Stderr:\n{stderr_str}")
-
-        if is_timeout:
-            result_parts.append(f"❌ Code execution timed out after {timeout}s. If you expect this code to take longer, try calling the tool again with a higher 'timeout' parameter (up to 3600s).")
-            return _typed_failure(
-                "\n\n".join(result_parts),
-                "sandbox_execution_timeout",
-            )
-
-        if proc.returncode != 0:
-            result_parts.append(f"Exit code: {proc.returncode}")
-            return _typed_failure(
-                "\n\n".join(result_parts),
-                "sandbox_execution_failed",
-            )
-
-        if not result_parts:
-            return _typed_success("Code executed successfully (no output).")
-
-        return _typed_success("\n\n".join(result_parts))
-
-    except Exception as e:
-        if proc is not None:
-            try:
-                if proc.returncode is None:
-                    proc.kill()
-                    await proc.wait()
-            except Exception:
-                pass
-            return _typed_unknown(
-                f"Local code execution outcome is unknown after {type(e).__name__}.",
-                "sandbox_execution_outcome_unknown",
-            )
-        return _typed_failure(
-            f"Execution could not start: {type(e).__name__}.",
-            "sandbox_execution_failed",
-        )
-    finally:
-        # Clean up temp script
-        try:
-            script_path.unlink(missing_ok=True)
-        except Exception:
-            pass
-
-
-async def _execute_code_legacy(
-    ws: Path,
-    arguments: dict,
-    allow_network: bool = False,
-    max_timeout: int = 60,
-    on_output=None,
-) -> str:
-    outcome = await _execute_code_legacy_outcome(
-        ws,
-        arguments,
-        allow_network=allow_network,
-        max_timeout=max_timeout,
         on_output=on_output,
     )
     return _legacy_tool_outcome_text(

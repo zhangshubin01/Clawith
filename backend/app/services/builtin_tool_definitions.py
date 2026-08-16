@@ -982,7 +982,7 @@ _BUILTIN_TOOL_SOURCE = [
             "sandbox_type": "subprocess",
             "cpu_limit": "0.5",
             "memory_limit": "256m",
-            "allow_network": True,
+            "allow_network": False,
             "default_timeout": 30,
             "max_timeout": 60,
         },
@@ -1006,7 +1006,7 @@ _BUILTIN_TOOL_SOURCE = [
                     "key": "allow_network",
                     "label": "Allow Network Access",
                     "type": "checkbox",
-                    "default": True,
+                    "default": False,
                     "read_only_for_roles": ["agent_admin", "member"],
                 },
                 {

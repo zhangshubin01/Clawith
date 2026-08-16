@@ -60,8 +60,14 @@ def _default_agent_template_dir() -> str:
 
 
 def _default_allow_unsafe_bwrap_fallback() -> bool:
-    """Allow local source runs to work without bubblewrap by default."""
-    return not _running_in_container()
+    """Fail closed by default.
+
+    Running untrusted code directly on the host (no bubblewrap) exposes the
+    full host environment — env vars, filesystem, network — to the code.
+    Opt in explicitly with
+    SANDBOX_ALLOW_UNSAFE_FALLBACK_WHEN_BWRAP_MISSING=true.
+    """
+    return False
 
 
 def _read_version() -> str:
