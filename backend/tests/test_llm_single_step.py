@@ -465,6 +465,49 @@ async def test_complete_once_returns_a_bounded_repair_instruction_for_invalid_ar
 
 
 @pytest.mark.asyncio
+async def test_complete_once_preserves_raw_invalid_tool_calls(
+    monkeypatch,
+) -> None:
+    raw_call = {
+        "id": "call-bad",
+        "type": "function",
+        "function": {"name": "read_file", "arguments": '{"path":'},
+    }
+    client = _Client(LLMResponse(content="", tool_calls=[raw_call]))
+    _patch_client(monkeypatch, client)
+
+    result = await single_step.complete_llm_once(
+        _model(),
+        [LLMMessage(role="user", content="Read")],
+    )
+
+    assert result.tool_calls == ()
+    assert result.retry_instruction is not None
+    assert result.raw_invalid_tool_calls == (raw_call,)
+
+
+@pytest.mark.asyncio
+async def test_complete_once_supports_explicit_temperature_override(
+    monkeypatch,
+) -> None:
+    client = _Client(LLMResponse(content="ok", finish_reason="stop"))
+    _patch_client(monkeypatch, client)
+
+    await single_step.complete_llm_once(
+        _model(),
+        [LLMMessage(role="user", content="Hello")],
+    )
+    await single_step.complete_llm_once(
+        _model(),
+        [LLMMessage(role="user", content="Hello")],
+        temperature=0,
+    )
+
+    assert client.calls[0]["temperature"] == 0.2  # model default when omitted
+    assert client.calls[1]["temperature"] == 0
+
+
+@pytest.mark.asyncio
 async def test_complete_once_closes_the_provider_client_when_the_request_fails(
     monkeypatch,
 ) -> None:
