@@ -84,12 +84,19 @@ services:
       - agentdata:/data/agents
       - /var/run/docker.sock:/var/run/docker.sock
       - ./ss-nodes.json:/data/ss-nodes.json:ro
-    privileged: true
+    # P2 最小权限收紧（2026-08-16 实测）：去 privileged，仅保留 bwrap 沙箱所需。
+    # SYS_ADMIN：命名空间与 pivot_root；NET_ADMIN+SYS_PTRACE：bwrap 0.11 set_required_caps
+    # 硬性要求且不在 Docker 默认 caps 内（缺失时 setuid bwrap 报 "capset failed"）。
+    # OrbStack 默认 seccomp 会拦 bwrap 的 mount/pivot_root，必须 security_opt seccomp=unconfined
+    # （原注释「macOS/OrbStack 不可用」有误，实测该选项在 OrbStack 上生效）。
     group_add:
       - "0"  # root 组（docker.sock 属主），clawith 用户通过此组访问 Docker
     cap_add:
       - SYS_ADMIN
-    # security_opt 移除: seccomp/apparmor 在 macOS/OrbStack 不可用
+      - NET_ADMIN
+      - SYS_PTRACE
+    security_opt:
+      - seccomp=unconfined
     networks:
       - default
       - openviking-shared
