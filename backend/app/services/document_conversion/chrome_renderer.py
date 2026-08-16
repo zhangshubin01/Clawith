@@ -479,6 +479,7 @@ roots = [body];
         except Exception:
             try:
                 proc.kill()
+                proc.wait()
             except Exception:
                 pass
         profile_dir.cleanup()

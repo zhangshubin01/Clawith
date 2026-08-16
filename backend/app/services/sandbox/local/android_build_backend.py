@@ -148,6 +148,7 @@ class AndroidBuildBackend(BaseSandboxBackend):
 
     async def _enforce_gradle_cache_quota(self):
         """Gradle 依赖缓存目录数超过阈值时告警（清理由 Gradle 内置 30 天 GC 处理）。"""
+        proc: asyncio.subprocess.Process | None = None
         try:
             proc = await asyncio.create_subprocess_exec(
                 "docker", "run", "--rm",
@@ -165,8 +166,17 @@ class AndroidBuildBackend(BaseSandboxBackend):
                 )
             else:
                 logger.debug(f"[AndroidBuild] gradle module dirs={dir_count}")
-        except (asyncio.TimeoutError, ValueError, ProcessLookupError, FileNotFoundError):
-            pass  # 超时/解析失败/容器不存在/docker CLI 不可用 — 不影响构建
+        except asyncio.TimeoutError:
+            # communicate() was cancelled: kill and reap the docker CLI child
+            # so it cannot linger as a zombie under uvicorn.
+            if proc is not None and proc.returncode is None:
+                try:
+                    proc.kill()
+                except ProcessLookupError:
+                    pass
+                await proc.wait()
+        except (ValueError, ProcessLookupError, FileNotFoundError):
+            pass  # 解析失败/容器不存在/docker CLI 不可用 — 不影响构建
 
     async def _check_sdk_version_drift(self, container) -> bool:
         """比较镜像 SDK 版本与卷中版本，检测漂移。"""

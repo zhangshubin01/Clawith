@@ -114,6 +114,9 @@ async def _start_ss_local() -> None:
             proc = await asyncio.create_subprocess_exec(
                 "ss-local", "-c", tf.name,
                 stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
+            # Reap the proxy when it eventually exits: uvicorn is PID 1 and
+            # would otherwise leave it as a permanent zombie.
+            asyncio.ensure_future(proc.wait())
             await asyncio.sleep(2)
             if proc.returncode is None:
                 os.environ["DISCORD_PROXY"] = "socks5h://127.0.0.1:1080"
