@@ -9,7 +9,6 @@ from dataclasses import asdict, replace
 import json
 import random
 import re
-import time
 from typing import Protocol, cast
 import uuid
 
@@ -1109,23 +1108,23 @@ class RuntimeModelStepService:
             executions = list(ledger_result.scalars().all())
             cancelled_run_ids: set[uuid.UUID] = set()
             if prior_incomplete:
+                prior_run_ids = tuple(prior_incomplete)
                 cancelled_result = await db.execute(
                     select(AgentRunCommand.run_id).where(
                         AgentRunCommand.tenant_id == tenant_id,
-                        AgentRunCommand.run_id.in_(tuple(prior_incomplete)),
+                        AgentRunCommand.run_id.in_(prior_run_ids),
                         AgentRunCommand.command_type == "cancel",
                         AgentRunCommand.status == "applied",
                     )
                 )
                 cancelled_run_ids = set(cancelled_result.scalars().all())
-                if cancelled_run_ids:
-                    prior_execution_result = await db.execute(
-                        select(AgentToolExecution).where(
-                            AgentToolExecution.tenant_id == tenant_id,
-                            AgentToolExecution.run_id.in_(tuple(cancelled_run_ids)),
-                        )
+                prior_execution_result = await db.execute(
+                    select(AgentToolExecution).where(
+                        AgentToolExecution.tenant_id == tenant_id,
+                        AgentToolExecution.run_id.in_(prior_run_ids),
                     )
-                    executions.extend(prior_execution_result.scalars().all())
+                )
+                executions.extend(prior_execution_result.scalars().all())
             if agent is not None and (
                 model is None
                 or not model.enabled
@@ -1165,6 +1164,26 @@ class RuntimeModelStepService:
                     "may_have_side_effect": False,
                     "cancelled_before_execution": True,
                     "result_summary": "Cancelled before tool execution started.",
+                }
+        for prior_run_id, calls in prior_incomplete.items():
+            if prior_run_id in cancelled_run_ids:
+                continue
+            for call in calls:
+                call_id = call.get("id")
+                if not isinstance(call_id, str) or call_id in ledger:
+                    continue
+                # The prior Run ended without ever reserving this call.
+                # Record it as not_started so the exchange resolves as a
+                # model-retry instead of blocking reconciliation forever.
+                ledger[call_id] = {
+                    "status": "not_started",
+                    "tool_name": _tool_name(call) or "unknown_tool",
+                    "side_effect_classification": "read",
+                    "retry_policy": "safe",
+                    "may_have_side_effect": False,
+                    "cancelled_before_execution": False,
+                    "run_ended_before_execution": True,
+                    "result_summary": "The prior Run ended before this tool call executed.",
                 }
         return model, agent, ledger
 

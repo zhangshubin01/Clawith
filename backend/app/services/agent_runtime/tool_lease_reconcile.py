@@ -34,12 +34,16 @@ import uuid
 
 from sqlalchemy import false, func, or_, select
 
+from app.models.agent_run import AgentRun
 from app.models.agent_tool_execution import AgentToolExecution
 from app.services.agent_runtime.command_worker import RuntimeSessionFactory
 from app.services.agent_runtime.group_runtime_tools import (
     GROUP_WORKSPACE_EXECUTION_MUTATION_TOOL_NAMES,
 )
-from app.services.agent_runtime.persistence import enqueue_resume
+from app.services.agent_runtime.persistence import (
+    enqueue_resume,
+    enqueue_thread_holder_reconcile_wake,
+)
 from app.services.agent_runtime.tool_execution import (
     is_user_reconcilable_unknown_execution,
     mark_tool_execution_failed,
@@ -60,6 +64,11 @@ _ORPHAN_FAILED_SUMMARY = (
     "effect. Verify the current state before repeating this operation."
 )
 
+_ORPHAN_READ_FAILED_SUMMARY = (
+    "The owning Run ended before this read settled, so its result was never "
+    "recorded. The read is safe to repeat as a new tool call."
+)
+
 
 @dataclass(frozen=True, slots=True)
 class ToolLeaseReconcileResult:
@@ -72,6 +81,32 @@ class ToolLeaseReconcileResult:
 
 def _utc_now() -> datetime:
     return datetime.now(UTC)
+
+
+async def _owner_run_terminal(
+    db,
+    *,
+    tenant_id: uuid.UUID,
+    run_id: uuid.UUID,
+) -> bool:
+    """Whether the execution's owning Run has released its scheduling lane.
+
+    Lane Runs hold their lane while active (running or waiting). A released
+    lane means the Run reached a terminal state, so its dangling executions
+    can never self-heal through a resume of that Run.
+    """
+    result = await db.execute(
+        select(AgentRun.lane_held, AgentRun.scheduling_lane_key).where(
+            AgentRun.tenant_id == tenant_id,
+            AgentRun.id == run_id,
+        )
+    )
+    row = result.first()
+    if row is None:
+        # The Run row is gone; treat as terminal so the receipt settles.
+        return True
+    lane_held, lane_key = row
+    return bool(lane_key) and not bool(lane_held)
 
 
 def _waiting_correlation(run_id: uuid.UUID, tool_call_id: str) -> str:
@@ -143,12 +178,18 @@ class ToolLeaseReconcileScheduler:
                 if not candidates:
                     return ToolLeaseReconcileResult(status="idle")
                 execution = candidates[0]
+                owner_terminal = await _owner_run_terminal(
+                    db,
+                    tenant_id=execution.tenant_id,
+                    run_id=execution.run_id,
+                )
 
                 settled = False
-                if not (
+                is_safe_read = (
                     execution.effect == "read"
                     and execution.retry_policy == "safe"
-                ):
+                )
+                if not is_safe_read or owner_terminal:
                     takeover = await takeover_tool_execution_for_reconciliation(
                         db,
                         tenant_id=execution.tenant_id,
@@ -159,7 +200,17 @@ class ToolLeaseReconcileScheduler:
                     if not takeover.acquired:
                         # A concurrent reconciler already took ownership.
                         return ToolLeaseReconcileResult(status="idle")
-                    if is_user_reconcilable_unknown_execution(execution):
+                    if owner_terminal and is_safe_read:
+                        execution = await mark_tool_execution_failed(
+                            db,
+                            tenant_id=execution.tenant_id,
+                            execution_id=execution.id,
+                            lease_owner=self._lease_owner,
+                            result_summary=_ORPHAN_READ_FAILED_SUMMARY,
+                            error_code="tool_execution_lease_expired",
+                            retryable=False,
+                        )
+                    elif is_user_reconcilable_unknown_execution(execution):
                         execution = await mark_tool_execution_unknown(
                             db,
                             tenant_id=execution.tenant_id,
@@ -206,6 +257,17 @@ class ToolLeaseReconcileScheduler:
                         execution_id=execution.id,
                         run_id=execution.run_id,
                     )
+                # The owning Run may already be terminal (the resume above
+                # will then be rejected). A newer Run on the same Thread can
+                # be parked waiting for exactly this settlement — wake it.
+                await enqueue_thread_holder_reconcile_wake(
+                    db,
+                    tenant_id=execution.tenant_id,
+                    owner_run_id=execution.run_id,
+                    idempotency_key="tool-lease-reconcile-thread-wake:" + str(execution.id),
+                    reason="tool_execution_lease_expired",
+                    tool_call_id=execution.tool_call_id,
+                )
         return ToolLeaseReconcileResult(
             status="settled" if settled else "scheduled",
             execution_id=execution.id,

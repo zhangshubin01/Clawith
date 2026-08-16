@@ -386,7 +386,7 @@ def _resolve_incomplete_exchange(
             blocked=True,
             requires_confirmation=True,
         )
-    if any(status in {"started", "unknown", "failed"} for status in missing_statuses.values()):
+    if any(status in {"started", "unknown"} for status in missing_statuses.values()):
         return MessageBlock(
             kind="pending_tool_exchange",
             messages=messages,
@@ -396,6 +396,31 @@ def _resolve_incomplete_exchange(
             missing_call_ids=missing_call_ids,
             action="block_reconcile",
             blocked=True,
+        )
+
+    # A terminal failure is decidable from the ledger: the tool did not
+    # succeed and its recorded summary is authoritative. Synthesize the
+    # missing result so the model can re-plan, instead of parking the Run
+    # forever on a reconciliation signal that will never arrive (reconcile
+    # wake-ups only target in-flight executions of the current Run).
+    if any(status == "failed" for status in missing_statuses.values()):
+        summary = _summary_for_exchange(
+            assistant_message_id=assistant_message_id,
+            calls=calls,
+            results=results,
+            ledger=ledger,
+            reason="failed_result_missing",
+        )
+        return MessageBlock(
+            kind="pending_tool_exchange",
+            messages=messages,
+            message_ids=message_ids,
+            assistant_message_id=assistant_message_id,
+            call_ids=call_ids,
+            missing_call_ids=missing_call_ids,
+            action="summarize",
+            retry_model=True,
+            compaction_summary=summary,
         )
 
     invalid_statuses = {
@@ -427,6 +452,30 @@ def _resolve_incomplete_exchange(
             results=results,
             ledger=ledger,
             reason="cancelled_before_execution",
+        )
+        return MessageBlock(
+            kind="pending_tool_exchange",
+            messages=messages,
+            message_ids=message_ids,
+            assistant_message_id=assistant_message_id,
+            call_ids=call_ids,
+            missing_call_ids=missing_call_ids,
+            action="summarize",
+            compaction_summary=summary,
+        )
+
+    ended_before_execution = bool(missing_call_ids) and all(
+        missing_statuses.get(call_id) == "not_started"
+        and ledger.get(call_id, {}).get("run_ended_before_execution") is True
+        for call_id in missing_call_ids
+    )
+    if ended_before_execution:
+        summary = _summary_for_exchange(
+            assistant_message_id=assistant_message_id,
+            calls=calls,
+            results=results,
+            ledger=ledger,
+            reason="run_ended_before_execution",
         )
         return MessageBlock(
             kind="pending_tool_exchange",
