@@ -3,7 +3,7 @@
 - 日期：2026-08-16
 - 范围：backend（`backend/app/`）三项 P0 —— 沙箱执行回退、存储 key 前缀逃逸、上传文件名穿越
 - 方法：三路子代理并行深研（沙箱 / 存储 key / 上传）+ 主代理逐条复核（含路径穿越实证、死代码确认、调用点清单核对）
-- 状态：方案（待确认后实施）。本文所有行号以当前 `f-shubin-0806` 分支为准，实施时以引用代码片段定位。
+- 状态：已按推荐值实施（D1-D7 完成，D4 实际选择"保留加固"，见「实施状态」章节；D8/D9 部署层待做）。本文所有行号以当前 `f-shubin-0806` 分支为准，实施时以引用代码片段定位。
 
 ## 0. 总结论
 
@@ -13,7 +13,31 @@
 |---|---|---|
 | P0-1 沙箱回退 | 配置异常回退宿主机 + 全量 `os.environ` | 成立且更严重：`if fallback_config is None`（agent_tools.py:10490）是**死代码**——非 E2B 分支 10419 恒赋值，任何执行前的 `ValueError` 都触发回退；默认 `SANDBOX_TYPE=SUBPROCESS`（config.py:199）；开发机 bwrap 缺失默认裸跑宿主机（config.py:62-64）；builtin 工具 `allow_network=True`（builtin_tool_definitions.py:985）覆盖平台默认 False |
 | P0-2 存储 key | files.py 先拼前缀再规范化逃逸 | 引用点不准确：files.py:166-169 先规范化后拼接、本身安全；**真正的逃逸点是 `upload.py:78,84`**（Form 可控 agent_id + 全文无 `check_agent_access`，IDOR+跨租户写）和 **`email_service.py:202`**（LLM 可控附件路径 → 跨租户读 + 邮件外泄，含本地 FS 穿越的独立路径） |
-| P0-3 上传穿越 | `fallback_dir / f"{file_id}_{filename}"` 任意写入 | 成立，机制修正：**绝对路径被 `file_id_` 前缀意外中和**（变为相对子路径，不穿透），但 `../` 多级穿越实证成立（`resolve()` 落到 `/private/Users/x/.ssh/authorized_keys`）；fallback 分支全仓库零依赖，可安全删除 |
+| P0-3 上传穿越 | `fallback_dir / f"{file_id}_{filename}"` 任意写入 | 成立，机制修正：**绝对路径被 `file_id_` 前缀意外中和**（变为相对子路径，不穿透），但 `../` 多级穿越**生产容器内实证**（Linux 上 4 个 `..` 即到根）可覆盖 `/app/app/**/*.py`（**平台自身代码**，属主即主进程 clawith，已实测可覆盖）、`/home/clawith/.bashrc`、任意 agent 工作区文件；fallback 分支零依赖可安全删除 |
+
+---
+
+## 实施状态（2026-08-16，分支 `feat/security-p0`）
+
+三个 commit 已落地（测试全量 2307 passed + 3 个预存在失败，与实施前一致；arch-guard 通过）：
+
+1. `fix(security): strict storage-key normalization rejects path traversal`
+   - `normalize_storage_key` 遇 `..` 抛 `InvalidStorageKeyError`（不再静默 pop 前缀）；新增 `join_storage_key`（逐段 strict）；error_contract 注册 400 映射（code=`invalid_storage_key`）；local/s3 `list_dir` 跳过脏条目；pages.py 脏行 → 404；workspace_collaboration 6 处改 `join_storage_key`。
+2. `fix(security): fail-closed sandbox config and dead code removal`
+   - 删除 legacy fallback（`_execute_code_legacy_outcome`/`_execute_code_legacy`/`_DANGEROUS_*`/`_check_code_safety` 副本，-264 行），配置错误一律 typed failure（fail-closed）；统一 `check_code_safety` 至 `sandbox/security.py`（docstring 注明黑名单非安全边界）；bwrap unsafe-fallback 恒 False（D1）；`allow_network` 默认 False（D2，builtin 定义 + config_schema + SandboxConfig 三处）；非法 `sandbox_type` 抛错不再静默降级。
+3. `fix(security): upload endpoint access control and size limits`
+   - `/chat/upload`：agent_id 必填 UUID + `check_agent_access`（IDOR/跨租户修复）+ `sanitize_filename` + `agent_workspace_key`；email_service 附件 strict key + `is_relative_to` 前缀校验；新建 `upload_limits.py`（Content-Length 预检 413 + read() 后硬校验），4 个上传端点全部接入 `MAX_UPLOAD_BYTES=50MB`（D3/D6），聊天图片额外 10MB 上限且前移到读前（400）；files.py 手写 replace 改 `sanitize_filename`。
+
+**与推荐值的偏差**：
+
+- **D4**：fallback 分支**保留加固**而非删除。理由：删除需前端 3 处调用点（`AgentDetailPage.tsx`）同步改造并破坏无 agent 上下文的上传场景；加固后（固定 `FALLBACK_UPLOAD_DIR` + sanitize + 50MB 上限）穿越与 OOM 均已消除，风险面与删除等价。
+- **改动 5（`_get_tool_config` 键级白名单）**：未实施。其核心目标（非法 sandbox_type 不静默降级、配置错误不落宿主机）已被 sandbox_type 严格化 + fail-closed 回退删除覆盖；键级白名单本身改动大、收益边际，列为后续可选项。
+
+**未完成（部署层，另开任务）**：
+
+- **D8**：开发机 bwrap 引导（Makefile/docs 提示 `brew install bubblewrap` 或设置 `SANDBOX_ALLOW_UNSAFE_FALLBACK_WHEN_BWRAP_MISSING=true`）。
+- **D9**：backend 容器 `/app` 只读化（Dockerfile root 属主交付 + 启动后降权，需验证 bwrap 等运行期写路径）。
+- nginx `client_max_body_size` 下调与 8008 直连治理（D3 附项）。
 
 ---
 
@@ -191,7 +215,7 @@ async def upload_file(
 
 ## P0-3 上传文件名穿越（任意路径写入）+ 上传无大小限制
 
-### 现状（已实证）
+### 现状（已实证，2026-08-16 生产容器内复核）
 
 ```python
 # upload.py:88-94（agent_id 为空时；Form 默认 ""，客户端省略即触发）
@@ -202,12 +226,25 @@ save_path = fallback_dir / f"{file_id}_{file.filename}"   # filename 未清洗
 save_path.write_bytes(content)
 ```
 
-- **穿越实证**（只读 Python 验证）：
-  - 绝对路径 `/Users/x/.ssh/authorized_keys` → 被 `file_id_` 字符串前缀中和，落成 `/tmp/clawith_uploads/fid_/Users/...` 相对子路径，**不穿透**（对初版报告的修正）。
-  - `../` 多级穿越**稳定成立**：`fid_../../../../Users/x/.ssh/authorized_keys` → `resolve()` 落到 `/private/Users/x/.ssh/authorized_keys`，可覆盖后端进程可写的任意已存在文件（父目录需存在，`.ssh/`、home、`/etc` 常态满足）。
-- **大小**：`:70` 在任何检查前全量 `await file.read()` 进内存；`:101` 的 10MB 只限图片且读完才查。settings 无上传上限、无 BodyLimit 中间件；nginx 500m（deploy/nginx/nginx.conf:11,39）且 backend 容器 8008 直连宿主可绕过 → 单请求 OOM DoS。
+- **穿越实证**（生产容器 `clawith-agent-backend-1` 内 `Path.resolve()` 矩阵，Linux 语义）：
+
+  | filename（Content-Disposition） | resolve() 落点 | 结论 |
+  |---|---|---|
+  | `../../../../app/app/api/upload.py` | **`/app/app/api/upload.py`** | ✅ 文件存在、属主 clawith 644，**已实测 `cp` 可覆盖**（覆盖后端自身代码） |
+  | `../../../../home/clawith/.bashrc` | `/home/clawith/.bashrc` | ✅ 存在且可写（shell 持久化后门；`.ssh/` 不存在故 authorized_keys 不可写） |
+  | `../../../../data/agents/<id>/workspace/mg2/gradlew` | 任意 agent 工作区文件 | ✅ 存在（跨 agent 污染，与 mg2 事故同构） |
+  | `../../../../etc/hostname` | `/etc/hostname` | 机制成立，root 属主挡住写入 |
+  | `/app/app/main.py`（绝对路径） | `/tmp/clawith_uploads/fid_/app/...` | ❌ 被 `file_id_` 前缀中和，不穿透（对初版报告的修正） |
+  | `..\..\app\app\main.py`（反斜杠） | 字面文件名 | ❌ Linux 非分隔符（后端仅部署 Linux） |
+  | `a/../../b.txt` | `/tmp/b.txt` | ✅ 仅 2 个 `..` 即出 clawith_uploads |
+  | 8 个 `..` 与 4 个等价 | 同 4 个 | root 之上不再弹 |
+
+  - **升级发现 1 — 可覆盖平台自身代码**：`/app/app/**`（main.py/upload.py/agent_tools.py 等）全部属主 `clawith`（= uvicorn 主进程 uid 1000）且目录/文件均可写，已实测覆盖 upload.py 成功并还原。`workers=1` 无 reload，替换的模块下次重启/部署加载 → 代码注入持久化。
+  - **升级发现 2 — 落点精确化**：原报告 `/private/Users/x/.ssh/...` 是 macOS 宿主路径推演；生产容器为 Linux，实际可达目标是上述表中"存在且可写"者。uid 1000 可写面 = `/home/clawith/**`、`/app/**`（含代码）、`/data/agents/**`（数据卷）、`/tmp/**`。
+  - **fallback 触发条件核实**：`agent_id: str = Form("")`，前端 3 处调用（`src/pages/agent-detail/AgentDetailPage.tsx:4448/4520/4567`）均为 `id ? { agent_id: id } : undefined`——**id 为空时不传 agent_id 即触发 fallback**（非"恒有值"）。API 仅需登录（`get_current_user`），任何租户用户可直接构造请求触发。`/tmp/clawith_uploads` 当前不存在 = 本部署尚未被触发过。
+- **大小**：`:70` 在任何检查前全量 `await file.read()` 进内存；`:101` 的 10MB 只限图片且读完才查。settings 无上传上限（grep 零命中）、main.py 仅 TraceId/Tenant/CORS 三个中间件无 BodyLimit；nginx `client_max_body_size 500m`（deploy/nginx/nginx.conf:11,39）但 **8008 端口 0.0.0.0 直连 backend 绕过 nginx**；容器 cgroup `memory.max = max` 无限制 → 单请求 OOM DoS 成立（可打死整个 backend 进程/VM）。
 - **访问控制**：全文无 `check_agent_access`（与 P0-2 同源）。
-- **fallback 可删除**：`clawith_uploads` 全仓库仅 upload.py:90 一处引用；文件仅本请求内被 `extract_text` 消费；前端 3 处调用（AgentDetailPage.tsx:4448/4520/4567）均在 `/agents/:id` 路由、`id` 恒有值。
+- **fallback 可删除**：`clawith_uploads` 全仓库仅 upload.py:90 一处引用；文件仅本请求内被 `extract_text` 消费。
 
 全部 5 个 UploadFile 端点风险表：
 
@@ -232,6 +269,8 @@ agent_id: uuid.UUID = Form(...),          # 必填，非法 422，fallback 分�
 **改动 3 — 大小上限**：新增 settings `MAX_UPLOAD_BYTES`（建议默认 50MB，见决策点 D3）；端点内 `Content-Length` 预检（超限直接 413）+ `read()` 后硬校验（防伪造/分块）。流式分块落盘需给 storage_runtime 加流式写 API，改动较大，列为后续项。
 
 **改动 4 — 顺手加固**：files.py 两处手写 replace 换 `sanitize_filename`；前端 3 处 `id ? { agent_id: id } : undefined` 改为无 `id` 不发请求；纵深建议 nginx 500m 下调并治理 8008 直连（需用户确认）。
+
+**改动 5 — 容器代码目录只读化**（新发现，独立于上传修复）：`/app/app/**` 属主即运行用户 clawith 且可写，路径穿越（或任何代码执行点）可覆盖平台自身代码。建议 Dockerfile 中 `chmod -R a-w /app` 或以 root 属主交付、clawith 只读运行（P0-1 修复后不再有宿主机执行回退，不影响功能）；验证方式：`docker exec -u 1000 touch /app/app/.wtest` 应失败。
 
 ### 测试计划
 
@@ -272,8 +311,9 @@ cd .. && scripts/arch-guard.sh
 | D1 | `SANDBOX_TYPE` 默认值：a) 保留 SUBPROCESS + unsafe-bwrap-fallback 恒 False；b) 改 DOCKER 默认（需先补挂载/安全检查）；c) 维持现状仅告警 | a |
 | D2 | builtin `execute_code` 的 `allow_network` True→False 对齐平台默认（影响默认 agent 网络能力） | 改（安全优先） |
 | D3 | `/chat/upload` 大小上限取值（建议 50MB 新增 settings）+ nginx 500m 是否下调、8008 直连治理 | 50MB；nginx 治理建议另开任务 |
-| D4 | `/chat/upload` 的 `/tmp` fallback：删除（推荐）还是保留加固 | 删除 |
+| D4 | `/chat/upload` 的 `/tmp` fallback：删除（推荐）还是保留加固 | **保留加固**（实施时变更决策：fallback 已由 D3 上限 + sanitize_filename + 固定 FALLBACK_UPLOAD_DIR 覆盖，且删除需前端同步改造；见「实施状态」） |
 | D5 | strict 化范围：`normalize_storage_key` 直接 strict（推荐）vs 双轨并行；`normalize_workspace_path` 保持 pop（保 LLM 工具可用性，推荐） | 前者 strict、后者保持 |
 | D6 | 其余 3 个无大小限制端点（files.py×2、groups.py×1）是否本次一并加统一上限 helper | 本次一并加（改动小） |
 | D7 | 分支与提交粒度：建议新分支 `feat/security-p0`，三步各一个 commit | 建议 |
 | D8 | 开发机 bwrap 安装引导（文档/Makefile 步骤，随 D1 落地） | 做 |
+| D9 | backend 容器代码目录只读化（`/app` 对运行用户 clawith 可写，穿越写可覆盖平台自身代码）：Dockerfile chmod / root 属主交付，P0-1 修复后实施 | 做 |
