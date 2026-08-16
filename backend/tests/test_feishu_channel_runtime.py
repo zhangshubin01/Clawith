@@ -169,6 +169,9 @@ async def test_feishu_group_message_uses_runtime_intake(monkeypatch) -> None:
     assert intake_call["channel_delivery_target"] == {
         "receive_id": "oc_group_1",
         "receive_id_type": "chat_id",
+        # 卡片流式: app_id/app_secret 随 delivery_target 传入 intake，
+        # chat_intake 入库前会剥离 app_secret（仅保留 app_id）
+        "_card_config": {"app_id": "app-1", "app_secret": "secret-1"},
     }
     assert intake_call["message_id"] == feishu.channel_message_id(
         agent_id,
