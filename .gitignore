@@ -22,6 +22,8 @@ venv/
 *.db
 .DS_Store
 .gstack/
+# Graphify knowledge-graph output (generated, history-purged 2026-08-16)
+graphify-out/
 # Runtime agent data
 backend/data/
 backend/agent_data/
