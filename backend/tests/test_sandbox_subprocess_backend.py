@@ -123,3 +123,65 @@ def test_sandbox_config_proxy_parsing() -> None:
     assert config.https_proxy == "http://10.0.0.1:3128"
     assert config.no_proxy == ".local,10.0.0.0/8"
 
+
+@pytest.mark.parametrize("bad_value", ["dockerr", "DOCKER", 123, "e2b "])
+def test_sandbox_config_from_dict_rejects_invalid_sandbox_type(bad_value) -> None:
+    """An invalid sandbox_type must raise, not silently degrade to SUBPROCESS."""
+    with pytest.raises(ValueError, match="Invalid sandbox_type"):
+        SandboxConfig.from_dict({"sandbox_type": bad_value})
+
+
+def test_sandbox_config_from_dict_accepts_valid_sandbox_type() -> None:
+    from app.services.sandbox.config import SandboxType
+
+    config = SandboxConfig.from_dict({"sandbox_type": "docker"})
+    assert config.type == SandboxType.DOCKER
+
+
+def test_unsafe_bwrap_fallback_defaults_off() -> None:
+    """Bare-host fallback must be opt-in, even outside containers."""
+    from app.config import _default_allow_unsafe_bwrap_fallback
+
+    assert _default_allow_unsafe_bwrap_fallback() is False
+    assert SandboxConfig().allow_unsafe_fallback_when_bwrap_missing is False
+
+
+@pytest.mark.asyncio
+async def test_bwrap_missing_fails_closed_by_default(monkeypatch, tmp_path: Path) -> None:
+    """Without bwrap, execute must fail closed unless explicitly opted in."""
+    monkeypatch.setattr(subprocess_backend.shutil, "which", lambda _cmd: None)
+    monkeypatch.setattr(
+        subprocess_backend,
+        "resolve_path_within_root",
+        lambda path, *_args, **_kwargs: path,
+    )
+
+    async def no_venv(self, venv_path):
+        del self, venv_path
+
+    monkeypatch.setattr(SubprocessBackend, "_ensure_workspace_venv", no_venv)
+    backend = SubprocessBackend(SandboxConfig())
+    result = await backend.execute("print('x')", "python", work_dir=str(tmp_path))
+
+    assert result.success is False
+    assert result.exit_code == 1
+    assert "bubblewrap" in result.error
+
+
+def test_safe_env_whitelist_does_not_leak_host_secrets(monkeypatch, tmp_path: Path) -> None:
+    """The subprocess env must be an explicit whitelist, never os.environ."""
+    monkeypatch.setenv("SECRET_MARKER_VAR", "should-not-leak")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "should-not-leak")
+    monkeypatch.setenv("OPENAI_API_KEY", "should-not-leak")
+
+    backend = SubprocessBackend(SandboxConfig())
+    env = backend._build_safe_env(tmp_path)
+
+    assert "SECRET_MARKER_VAR" not in env
+    assert "AWS_SECRET_ACCESS_KEY" not in env
+    assert "OPENAI_API_KEY" not in env
+    assert env["HOME"] == str(tmp_path)
+    assert env["NODE_PATH"] == ""
+    assert env["BASH_ENV"] == ""
+    assert "PATH" in env
+

@@ -11,11 +11,13 @@ import uuid
 
 from fastapi import WebSocketDisconnect
 import pytest
+from psycopg import errors as psycopg_errors
 
 from app.api.websocket import (
     AcceptedWebChatMessage,
     WebChatRuntimeIntake,
     WebSocketChatHandler,
+    _classify_runtime_intake_error,
     _websocket_content_log_summary,
 )
 from app.models.agent_run import AgentRun
@@ -588,6 +590,40 @@ async def test_unknown_runtime_intake_error_is_safe_and_traceable() -> None:
     assert "password" not in packet["content"]
     assert packet["trace_id"]
     assert packet["error"]["trace_id"] == packet["trace_id"]
+
+
+def test_classify_runtime_intake_error_maps_connection_exhaustion() -> None:
+    too_many = psycopg_errors.lookup("53300")("sorry, too many clients already")
+
+    assert _classify_runtime_intake_error(too_many) == "db_connection_exhausted"
+    # SQLAlchemy wraps driver errors behind `.orig`.
+    assert _classify_runtime_intake_error(SimpleNamespace(orig=too_many)) == "db_connection_exhausted"
+    assert _classify_runtime_intake_error(RuntimeError("database password leaked")) == ("runtime_intake_failed")
+
+
+@pytest.mark.asyncio
+async def test_db_connection_exhaustion_reaches_client_with_stable_code() -> None:
+    websocket = _WebSocket()
+    handler = _handler(websocket)
+    model = SimpleNamespace(id=uuid.uuid4())
+
+    with (
+        patch.object(handler, "_resolve_effective_model", new=AsyncMock(return_value=model)),
+        patch.object(handler, "_check_quotas", new=AsyncMock(return_value=True)),
+        patch.object(
+            handler,
+            "_enqueue_runtime_chat",
+            new=AsyncMock(side_effect=psycopg_errors.lookup("53300")("sorry, too many clients already")),
+        ),
+    ):
+        accepted = await handler._accept_client_message({"content": "hello"})
+
+    assert accepted is None
+    packet = websocket.sent[-1]
+    assert packet["code"] == "db_connection_exhausted"
+    assert packet["content"] == ("The durable Runtime database is at its connection limit. Please retry in a moment.")
+    assert packet["error"]["code"] == packet["code"]
+    assert packet["trace_id"]
 
 
 @pytest.mark.asyncio
