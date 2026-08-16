@@ -18,6 +18,7 @@ from app.config import get_settings
 from app.core.security import decrypt_data, encrypt_data
 from app.models.tenant_setting import TenantSetting
 from app.models.tool import Tool
+from app.services.agent_tools_cache import invalidate_all_tool_resolutions
 
 
 SENSITIVE_FIELD_KEYS = {"api_key", "private_key", "auth_code", "password", "secret"}
@@ -130,6 +131,7 @@ async def set_tenant_tool_config(
         existing.value = {"config": encrypted}
     else:
         query_dao.add(db, TenantSetting(tenant_id=tenant_id, key=key, value={"config": encrypted}))
+    invalidate_all_tool_resolutions()
 
 
 async def delete_tenant_tool_config(db: AsyncSession, tenant_id: uuid.UUID, tool_name: str) -> None:
@@ -142,6 +144,7 @@ async def delete_tenant_tool_config(db: AsyncSession, tenant_id: uuid.UUID, tool
     existing = result.scalar_one_or_none()
     if existing:
         await query_dao.delete(db, existing)
+        invalidate_all_tool_resolutions()
 
 
 async def get_tool_company_config(db: AsyncSession, tool: Tool, tenant_id: uuid.UUID | None) -> dict:

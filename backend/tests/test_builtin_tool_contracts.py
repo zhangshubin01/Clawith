@@ -211,8 +211,12 @@ def test_durable_runtime_default_executor_preserves_typed_outcomes() -> None:
         "tool_provider"
     ].default
     assert executor_default is agent_tools.execute_builtin_tool_outcome
-    assert tool_provider_default is agent_tools.get_runtime_agent_tools_for_llm
-    assert model_provider_default is agent_tools.get_runtime_agent_tools_for_llm
+    # P2: the runtime hot path resolves tools through the TTL cache; the
+    # resolver itself stays uncached and keeps its freshness contracts.
+    from app.services.agent_tools_cache import cached_runtime_agent_tools
+
+    assert tool_provider_default is cached_runtime_agent_tools
+    assert model_provider_default is cached_runtime_agent_tools
 
 
 def test_runtime_resolver_hides_every_application_tool_without_typed_boundary() -> None:

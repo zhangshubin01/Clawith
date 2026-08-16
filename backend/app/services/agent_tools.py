@@ -914,7 +914,7 @@ async def get_agent_tools_for_llm(agent_id: uuid.UUID) -> list[dict]:
                 db_tool_names.add(t.name)
 
             if default_included_names:
-                logger.info(
+                logger.debug(
                     f"[Tools] agent={agent_id} included via default fallback (no AgentTool record): "
                     f"{sorted(default_included_names)}"
                 )
@@ -936,7 +936,7 @@ async def get_agent_tools_for_llm(agent_id: uuid.UUID) -> list[dict]:
                 result = _patch_computer_tool_descriptions(result, computer_os_type)
                 # Final diagnostic: log the complete tool list and assignment stats
                 final_names = sorted(t["function"]["name"] for t in result)
-                logger.info(
+                logger.debug(
                     f"[Tools] agent={agent_id} FINAL {len(result)} tools "
                     f"(assignments={len(assignments)}, "
                     f"disabled={len(explicitly_disabled_names)}, "
@@ -1046,7 +1046,7 @@ async def _get_runtime_dynamic_mcp_tool_names(
             or parsed.scheme not in {"http", "https"}
             or not parsed.netloc
         ):
-            logger.info(
+            logger.debug(
                 "[Tools] Durable Runtime hid locally unready MCP tool {}",
                 name or "<unnamed>",
             )
@@ -1073,7 +1073,7 @@ async def get_runtime_agent_tools_for_llm(agent_id: uuid.UUID) -> list[dict]:
                     await _agent_is_designated_okr_agent(agent_id)
                 )
             if not is_designated_okr_agent:
-                logger.info(
+                logger.debug(
                     "[Tools] Durable Runtime hid {} because this Agent is "
                     "not the tenant's designated OKR Agent",
                     name,
@@ -1098,7 +1098,7 @@ async def get_runtime_agent_tools_for_llm(agent_id: uuid.UUID) -> list[dict]:
             ):
                 ready.append(tool)
             else:
-                logger.info(
+                logger.debug(
                     "[Tools] Durable Runtime hid web_search because its local "
                     "engine configuration is not ready"
                 )
@@ -1119,7 +1119,7 @@ async def get_runtime_agent_tools_for_llm(agent_id: uuid.UUID) -> list[dict]:
             ):
                 ready.append(tool)
             else:
-                logger.info(
+                logger.debug(
                     "[Tools] Durable Runtime hid execute_code_e2b because "
                     "its local E2B configuration is not ready"
                 )
@@ -1129,7 +1129,7 @@ async def get_runtime_agent_tools_for_llm(agent_id: uuid.UUID) -> list[dict]:
                 if await _agent_has_any_channel(agent_id):
                     ready.append(tool)
                 else:
-                    logger.info(
+                    logger.debug(
                         "[Tools] Durable Runtime hid {} because no channel is configured",
                         name,
                     )
@@ -1145,7 +1145,7 @@ async def get_runtime_agent_tools_for_llm(agent_id: uuid.UUID) -> list[dict]:
                 if await _agent_has_feishu(agent_id):
                     ready.append(tool)
                 else:
-                    logger.info(
+                    logger.debug(
                         "[Tools] Durable Runtime hid {} because the local "
                         "Feishu channel credentials are incomplete",
                         name,
@@ -1178,7 +1178,7 @@ async def get_runtime_agent_tools_for_llm(agent_id: uuid.UUID) -> list[dict]:
             if required_protocols and required_protocols <= ready_protocols:
                 ready.append(tool)
             else:
-                logger.info(
+                logger.debug(
                     "[Tools] Durable Runtime hid {} because its local Email "
                     "protocol configuration is incomplete",
                     name,
@@ -1211,7 +1211,7 @@ async def get_runtime_agent_tools_for_llm(agent_id: uuid.UUID) -> list[dict]:
             ):
                 ready.append(tool)
             else:
-                logger.info(
+                logger.debug(
                     "[Tools] Durable Runtime hid {} because its local "
                     "AgentBay configuration is incomplete",
                     name,
@@ -1280,7 +1280,7 @@ async def get_runtime_agent_tools_for_llm(agent_id: uuid.UUID) -> list[dict]:
         ):
             ready.append(tool)
         else:
-            logger.info(
+            logger.debug(
                 "[Tools] Durable Runtime hid {} because credentials are not configured",
                 name,
             )
@@ -1294,7 +1294,7 @@ async def get_runtime_agent_tools_for_llm(agent_id: uuid.UUID) -> list[dict]:
         - {""}
     )
     if hidden:
-        logger.info(
+        logger.debug(
             "[Tools] Durable Runtime hid tools without typed outcomes: {}",
             hidden,
         )

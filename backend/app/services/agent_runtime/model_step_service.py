@@ -58,7 +58,7 @@ from app.services.agent_runtime.tool_result_store import (
 from app.services.agent_runtime.thread_visibility import (
     model_visible_thread_messages,
 )
-from app.services.agent_tools import get_runtime_agent_tools_for_llm
+from app.services.agent_tools_cache import cached_runtime_agent_tools
 from app.services.vision_inject import compress_bytes_to_base64
 from app.services.llm.client import LLMMessage
 from app.services.llm.failover import FailoverErrorType, classify_error
@@ -1035,7 +1035,7 @@ class RuntimeModelStepService:
         session_factory: RuntimeSessionFactory,
         context_builder: ContextBuilder,
         completion: CompletionPort = complete_llm_once,
-        tool_provider: ToolProvider = get_runtime_agent_tools_for_llm,
+        tool_provider: ToolProvider = cached_runtime_agent_tools,
         prompt_builder: PromptBuilder = build_agent_context,
         tool_result_store: ToolResultStore | None = None,
         model_retry_attempts: int = _DEFAULT_MODEL_RETRY_ATTEMPTS,
