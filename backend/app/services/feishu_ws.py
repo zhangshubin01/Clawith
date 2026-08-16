@@ -323,14 +323,33 @@ class FeishuWSManager:
             asyncio.create_task(client._ping_loop())
 
         async def _run_async_client():
-            try:
-                logger.info(f"[Feishu WS] Connecting for agent {agent_id}")
-                await _do_full_connect()
-                logger.info(f"[Feishu WS] Connected for agent {agent_id}, receive loop started")
-            except asyncio.CancelledError:
-                return
-            except Exception as e:
-                logger.exception(f"[Feishu WS] Initial connect failed for agent {agent_id}: {e}")
+            # Initial connect with exponential backoff. The SDK's own
+            # _reconnect() only runs from _receive_message_loop, which exists
+            # only after the FIRST successful _connect(). If that first
+            # handshake fails (e.g. transient network timeout), nothing would
+            # ever retry — so we retry here until a connection is established.
+            _initial_retry_delay = 10
+            _initial_retry_max = 300
+            attempt = 0
+            while True:
+                try:
+                    logger.info(f"[Feishu WS] Connecting for agent {agent_id}")
+                    await _do_full_connect()
+                    logger.info(f"[Feishu WS] Connected for agent {agent_id}, receive loop started")
+                    break
+                except asyncio.CancelledError:
+                    return
+                except Exception as e:
+                    attempt += 1
+                    delay = min(_initial_retry_delay * (2 ** (attempt - 1)), _initial_retry_max)
+                    logger.exception(
+                        f"[Feishu WS] Initial connect failed for agent {agent_id} "
+                        f"(attempt {attempt}): {e} — retrying in {delay}s"
+                    )
+                    try:
+                        await asyncio.sleep(delay)
+                    except asyncio.CancelledError:
+                        return
 
             # Health-watch: only log status changes for diagnostics.
             # SDK handles reconnect internally via _receive_message_loop → _reconnect.
