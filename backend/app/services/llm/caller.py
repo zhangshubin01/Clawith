@@ -422,8 +422,8 @@ async def _process_tool_call(
         except Exception:
             pass
 
-    # Execute tool — pass on_output for execute_code streaming
-    _on_output = on_code_output if tool_name in ("execute_code", "execute_code_e2b") else None
+    # Execute tool — pass on_output for execute_code / android_compile streaming
+    _on_output = on_code_output if tool_name in ("execute_code", "execute_code_e2b", "android_compile") else None
     result = await execute_tool(
         tool_name, args,
         agent_id=agent_id,

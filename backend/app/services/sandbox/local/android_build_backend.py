@@ -200,6 +200,32 @@ class AndroidBuildBackend(BaseSandboxBackend):
         except Exception:
             return True  # 检测失败不阻塞构建
 
+    async def _preheat_gradle_cache_ownership(self, container) -> None:
+        """卷属主预热（幂等保险丝）。
+
+        gradle_cache_global 卷在镜像历史版本间迁移/重建时可能残留 root 属主内容
+        （旧镜像无 chown、或空卷首次挂载时 daemon 创建 root 目录），而构建容器以
+        builduser (uid=1000) 运行且根文件系统只读，无法自行修复，会以
+        Permission denied 失败。此处以 root exec 幂等 chown：属主正确时是 no-op，
+        毫秒级完成；失败仅告警不阻塞（预热是保险丝，非构建前提）。
+        """
+        try:
+            result = await asyncio.to_thread(
+                container.exec_run,
+                [
+                    "sh", "-c",
+                    "chown -R 1000:1000 /home/builduser/.gradle 2>/dev/null || true",
+                ],
+                user="root",
+            )
+            if result.exit_code != 0:
+                logger.warning(
+                    f"[AndroidBuild] gradle cache 属主预热失败: "
+                    f"{(result.output or b'').decode(errors='replace')[:200]}"
+                )
+        except Exception as e:
+            logger.warning(f"[AndroidBuild] gradle cache 属主预热异常: {e}")
+
     async def execute(
         self,
         code: str,
@@ -399,6 +425,10 @@ class AndroidBuildBackend(BaseSandboxBackend):
                 logger.info(
                     f"[AndroidBuild] container_start id={container.id[:12]}"
                 )
+
+                # 卷属主预热：卷内容可能残留 root 属主（历史镜像/重建卷），
+                # builduser 只读根文件系统无法自行修复 → root exec 幂等 chown
+                await self._preheat_gradle_cache_ownership(container)
 
                 # 检测 SDK 版本漂移（容器启动后立即检查）
                 await self._check_sdk_version_drift(container)

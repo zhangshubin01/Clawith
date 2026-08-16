@@ -33,6 +33,14 @@ from app.services.sandbox.docker_client import get_docker_client
 # ─────────────────────────────────────────────────────────
 
 
+class _MockExecResult:
+    """模拟 docker SDK ExecResult。"""
+
+    def __init__(self, *, exit_code: int = 0, output: bytes = b""):
+        self.exit_code = exit_code
+        self.output = output
+
+
 class _MockContainer:
     """模拟 Docker container 对象。"""
 
@@ -41,6 +49,12 @@ class _MockContainer:
         self._wait_result = wait_result or {"StatusCode": 0}
         self.kill_called = False
         self.remove_called = False
+        self.exec_run_calls: list[dict] = []
+
+    def exec_run(self, cmd, *, user=None, **kwargs):
+        """记录调用并返回成功的 ExecResult（模拟 root chown 预热）。"""
+        self.exec_run_calls.append({"cmd": cmd, "user": user, "kwargs": kwargs})
+        return _MockExecResult()
 
     def logs(self, *, stream=False, follow=False, stdout=True, stderr=True):
         """返回一个生成器，模仿 container.logs(stream=True)。"""
@@ -701,3 +715,56 @@ class TestFinallyCleanupSafety:
                 f"实际异常：{type(exc).__name__}: {exc}"
             )
         assert result.exit_code == 124
+
+
+# ─────────────────────────────────────────────────────────
+# 卷属主预热（防复发保险丝）
+# ─────────────────────────────────────────────────────────
+
+
+class TestGradleCacheOwnershipPreheat:
+    """验证构建容器启动后以 root exec 幂等 chown gradle 缓存卷。
+
+    背景：gradle_cache_global 卷在镜像历史版本间迁移/重建时可能残留
+    root 属主内容，而构建容器以 builduser (uid=1000) 运行且根文件系统
+    只读，无法自行修复，会以 Permission denied 失败。预热是运行时保险丝：
+    属主正确时是 no-op，失败仅告警不阻塞构建。
+    """
+
+    def test_preheat_runs_as_root_with_chown(self, backend, mock_docker_client):
+        result = asyncio.run(backend.execute(
+            code="", language="java",
+            timeout=30, work_dir="/workspace",
+            project_path="/workspace/app",
+            gradle_task="assembleDebug",
+        ))
+        assert result.success is True, f"预热不应影响构建结果: {result.error}"
+
+        container = mock_docker_client.containers.run_result
+        assert container.exec_run_calls, "构建前应执行卷属主预热 exec_run"
+        call = container.exec_run_calls[0]
+        assert call["user"] == "root", f"预热必须以 root 执行, 实际: {call['user']!r}"
+        cmd_text = " ".join(call["cmd"])
+        assert "chown -R 1000:1000 /home/builduser/.gradle" in cmd_text, (
+            f"预热命令应含幂等 chown, 实际: {cmd_text!r}"
+        )
+
+    def test_preheat_failure_only_warns(self, backend, mock_docker_client, logger_spy):
+        """exec_run 失败 → 仅告警，不阻塞构建。"""
+        def _failing_exec_run(*args, **kwargs):
+            raise RuntimeError("docker exec failed")
+
+        mock_docker_client.containers.run_result.exec_run = _failing_exec_run
+
+        result = asyncio.run(backend.execute(
+            code="", language="java",
+            timeout=30, work_dir="/workspace",
+            project_path="/workspace/app",
+            gradle_task="assembleDebug",
+        ))
+        assert result.success is True, f"预热失败不应阻塞构建: {result.error}"
+        warnings = [
+            m for m in logger_spy.messages
+            if m[0] == "warning" and "属主预热" in m[2]
+        ]
+        assert warnings, "预热失败应产生 warning 日志"
