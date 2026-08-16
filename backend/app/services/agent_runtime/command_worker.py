@@ -18,6 +18,7 @@ from app.config import Settings, get_settings
 from app.core.logging_config import set_trace_id
 from app.models.agent_run import AgentRun
 from app.models.agent_run_command import AgentRunCommand
+from app.models.agent_tool_execution import AgentToolExecution
 from app.services.agent_runtime.persistence import (
     begin_command_attempt,
     claim_next_command,
@@ -35,6 +36,7 @@ from app.services.agent_runtime.state import (
 )
 from app.services.agent_runtime.thread_lock import ThreadLockNotAcquired, run_with_thread_lock
 from app.services.agent_runtime.tool_execution import (
+    SUPERSEDED_RESUME_ERROR_CODE,
     ToolExecutionReconciliationPending,
 )
 from app.services.group_realtime import publish_stored_group_message
@@ -76,7 +78,24 @@ _COMMAND_REJECTION_MESSAGES = {
     "thread_not_started": "The Runtime thread has not started.",
     "already_terminal": "The Runtime run is already complete.",
     "cancelled_before_apply": "The Runtime invocation was cancelled before it applied.",
+    "superseded_tool_execution": (
+        "The tool execution settled before this resume ran."
+    ),
 }
+
+
+def _resume_tool_call_id(payload: JsonObject) -> str | None:
+    """Extract the tool_call_id a timer resume references, if any.
+
+    Lease-reconcile, thread-holder-wake and async-poll resumes all nest it
+    under ``payload.payload.tool_call_id``; user/agent resumes do not carry it.
+    """
+    nested = payload.get("payload")
+    if isinstance(nested, Mapping):
+        tool_call_id = nested.get("tool_call_id")
+        if isinstance(tool_call_id, str) and tool_call_id:
+            return tool_call_id
+    return None
 
 
 def command_rejection_message(error_code: str | None) -> str | None:
@@ -629,6 +648,51 @@ class RuntimeCommandWorker:
                 "checkpoint metadata does not belong to the claimed Command",
             )
 
+    async def _resume_tool_execution_terminal(
+        self,
+        command: RuntimeCommandRecord,
+    ) -> bool:
+        """Whether this resume references an already-settled tool execution.
+
+        Scoped to the command's own Run: a thread-holder wake resume carries
+        the dead owner Run's tool_call_id and must not match here.
+        """
+        tool_call_id = _resume_tool_call_id(command.payload)
+        if tool_call_id is None:
+            return False
+        async with self._session_factory() as db:
+            result = await db.execute(
+                select(AgentToolExecution.status).where(
+                    AgentToolExecution.tenant_id == command.tenant_id,
+                    AgentToolExecution.run_id == command.run_id,
+                    AgentToolExecution.tool_call_id == tool_call_id,
+                )
+            )
+            status = result.scalar_one_or_none()
+        return status in {"succeeded", "failed", "unknown"}
+
+    @staticmethod
+    def _checkpoint_waits_for_resume(
+        checkpoint: CheckpointObservation,
+        command: RuntimeCommandRecord,
+    ) -> bool:
+        """Whether the Run is parked waiting on exactly this resume.
+
+        A resume referencing a settled execution is stale only when the Run is
+        NOT waiting on its correlation; the lease reconciler settles and then
+        enqueues in one transaction, so its wake resume must still execute for
+        a parked Run.
+        """
+        lifecycle = checkpoint.state.get("lifecycle")
+        if not isinstance(lifecycle, Mapping):
+            return False
+        waiting_request = lifecycle.get("waiting_request")
+        if not isinstance(waiting_request, Mapping):
+            return False
+        return waiting_request.get("correlation_id") == command.payload.get(
+            "correlation_id"
+        )
+
     async def _reject(
         self,
         command: RuntimeCommandRecord,
@@ -814,6 +878,18 @@ class RuntimeCommandWorker:
                 return await self._reject(command, "thread_not_started", run=run)
             if checkpoint is not None and classify_checkpoint(checkpoint) == "terminal":
                 return await self._reject(command, "already_terminal", run=run)
+            if (
+                command.command_type == "resume"
+                and await self._resume_tool_execution_terminal(command)
+                and not self._checkpoint_waits_for_resume(checkpoint, command)
+            ):
+                # 悬空 resume 兜底：引用的工具调用已 settle 且 Run 并未在等这个
+                # correlation——该命令因 Run 自驱重放而失去意义，跳过 Graph 执行。
+                return await self._reject(
+                    command,
+                    SUPERSEDED_RESUME_ERROR_CODE,
+                    run=run,
+                )
 
             await self._handle_pre_command(
                 run=run,
