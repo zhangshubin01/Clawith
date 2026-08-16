@@ -16,6 +16,7 @@ from app.services.agent_runtime.run_compactor import (
     RunCompactorError,
     RuntimeRunCompactorService,
     TransientRunCompactorError,
+    _repair_json_object,
 )
 from app.services.agent_runtime.state import (
     JsonObject,
@@ -205,6 +206,52 @@ def _service(
         settings=_settings(),
         completion=completion,
         input_loader=load,
+    )
+
+
+def _step_with(arguments: dict[str, object]) -> LLMCompletionStep:
+    return LLMCompletionStep(
+        content="",
+        tool_calls=(
+            {
+                "id": "compact-1",
+                "type": "function",
+                "function": {
+                    "name": "commit_thread_summary",
+                    "arguments": json.dumps(arguments),
+                },
+            },
+        ),
+        reasoning_content=None,
+        retry_instruction=None,
+        usage=TokenUsage(total_tokens=1),
+    )
+
+
+def _multi_call_step() -> LLMCompletionStep:
+    return LLMCompletionStep(
+        content="",
+        tool_calls=(
+            {
+                "id": "compact-1",
+                "type": "function",
+                "function": {
+                    "name": "commit_thread_summary",
+                    "arguments": json.dumps(_step_arguments()),
+                },
+            },
+            {
+                "id": "compact-2",
+                "type": "function",
+                "function": {
+                    "name": "commit_thread_summary",
+                    "arguments": json.dumps(_step_arguments()),
+                },
+            },
+        ),
+        reasoning_content=None,
+        retry_instruction=None,
+        usage=TokenUsage(total_tokens=1),
     )
 
 
@@ -747,8 +794,8 @@ async def test_transient_provider_failure_is_typed_for_langgraph_retry() -> None
 
 
 @pytest.mark.asyncio
-async def test_text_fallback_summary_when_model_skips_tool_call() -> None:
-    """Plain-text reply (no tool call) is used as best-effort summary."""
+async def test_plain_text_body_is_used_as_best_effort_fallback() -> None:
+    """A plain-text reply (no JSON body) is used as best-effort summary."""
     state, context, tenant_id = _state(
         [_normal("old", "old " * 300), _normal("current")]
     )
@@ -776,8 +823,8 @@ async def test_text_fallback_summary_when_model_skips_tool_call() -> None:
 
 
 @pytest.mark.asyncio
-async def test_json_body_fallback_summary_when_model_skips_tool_call() -> None:
-    """A raw JSON body with summary fields is structured-fallbacked."""
+async def test_json_text_body_summary_is_primary_contract() -> None:
+    """L4: the summary arrives as a JSON text body and is consumed directly."""
     state, context, tenant_id = _state(
         [_normal("old", "old " * 300), _normal("current")]
     )
@@ -812,37 +859,18 @@ async def test_json_body_fallback_summary_when_model_skips_tool_call() -> None:
 
 
 @pytest.mark.asyncio
-async def test_multiple_tool_calls_remain_deterministic_failure() -> None:
-    """More than one tool call is a genuine anomaly and still fails closed."""
+async def test_multiple_tool_calls_fail_deterministically_after_repair_exhaustion() -> None:
+    """More than one tool call is repaired up to the limit, then fails closed
+    with the frozen error code."""
     state, context, tenant_id = _state(
         [_normal("old", "old " * 300), _normal("current")]
     )
+    calls = 0
 
     async def complete(*_args, **_kwargs):
-        return LLMCompletionStep(
-            content="",
-            tool_calls=(
-                {
-                    "id": "compact-1",
-                    "type": "function",
-                    "function": {
-                        "name": "commit_thread_summary",
-                        "arguments": json.dumps(_step_arguments()),
-                    },
-                },
-                {
-                    "id": "compact-2",
-                    "type": "function",
-                    "function": {
-                        "name": "commit_thread_summary",
-                        "arguments": json.dumps(_step_arguments()),
-                    },
-                },
-            ),
-            reasoning_content=None,
-            retry_instruction=None,
-            usage=TokenUsage(total_tokens=1),
-        )
+        nonlocal calls
+        calls += 1
+        return _multi_call_step()
 
     with pytest.raises(RunCompactorError) as raised:
         await _service(
@@ -853,6 +881,8 @@ async def test_multiple_tool_calls_remain_deterministic_failure() -> None:
         ).compact_if_needed(state, context)
 
     assert raised.value.code == "invalid_thread_compact_output"
+    assert "2 attempt" in str(raised.value)
+    assert calls == 3
 
 
 @pytest.mark.asyncio
@@ -873,3 +903,744 @@ async def test_summary_over_4096_tokens_is_rejected() -> None:
         ).compact_if_needed(state, context)
 
     assert raised.value.code == "thread_summary_exceeds_budget"
+
+
+@pytest.mark.asyncio
+async def test_invalid_json_arguments_are_repaired_before_success() -> None:
+    """Sanitizer retry_instruction triggers a same-batch repair retry."""
+    state, context, tenant_id = _state(
+        [_normal("old", "old " * 300), _normal("current")]
+    )
+    instruction = "Your previous tool call arguments were not valid JSON."
+    prompts: list[list[str]] = []
+
+    async def complete(_model, prompt, **_kwargs):
+        prompts.append([message.content for message in prompt])
+        if len(prompts) == 1:
+            return LLMCompletionStep(
+                content="",
+                tool_calls=(),
+                reasoning_content=None,
+                retry_instruction=instruction,
+                usage=TokenUsage(total_tokens=1),
+            )
+        return _step()
+
+    result = await _service(
+        model=_model(tenant_id),
+        completion=complete,
+        effective_budget=1_000,
+        current_tokens=900,
+    ).compact_if_needed(state, context)
+
+    assert result.compacted is True
+    assert result.thread_summary == _step_arguments()
+    assert len(prompts) == 2
+    assert prompts[1][-1] == instruction
+
+
+@pytest.mark.asyncio
+async def test_retry_instruction_takes_priority_over_text_fallback() -> None:
+    """Invalid JSON with accompanying content must be repaired, not silently
+    text-fallbacked away."""
+    state, context, tenant_id = _state(
+        [_normal("old", "old " * 300), _normal("current")]
+    )
+    calls = 0
+
+    async def complete(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return LLMCompletionStep(
+                content="以下是摘要：真正的摘要内容",
+                tool_calls=(),
+                reasoning_content=None,
+                retry_instruction="Your previous tool call arguments were not valid JSON.",
+                usage=TokenUsage(total_tokens=1),
+            )
+        return _step()
+
+    result = await _service(
+        model=_model(tenant_id),
+        completion=complete,
+        effective_budget=1_000,
+        current_tokens=900,
+    ).compact_if_needed(state, context)
+
+    assert result.compacted is True
+    assert result.thread_summary is not None
+    assert result.thread_summary["completed_work_and_results"] == (
+        "Reviewed earlier context"
+    )
+    assert calls == 2
+
+
+@pytest.mark.asyncio
+async def test_invalid_json_arguments_exhausted_fails_with_frozen_code() -> None:
+    """Repair exhaustion keeps the frozen deterministic error code and carries
+    the attempt count."""
+    state, context, tenant_id = _state(
+        [_normal("old", "old " * 300), _normal("current")]
+    )
+    calls = 0
+
+    async def complete(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        return LLMCompletionStep(
+            content="",
+            tool_calls=(),
+            reasoning_content=None,
+            retry_instruction="Your previous tool call arguments were not valid JSON.",
+            usage=TokenUsage(total_tokens=1),
+        )
+
+    with pytest.raises(RunCompactorError) as raised:
+        await _service(
+            model=_model(tenant_id),
+            completion=complete,
+            effective_budget=1_000,
+            current_tokens=900,
+        ).compact_if_needed(state, context)
+
+    assert raised.value.code == "invalid_thread_compact_output"
+    assert "2 attempt" in str(raised.value)
+    assert calls == 3
+
+
+@pytest.mark.asyncio
+async def test_missing_field_is_repaired_before_success() -> None:
+    state, context, tenant_id = _state(
+        [_normal("old", "old " * 300), _normal("current")]
+    )
+    calls = 0
+
+    async def complete(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            arguments = dict(_step_arguments())
+            arguments.pop("next_actions")
+            return _step_with(arguments)
+        return _step()
+
+    result = await _service(
+        model=_model(tenant_id),
+        completion=complete,
+        effective_budget=1_000,
+        current_tokens=900,
+    ).compact_if_needed(state, context)
+
+    assert result.compacted is True
+    assert result.thread_summary == _step_arguments()
+    assert calls == 2
+
+
+@pytest.mark.asyncio
+async def test_non_string_field_is_repaired_before_success() -> None:
+    state, context, tenant_id = _state(
+        [_normal("old", "old " * 300), _normal("current")]
+    )
+    calls = 0
+
+    async def complete(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            arguments = dict(_step_arguments())
+            arguments["unfinished_or_blocked"] = 12345
+            return _step_with(arguments)
+        return _step()
+
+    result = await _service(
+        model=_model(tenant_id),
+        completion=complete,
+        effective_budget=1_000,
+        current_tokens=900,
+    ).compact_if_needed(state, context)
+
+    assert result.compacted is True
+    assert result.thread_summary == _step_arguments()
+    assert calls == 2
+
+
+@pytest.mark.asyncio
+async def test_missing_field_is_salvaged_after_repair_exhaustion() -> None:
+    """L3: after the bounded repair loop the missing field is filled with ''
+    instead of failing the whole run."""
+    state, context, tenant_id = _state(
+        [_normal("old", "old " * 300), _normal("current")]
+    )
+    calls = 0
+
+    async def complete(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        arguments = dict(_step_arguments())
+        arguments.pop("unfinished_or_blocked")
+        return _step_with(arguments)
+
+    result = await _service(
+        model=_model(tenant_id),
+        completion=complete,
+        effective_budget=1_000,
+        current_tokens=900,
+    ).compact_if_needed(state, context)
+
+    assert result.compacted is True
+    assert result.thread_summary is not None
+    assert result.thread_summary["unfinished_or_blocked"] == ""
+    assert result.thread_summary["task_goal_and_constraints"] == (
+        "Complete the work accurately"
+    )
+    assert calls == 3
+
+
+@pytest.mark.asyncio
+async def test_extra_field_is_ignored_after_repair_exhaustion() -> None:
+    """L3: extra fields are tolerated instead of failing the run."""
+    state, context, tenant_id = _state(
+        [_normal("old", "old " * 300), _normal("current")]
+    )
+    calls = 0
+
+    async def complete(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        arguments = {**_step_arguments(), "bonus_field": "extra"}
+        return _step_with(arguments)
+
+    result = await _service(
+        model=_model(tenant_id),
+        completion=complete,
+        effective_budget=1_000,
+        current_tokens=900,
+    ).compact_if_needed(state, context)
+
+    assert result.compacted is True
+    assert result.thread_summary is not None
+    assert set(result.thread_summary) == {
+        "task_goal_and_constraints",
+        "completed_work_and_results",
+        "key_decisions_and_evidence",
+        "unfinished_or_blocked",
+        "next_actions",
+    }
+    assert calls == 3
+
+
+@pytest.mark.asyncio
+async def test_non_string_field_is_salvaged_after_repair_exhaustion() -> None:
+    """L3: non-string values are bounded str()-converted instead of failing."""
+    state, context, tenant_id = _state(
+        [_normal("old", "old " * 300), _normal("current")]
+    )
+    calls = 0
+
+    async def complete(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        arguments = dict(_step_arguments())
+        arguments["next_actions"] = 42
+        return _step_with(arguments)
+
+    result = await _service(
+        model=_model(tenant_id),
+        completion=complete,
+        effective_budget=1_000,
+        current_tokens=900,
+    ).compact_if_needed(state, context)
+
+    assert result.compacted is True
+    assert result.thread_summary is not None
+    assert result.thread_summary["next_actions"] == "42"
+    assert calls == 3
+
+
+@pytest.mark.asyncio
+async def test_empty_step_fails_deterministically_after_repair_exhaustion() -> None:
+    """No tool call and no text is a structural catastrophe: repaired up to the
+    limit, then the frozen code fails the run."""
+    state, context, tenant_id = _state(
+        [_normal("old", "old " * 300), _normal("current")]
+    )
+    calls = 0
+
+    async def complete(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        return LLMCompletionStep(
+            content="",
+            tool_calls=(),
+            reasoning_content=None,
+            retry_instruction=None,
+            usage=TokenUsage(total_tokens=1),
+        )
+
+    with pytest.raises(RunCompactorError) as raised:
+        await _service(
+            model=_model(tenant_id),
+            completion=complete,
+            effective_budget=1_000,
+            current_tokens=900,
+        ).compact_if_needed(state, context)
+
+    assert raised.value.code == "invalid_thread_compact_output"
+    assert "2 attempt" in str(raised.value)
+    assert calls == 3
+
+
+@pytest.mark.asyncio
+async def test_truncated_text_is_repaired_before_success() -> None:
+    """finish_reason=length with plain text is repaired instead of silently
+    accepted as a truncated summary."""
+    state, context, tenant_id = _state(
+        [_normal("old", "old " * 300), _normal("current")]
+    )
+    calls = 0
+
+    async def complete(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return LLMCompletionStep(
+                content="truncated summary text",
+                tool_calls=(),
+                reasoning_content=None,
+                retry_instruction=None,
+                usage=TokenUsage(total_tokens=1),
+                finish_reason="length",
+            )
+        return _step()
+
+    result = await _service(
+        model=_model(tenant_id),
+        completion=complete,
+        effective_budget=1_000,
+        current_tokens=900,
+    ).compact_if_needed(state, context)
+
+    assert result.compacted is True
+    assert result.thread_summary == _step_arguments()
+    assert calls == 2
+
+
+# ── L2: bounded local JSON repair ──────────────────────────────────────────
+
+
+def test_repair_json_object_escapes_unescaped_inner_quotes() -> None:
+    raw = (
+        '{"task_goal_and_constraints": "User said "hello" and wants X",'
+        '"completed_work_and_results": "done"}'
+    )
+    parsed = _repair_json_object(raw)
+
+    assert parsed is not None
+    assert parsed["task_goal_and_constraints"] == 'User said "hello" and wants X'
+    assert parsed["completed_work_and_results"] == "done"
+
+
+def test_repair_json_object_escapes_raw_newlines_and_tabs() -> None:
+    raw = (
+        '{"task_goal_and_constraints": "line1\nline2\ttab",'
+        '"completed_work_and_results": "ok"}'
+    )
+    parsed = _repair_json_object(raw)
+
+    assert parsed is not None
+    assert parsed["task_goal_and_constraints"] == "line1\nline2\ttab"
+
+
+def test_repair_json_object_fixes_invalid_backslash_escapes() -> None:
+    raw = (
+        '{"task_goal_and_constraints": "path is C:\\Users\\shubin",'
+        '"completed_work_and_results": "ok"}'
+    )
+    parsed = _repair_json_object(raw)
+
+    assert parsed is not None
+    assert parsed["task_goal_and_constraints"] == "path is C:\\Users\\shubin"
+
+
+def test_repair_json_object_strips_markdown_fence_wrapper() -> None:
+    raw = '```json\n{"task_goal_and_constraints": "ok", "completed_work_and_results": "ok"}\n```'
+    parsed = _repair_json_object(raw)
+
+    assert parsed is not None
+    assert parsed["task_goal_and_constraints"] == "ok"
+
+
+def test_repair_json_object_returns_none_for_truncated_body() -> None:
+    assert _repair_json_object('{"task_goal_and_constraints": "unfinished') is None
+
+
+def test_repair_json_object_returns_none_for_non_object() -> None:
+    assert _repair_json_object('["not", "an", "object"]') is None
+    assert _repair_json_object("plain prose") is None
+
+
+def test_repair_json_object_passes_through_valid_json() -> None:
+    raw = json.dumps(_step_arguments())
+    parsed = _repair_json_object(raw)
+
+    assert parsed == _step_arguments()
+
+
+@pytest.mark.asyncio
+async def test_invalid_arguments_locally_repaired_without_retry() -> None:
+    """L2: sanitizer-dropped invalid arguments are salvaged locally, avoiding
+    the ~66k-token re-send."""
+    state, context, tenant_id = _state(
+        [_normal("old", "old " * 300), _normal("current")]
+    )
+    calls = 0
+    raw_arguments = (
+        '{"task_goal_and_constraints": "Complete the work "accurately"",'
+        '"completed_work_and_results": "Reviewed earlier context",'
+        '"key_decisions_and_evidence": "Use the durable receipt",'
+        '"unfinished_or_blocked": "No blockers",'
+        '"next_actions": "Answer the exact current request"}'
+    )
+
+    async def complete(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        return LLMCompletionStep(
+            content="",
+            tool_calls=(),
+            reasoning_content=None,
+            retry_instruction="Your previous tool call arguments were not valid JSON.",
+            usage=TokenUsage(total_tokens=1),
+            raw_invalid_tool_calls=(
+                {
+                    "id": "compact-bad",
+                    "type": "function",
+                    "function": {
+                        "name": "commit_thread_summary",
+                        "arguments": raw_arguments,
+                    },
+                },
+            ),
+        )
+
+    result = await _service(
+        model=_model(tenant_id),
+        completion=complete,
+        effective_budget=1_000,
+        current_tokens=900,
+    ).compact_if_needed(state, context)
+
+    assert result.compacted is True
+    assert result.thread_summary is not None
+    assert result.thread_summary["task_goal_and_constraints"] == (
+        'Complete the work "accurately"'
+    )
+    assert result.thread_summary["next_actions"] == (
+        "Answer the exact current request"
+    )
+    assert calls == 1
+
+
+@pytest.mark.asyncio
+async def test_unrepairable_arguments_still_fall_back_to_llm_repair() -> None:
+    """L2 failure leaves the L1 retry_instruction channel intact."""
+    state, context, tenant_id = _state(
+        [_normal("old", "old " * 300), _normal("current")]
+    )
+    calls = 0
+
+    async def complete(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return LLMCompletionStep(
+                content="",
+                tool_calls=(),
+                reasoning_content=None,
+                retry_instruction="Your previous tool call arguments were not valid JSON.",
+                usage=TokenUsage(total_tokens=1),
+                raw_invalid_tool_calls=(
+                    {
+                        "id": "compact-bad",
+                        "type": "function",
+                        "function": {
+                            "name": "commit_thread_summary",
+                            "arguments": '{"task_goal_and_constraints": "cut',
+                        },
+                    },
+                ),
+            )
+        return _step()
+
+    result = await _service(
+        model=_model(tenant_id),
+        completion=complete,
+        effective_budget=1_000,
+        current_tokens=900,
+    ).compact_if_needed(state, context)
+
+    assert result.compacted is True
+    assert result.thread_summary == _step_arguments()
+    assert calls == 2
+
+
+@pytest.mark.asyncio
+async def test_broken_json_text_body_is_locally_repaired_fallback() -> None:
+    """L2: an invalid JSON text body with one unescaped quote is salvaged into
+    the structured fallback instead of whole-text fallback."""
+    state, context, tenant_id = _state(
+        [_normal("old", "old " * 300), _normal("current")]
+    )
+    body = (
+        '{"task_goal_and_constraints": "Ship the "feature"",'
+        '"completed_work_and_results": "Reviewed and patched",'
+        '"key_decisions_and_evidence": "Keep receipts",'
+        '"unfinished_or_blocked": "None",'
+        '"next_actions": "Answer now"}'
+    )
+    calls = 0
+
+    async def complete(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        return LLMCompletionStep(
+            content=body,
+            tool_calls=(),
+            reasoning_content=None,
+            retry_instruction=None,
+            usage=TokenUsage(total_tokens=1),
+        )
+
+    result = await _service(
+        model=_model(tenant_id),
+        completion=complete,
+        effective_budget=1_000,
+        current_tokens=900,
+    ).compact_if_needed(state, context)
+
+    assert result.compacted is True
+    assert result.thread_summary is not None
+    assert result.thread_summary["task_goal_and_constraints"] == 'Ship the "feature"'
+    assert result.thread_summary["completed_work_and_results"] == (
+        "Reviewed and patched"
+    )
+    assert calls == 1
+
+
+@pytest.mark.asyncio
+async def test_compact_completion_uses_temperature_zero() -> None:
+    """Phase 2: compaction is a deterministic task and requests temperature=0."""
+    state, context, tenant_id = _state(
+        [_normal("old", "old " * 300), _normal("current")]
+    )
+    seen: list[dict] = []
+
+    async def complete(_model, _prompt, **kwargs):
+        seen.append(kwargs)
+        return _step()
+
+    await _service(
+        model=_model(tenant_id),
+        completion=complete,
+        effective_budget=1_000,
+        current_tokens=900,
+    ).compact_if_needed(state, context)
+
+    assert seen
+    assert all(call["temperature"] == 0 for call in seen)
+
+
+# ── L4: text-JSON channel ───────────────────────────────────────────────────
+
+
+def _json_body(**overrides: object) -> str:
+    body: dict[str, object] = {**_step_arguments(), **overrides}
+    return json.dumps(body)
+
+
+@pytest.mark.asyncio
+async def test_compact_completion_declares_no_tools() -> None:
+    """L4: the compact completion must not declare any tool schema."""
+    state, context, tenant_id = _state(
+        [_normal("old", "old " * 300), _normal("current")]
+    )
+    seen: list[dict] = []
+
+    async def complete(_model, _prompt, **kwargs):
+        seen.append(kwargs)
+        return LLMCompletionStep(
+            content=_json_body(),
+            tool_calls=(),
+            reasoning_content=None,
+            retry_instruction=None,
+            usage=TokenUsage(total_tokens=1),
+        )
+
+    result = await _service(
+        model=_model(tenant_id),
+        completion=complete,
+        effective_budget=1_000,
+        current_tokens=900,
+    ).compact_if_needed(state, context)
+
+    assert result.compacted is True
+    assert seen
+    assert all("tools" not in call for call in seen)
+
+
+@pytest.mark.asyncio
+async def test_compact_prompt_requests_json_text_body_without_tools() -> None:
+    """L4: the system prompt demands one bare JSON object and forbids tools."""
+    state, context, tenant_id = _state(
+        [_normal("old", "old " * 300), _normal("current")]
+    )
+    prompts: list[list[str]] = []
+
+    async def complete(_model, prompt, **_kwargs):
+        prompts.append([message.content for message in prompt])
+        return LLMCompletionStep(
+            content=_json_body(),
+            tool_calls=(),
+            reasoning_content=None,
+            retry_instruction=None,
+            usage=TokenUsage(total_tokens=1),
+        )
+
+    await _service(
+        model=_model(tenant_id),
+        completion=complete,
+        effective_budget=1_000,
+        current_tokens=900,
+    ).compact_if_needed(state, context)
+
+    system = prompts[0][0]
+    assert "Do not call any tools" in system
+    for field_name in sorted(
+        {
+            "task_goal_and_constraints",
+            "completed_work_and_results",
+            "key_decisions_and_evidence",
+            "unfinished_or_blocked",
+            "next_actions",
+        }
+    ):
+        assert field_name in system
+    assert "commit_thread_summary" not in system
+
+
+@pytest.mark.asyncio
+async def test_json_text_body_missing_field_is_repaired_before_success() -> None:
+    """L4: a JSON body missing one field is repair-asked before succeeding."""
+    state, context, tenant_id = _state(
+        [_normal("old", "old " * 300), _normal("current")]
+    )
+    calls = 0
+
+    async def complete(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            body = {**_step_arguments()}
+            body.pop("next_actions")
+            return LLMCompletionStep(
+                content=json.dumps(body),
+                tool_calls=(),
+                reasoning_content=None,
+                retry_instruction=None,
+                usage=TokenUsage(total_tokens=1),
+            )
+        return LLMCompletionStep(
+            content=_json_body(),
+            tool_calls=(),
+            reasoning_content=None,
+            retry_instruction=None,
+            usage=TokenUsage(total_tokens=1),
+        )
+
+    result = await _service(
+        model=_model(tenant_id),
+        completion=complete,
+        effective_budget=1_000,
+        current_tokens=900,
+    ).compact_if_needed(state, context)
+
+    assert result.compacted is True
+    assert result.thread_summary == _step_arguments()
+    assert calls == 2
+
+
+@pytest.mark.asyncio
+async def test_json_text_body_non_string_field_is_repaired_before_success() -> None:
+    """L4: a non-string field in the JSON body is repair-asked before success."""
+    state, context, tenant_id = _state(
+        [_normal("old", "old " * 300), _normal("current")]
+    )
+    calls = 0
+
+    async def complete(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return LLMCompletionStep(
+                content=_json_body(unfinished_or_blocked=12345),
+                tool_calls=(),
+                reasoning_content=None,
+                retry_instruction=None,
+                usage=TokenUsage(total_tokens=1),
+            )
+        return LLMCompletionStep(
+            content=_json_body(),
+            tool_calls=(),
+            reasoning_content=None,
+            retry_instruction=None,
+            usage=TokenUsage(total_tokens=1),
+        )
+
+    result = await _service(
+        model=_model(tenant_id),
+        completion=complete,
+        effective_budget=1_000,
+        current_tokens=900,
+    ).compact_if_needed(state, context)
+
+    assert result.compacted is True
+    assert result.thread_summary == _step_arguments()
+    assert calls == 2
+
+
+@pytest.mark.asyncio
+async def test_json_text_body_missing_field_salvaged_after_exhaustion() -> None:
+    """L4: a JSON body that keeps missing a field is leniently salvaged."""
+    state, context, tenant_id = _state(
+        [_normal("old", "old " * 300), _normal("current")]
+    )
+    calls = 0
+
+    async def complete(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        body = {**_step_arguments()}
+        body.pop("unfinished_or_blocked")
+        return LLMCompletionStep(
+            content=json.dumps(body),
+            tool_calls=(),
+            reasoning_content=None,
+            retry_instruction=None,
+            usage=TokenUsage(total_tokens=1),
+        )
+
+    result = await _service(
+        model=_model(tenant_id),
+        completion=complete,
+        effective_budget=1_000,
+        current_tokens=900,
+    ).compact_if_needed(state, context)
+
+    assert result.compacted is True
+    assert result.thread_summary is not None
+    assert result.thread_summary["unfinished_or_blocked"] == ""
+    assert result.thread_summary["task_goal_and_constraints"] == (
+        "Complete the work accurately"
+    )
+    assert calls == 3
