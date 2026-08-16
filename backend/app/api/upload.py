@@ -5,13 +5,26 @@ import os
 import uuid
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, Form
+from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile, Form
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.api.upload_limits import MAX_IMAGE_BYTES, enforce_content_limit, precheck_content_length
+from app.core.permissions import check_agent_access
 from app.core.security import get_current_user
+from app.database import get_db
 from app.models.user import User
-from app.services.storage import ensure_local_path, get_storage_backend, guess_content_type, normalize_storage_key
+from app.services.storage import (
+    agent_workspace_key,
+    ensure_local_path,
+    get_storage_backend,
+    guess_content_type,
+    sanitize_filename,
+)
 from app.services.text_extractor import extract_text as extract_document_text
 
 router = APIRouter(prefix="/chat", tags=["chat"])
+
+FALLBACK_UPLOAD_DIR = Path("/tmp/clawith_uploads")
 
 # Supported extensions and their text extraction method
 TEXT_EXTENSIONS = {
@@ -57,9 +70,11 @@ def extract_text(file_path: Path, extension: str) -> str:
 
 @router.post("/upload")
 async def upload_file(
+    request: Request,
     file: UploadFile = File(...),
     agent_id: str = Form(""),
     current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
 ):
     """Upload a file for chat context. Saves to agent workspace/uploads/ and returns extracted text."""
     if not file.filename:
@@ -67,30 +82,47 @@ async def upload_file(
 
     ext = os.path.splitext(file.filename)[1].lower()
 
+    # Size caps: reject early on the declared Content-Length, then hard-check
+    # the bytes after read() (the header can be forged or absent).
+    if ext in IMAGE_EXTENSIONS:
+        precheck_content_length(request, max_bytes=MAX_IMAGE_BYTES, status_code=400, noun="Image")
+    precheck_content_length(request)
+
     content = await file.read()
+    if ext in IMAGE_EXTENSIONS:
+        enforce_content_limit(content, max_bytes=MAX_IMAGE_BYTES, status_code=400, noun="Image")
+    enforce_content_limit(content)
 
     # Determine save directory
     workspace_path = ""
     if agent_id:
+        # The agent namespace is an authorization boundary: the target agent
+        # must belong to the caller's tenant before anything is written.
+        try:
+            agent_uuid = uuid.UUID(agent_id)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid agent_id")
+        await check_agent_access(db, current_user, agent_uuid)
+
         storage = get_storage_backend()
-        filename = file.filename.replace("/", "_").replace("\\", "_")
-        workspace_path = f"workspace/uploads/{filename}"
-        key = normalize_storage_key(f"{agent_id}/{workspace_path}")
+        filename = sanitize_filename(file.filename)
+        key = agent_workspace_key(agent_uuid, f"uploads/{filename}")
         counter = 1
         while await storage.exists(key):
             stem, ext = os.path.splitext(filename)
             filename = f"{stem}_{counter}{ext}"
-            workspace_path = f"workspace/uploads/{filename}"
-            key = normalize_storage_key(f"{agent_id}/{workspace_path}")
+            key = agent_workspace_key(agent_uuid, f"uploads/{filename}")
             counter += 1
         await storage.write_bytes(key, content, content_type=guess_content_type(filename))
         save_path = await ensure_local_path(key)
+        workspace_path = f"workspace/uploads/{filename}"
     else:
         # Fallback: save to /tmp (legacy behavior)
-        fallback_dir = Path("/tmp/clawith_uploads")
+        fallback_dir = FALLBACK_UPLOAD_DIR
         fallback_dir.mkdir(exist_ok=True)
         file_id = str(uuid.uuid4())[:8]
-        save_path = fallback_dir / f"{file_id}_{file.filename}"
+        safe_name = sanitize_filename(file.filename)
+        save_path = fallback_dir / f"{file_id}_{safe_name}"
         save_path.write_bytes(content)
 
     # Extract text (only for known formats)
@@ -98,8 +130,7 @@ async def upload_file(
     image_data_url = ""
     if is_image:
         # For images: generate base64 data URL for vision models
-        if len(content) > 10 * 1024 * 1024:  # 10MB limit
-            raise HTTPException(status_code=400, detail="Image too large (max 10MB)")
+        # (size already enforced above: precheck + post-read hard check)
         mime = MIME_MAP.get(ext, "image/png")
         b64 = base64.b64encode(content).decode("ascii")
         image_data_url = f"data:{mime};base64,{b64}"

@@ -10,11 +10,12 @@ import uuid
 from pathlib import Path
 
 import aiofiles
-from fastapi import APIRouter, Depends, File as FastFile, HTTPException, UploadFile as UploadFileType, status
+from fastapi import APIRouter, Depends, File as FastFile, HTTPException, Request, UploadFile as UploadFileType, status
 from fastapi.responses import FileResponse, Response
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel
 
+from app.api.upload_limits import enforce_content_limit, precheck_content_length
 from app.dao import query_dao
 from app.config import get_settings
 from app.core.permissions import check_agent_access
@@ -37,6 +38,7 @@ from app.services.storage import (
     get_storage_backend,
     guess_content_type,
     normalize_storage_key,
+    sanitize_filename,
 )
 from app.services.storage_runtime.base import StorageEntry
 from app.services.workspace_paths import WorkspacePathError, resolve_agent_visible_path
@@ -862,6 +864,7 @@ DEFAULT_UPLOAD_DIR = "workspace/uploads"
 
 @upload_router.post("/upload")
 async def upload_file_to_workspace(
+    request: Request,
     agent_id: uuid.UUID,
     file: UploadFileType = FastFile(...),
     path: str = "workspace/knowledge_base",
@@ -879,13 +882,13 @@ async def upload_file_to_workspace(
     if normalized_path not in {"workspace", "skills"} and not normalized_path.startswith(("workspace/", "skills/")):
         raise HTTPException(status_code=400, detail="右侧根目录视图是 agent 根目录；上传文件时请放到 workspace/ 或 skills/ 目录下")
 
-    filename = file.filename or "unnamed"
-    # Sanitize filename
-    filename = filename.replace("/", "_").replace("\\", "_")
+    filename = sanitize_filename(file.filename or "unnamed")
     storage = get_storage_backend()
     file_key = _agent_storage_key(agent_id, f"{normalized_path}/{filename}")
 
+    precheck_content_length(request)
     content = await file.read()
+    enforce_content_limit(content)
     await storage.write_bytes(file_key, content, content_type=guess_content_type(filename))
 
     # Auto-extract text from non-text files
@@ -960,6 +963,7 @@ async def list_enterprise_kb_files(
 
 @enterprise_kb_router.post("/upload")
 async def upload_enterprise_kb_file(
+    request: Request,
     file: UploadFileType = FastFile(...),
     sub_path: str = "",
     current_user: User = Depends(get_current_user),
@@ -971,13 +975,14 @@ async def upload_enterprise_kb_file(
     if not current_user.tenant_id:
         raise HTTPException(status_code=400, detail="No tenant associated")
 
-    filename = file.filename or "unnamed"
-    filename = filename.replace("/", "_").replace("\\", "_")
+    filename = sanitize_filename(file.filename or "unnamed")
     storage = get_storage_backend()
     rel_path = f"{sub_path}/{filename}" if sub_path else filename
     storage_key = _enterprise_storage_key(str(current_user.tenant_id), rel_path)
 
+    precheck_content_length(request)
     content = await file.read()
+    enforce_content_limit(content)
     await storage.write_bytes(storage_key, content, content_type=guess_content_type(filename))
 
     # Auto-extract text from non-text files

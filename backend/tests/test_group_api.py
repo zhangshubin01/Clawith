@@ -316,7 +316,8 @@ async def test_workspace_binary_upload_preserves_conditions_and_stages_audit(mon
     monkeypatch.setattr(groups_api.group_file_service, "write_workspace_binary_file", fake_write)
 
     result = await groups_api.upload_group_workspace_file(
-        group.id,
+        request=SimpleNamespace(headers={}),
+        group_id=group.id,
         path="reports/final.pdf",
         file=_Upload(),
         expected_version_token="binary-v0",
