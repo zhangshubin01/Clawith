@@ -37,6 +37,7 @@ class LLMCompletionStep:
     usage: TokenUsage
     retry_tool_name: str | None = None
     finish_reason: str | None = None
+    raw_invalid_tool_calls: tuple[dict, ...] = ()
 
 
 async def complete_llm_once(
@@ -48,6 +49,7 @@ async def complete_llm_once(
     supports_vision: bool = False,
     on_chunk=None,
     on_thinking=None,
+    temperature: float | None = None,
 ) -> LLMCompletionStep:
     """Call one pinned model exactly once and normalize its tool proposals.
 
@@ -62,12 +64,13 @@ async def complete_llm_once(
         base_url=model.base_url,
         timeout=_get_model_timeout(model),
     )
+    request_temperature = model.temperature if temperature is None else temperature
     try:
         if on_chunk:
             response = await client.stream(
                 messages=api_messages,
                 tools=tools or None,
-                temperature=model.temperature,
+                temperature=request_temperature,
                 max_tokens=get_max_tokens(model.provider, model.model, getattr(model, "max_output_tokens", None)),
                 on_chunk=on_chunk,
                 on_thinking=on_thinking,
@@ -76,7 +79,7 @@ async def complete_llm_once(
             response = await client.complete(
                 messages=api_messages,
                 tools=tools or None,
-                temperature=model.temperature,
+                temperature=request_temperature,
                 max_tokens=get_max_tokens(model.provider, model.model, getattr(model, "max_output_tokens", None)),
             )
     finally:
@@ -101,10 +104,16 @@ async def complete_llm_once(
     sanitized_tool_calls: list[dict] | None = []
     retry_instruction = None
     retry_tool_name = None
+    raw_invalid_tool_calls: tuple[dict, ...] = ()
     if proposed_tool_calls:
         sanitized_tool_calls, retry_instruction, retry_tool_name = (
             _sanitize_tool_calls_for_context(proposed_tool_calls)
         )
+        if sanitized_tool_calls is None:
+            # The raw offending calls are preserved so callers that own
+            # bounded local repair (e.g. Thread Compact) can salvage the
+            # invalid JSON without re-asking the model.
+            raw_invalid_tool_calls = tuple(proposed_tool_calls)
     if textual_retry_instruction is not None:
         retry_instruction = textual_retry_instruction
         retry_tool_name = None
@@ -119,6 +128,7 @@ async def complete_llm_once(
             response.finish_reason,
             tuple(sanitized_tool_calls or ()),
         ),
+        raw_invalid_tool_calls=raw_invalid_tool_calls,
     )
 
 

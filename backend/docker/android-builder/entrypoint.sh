@@ -59,7 +59,23 @@ if [ ! -d "${JDK_HOME}/bin" ]; then
     mkdir -p "${JDK_CACHE_DIR}"
     TMP_DIR=$(mktemp -d)
 
-    # 主下载尝试：Adoptium CDN（强重试参数）
+    # 主下载尝试 1：清华 tuna Adoptium 镜像（国内直连快，动态解析最新版本）
+    JDK_MIRROR_LISTING="https://mirrors.tuna.tsinghua.edu.cn/Adoptium/${JAVA_VERSION}/jdk/${ADOPTIUM_ARCH}/linux/"
+    JDK_MIRROR_FILE=$(curl -fsSL --connect-timeout 15 --max-time 30 "${JDK_MIRROR_LISTING}" 2>/dev/null \
+        | grep -oE "OpenJDK${JAVA_VERSION}U-jdk_${ADOPTIUM_ARCH}_linux_hotspot_[0-9._]+\.tar\.gz" \
+        | sort -V | tail -1 || true)
+    JDK_MIRROR_DOWNLOADED=false
+    if [ -n "$JDK_MIRROR_FILE" ]; then
+        JDK_MIRROR_URL="${JDK_MIRROR_LISTING}${JDK_MIRROR_FILE}"
+        echo "[INFO] 主下载源(国内镜像): $JDK_MIRROR_URL"
+        if curl -fsSL --retry 3 --retry-delay 5 --connect-timeout 30 --max-time 300 \
+             "$JDK_MIRROR_URL" -o "${TMP_DIR}/jdk.tar.gz"; then
+            JDK_MIRROR_DOWNLOADED=true
+        fi
+    fi
+
+    # 主下载尝试 2：Adoptium CDN（tuna 不可用时回退）
+    if [ "$JDK_MIRROR_DOWNLOADED" != "true" ]; then
     echo "[INFO] 主下载源: $JDK_URL"
     curl -fsSL --retry 3 --retry-delay 5 --connect-timeout 30 --max-time 300 \
          "$JDK_URL" -o "${TMP_DIR}/jdk.tar.gz" || {
@@ -85,6 +101,7 @@ if [ ! -d "${JDK_HOME}/bin" ]; then
             exit 1
         fi
     }
+    fi
 
     # sha256 校验（tar 之前，非阻塞：校验和下载失败时跳过）
     curl -fsSL "${JDK_URL}.sha256.txt" -o "${TMP_DIR}/jdk.sha256" 2>/dev/null || true
@@ -143,13 +160,32 @@ allprojects {
 GRADLE_SCRIPT
 
 # ─── tmpfs 加速编译热区 ───
-# 将 app/build/intermediates 符号链接到 /dev/shm/intermediates（tmpfs 挂载点）
-# 编译过程中临时文件不落盘，减少 IO 开销并避免 read_only rootfs 冲突
-mkdir -p /dev/shm/intermediates
-if [ -d "app/build" ] && [ ! -L "app/build/intermediates" ]; then
-    mkdir -p app/build
-    ln -sf /dev/shm/intermediates app/build/intermediates
-fi
+# 将 app/build/intermediates 符号链接到 tmpfs（默认 /dev/shm/intermediates），
+# 编译临时文件不落盘，减少 IO 并避免 read_only rootfs 冲突。
+# 仅在路径完全不存在时才创建链接：断链（-L 为真）与真实目录/文件（-e 为真）
+# 都不重建——容器内每次都会重建 tmpfs 目标，既有链接在容器内始终可解析。
+TMPFS_INTERMEDIATES="${ANDROID_TMPFS_DIR:-/dev/shm/intermediates}"
+CREATED_INTERMEDIATES_LINK=0
+
+setup_intermediates_link() {
+    mkdir -p "$TMPFS_INTERMEDIATES"
+    if [ -d "app/build" ] && [ ! -L "app/build/intermediates" ] && [ ! -e "app/build/intermediates" ]; then
+        ln -sf "$TMPFS_INTERMEDIATES" app/build/intermediates
+        CREATED_INTERMEDIATES_LINK=1
+    fi
+}
+
+cleanup_intermediates_link() {
+    # 只移除本容器自己创建的链接，避免宿主持久化残留断链；
+    # 不触碰构建产物或预先存在的链接。
+    if [ "$CREATED_INTERMEDIATES_LINK" = "1" ] && [ -L "app/build/intermediates" ]; then
+        rm -f app/build/intermediates
+    fi
+}
+
+setup_intermediates_link
+# bash 只保留最后注册的 EXIT trap：与 TMP_DIR 清理链式注册，两者都会执行
+trap 'cleanup_intermediates_link; rm -rf "${TMP_DIR:-}"' EXIT
 
 # ─── Git 凭证注入 ───
 # CI_JOB_TOKEN：GitLab CI 自动注入的短效令牌，随 Pipeline 结束自动销毁
@@ -176,8 +212,20 @@ if [ -n "${KEY_STORE_PASSWORD:-}" ]; then
     export ORG_GRADLE_PROJECT_android.injected.signing.key.password=$(cat /dev/shm/key_password)
 fi
 
-# ─── 产物路径输出（供 agent_tools.py 解析） ───
-# 编译完成后输出 APK/AAB 路径列表，覆盖多模块和自定义 buildDir 项目
+# ─── 执行用户命令（构建） ───
+# 不用 exec：bash 作为容器 PID 1 需自行把 TERM/INT 转发给构建进程，
+# 并把产物路径输出延后到构建完成之后（旧行为在构建前列出旧产物，误导排查）。
+"$@" &
+BUILD_PID=$!
+trap 'kill -TERM "$BUILD_PID" 2>/dev/null || true' TERM INT
+set +e
+wait "$BUILD_PID"
+BUILD_RC=$?
+set -e
+trap - TERM INT
+
+# ─── 产物路径输出（纯信息，无代码消费方） ───
+# 构建完成后输出本次 APK/AAB 路径列表，覆盖多模块和自定义 buildDir 项目
 echo "=== APK_OUTPUT_PATHS ==="
 APKS=$(find . -path "*/build/outputs/*" \( -name "*.apk" -o -name "*.aab" \) 2>/dev/null)
 if [ -n "$APKS" ]; then
@@ -187,4 +235,4 @@ else
 fi
 echo "=== END_APK_OUTPUT_PATHS ==="
 
-exec "$@"
+exit "$BUILD_RC"

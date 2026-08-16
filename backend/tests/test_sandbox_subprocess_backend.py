@@ -112,6 +112,31 @@ def test_subprocess_backend_proxy_bwrap_command(monkeypatch, tmp_path: Path) -> 
     assert cmd[idx_https + 1] == "http://proxy.example.com:8443"
 
 
+def test_subprocess_backend_uv_cache_bind_is_conditional(monkeypatch, tmp_path: Path) -> None:
+    """The production-only /data/agents/.uv-cache bind must be skipped when absent.
+
+    bwrap fails to start when a --bind source path does not exist, so hosts
+    without the production uv-cache directory must not get that argument.
+    """
+    monkeypatch.setattr("shutil.which", lambda cmd: "/usr/bin/bwrap" if cmd == "bwrap" else None)
+    backend = SubprocessBackend(SandboxConfig())
+
+    # Path absent (local dev / CI) — no uv-cache bind source in the command
+    # (note: --setenv UV_CACHE_DIR=/uv-cache is unconditional and unrelated)
+    monkeypatch.setattr(Path, "exists", lambda self: False)
+    cmd = backend._build_bwrap_command(["python3", "-c", "print(1)"], tmp_path, tmp_path / ".venv")
+    assert cmd is not None
+    assert "/data/agents/.uv-cache" not in cmd
+
+    # Path present (production container) — read-write bind preserved
+    monkeypatch.setattr(Path, "exists", lambda self: True)
+    cmd2 = backend._build_bwrap_command(["python3", "-c", "print(1)"], tmp_path, tmp_path / ".venv")
+    assert cmd2 is not None
+    idx = cmd2.index("/data/agents/.uv-cache")
+    assert cmd2[idx - 1] == "--bind"
+    assert cmd2[idx + 1] == "/uv-cache"
+
+
 def test_sandbox_config_proxy_parsing() -> None:
     data = {
         "http_proxy": "http://10.0.0.1:3128",
@@ -122,4 +147,66 @@ def test_sandbox_config_proxy_parsing() -> None:
     assert config.http_proxy == "http://10.0.0.1:3128"
     assert config.https_proxy == "http://10.0.0.1:3128"
     assert config.no_proxy == ".local,10.0.0.0/8"
+
+
+@pytest.mark.parametrize("bad_value", ["dockerr", "DOCKER", 123, "e2b "])
+def test_sandbox_config_from_dict_rejects_invalid_sandbox_type(bad_value) -> None:
+    """An invalid sandbox_type must raise, not silently degrade to SUBPROCESS."""
+    with pytest.raises(ValueError, match="Invalid sandbox_type"):
+        SandboxConfig.from_dict({"sandbox_type": bad_value})
+
+
+def test_sandbox_config_from_dict_accepts_valid_sandbox_type() -> None:
+    from app.services.sandbox.config import SandboxType
+
+    config = SandboxConfig.from_dict({"sandbox_type": "docker"})
+    assert config.type == SandboxType.DOCKER
+
+
+def test_unsafe_bwrap_fallback_defaults_off() -> None:
+    """Bare-host fallback must be opt-in, even outside containers."""
+    from app.config import _default_allow_unsafe_bwrap_fallback
+
+    assert _default_allow_unsafe_bwrap_fallback() is False
+    assert SandboxConfig().allow_unsafe_fallback_when_bwrap_missing is False
+
+
+@pytest.mark.asyncio
+async def test_bwrap_missing_fails_closed_by_default(monkeypatch, tmp_path: Path) -> None:
+    """Without bwrap, execute must fail closed unless explicitly opted in."""
+    monkeypatch.setattr(subprocess_backend.shutil, "which", lambda _cmd: None)
+    monkeypatch.setattr(
+        subprocess_backend,
+        "resolve_path_within_root",
+        lambda path, *_args, **_kwargs: path,
+    )
+
+    async def no_venv(self, venv_path):
+        del self, venv_path
+
+    monkeypatch.setattr(SubprocessBackend, "_ensure_workspace_venv", no_venv)
+    backend = SubprocessBackend(SandboxConfig())
+    result = await backend.execute("print('x')", "python", work_dir=str(tmp_path))
+
+    assert result.success is False
+    assert result.exit_code == 1
+    assert "bubblewrap" in result.error
+
+
+def test_safe_env_whitelist_does_not_leak_host_secrets(monkeypatch, tmp_path: Path) -> None:
+    """The subprocess env must be an explicit whitelist, never os.environ."""
+    monkeypatch.setenv("SECRET_MARKER_VAR", "should-not-leak")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "should-not-leak")
+    monkeypatch.setenv("OPENAI_API_KEY", "should-not-leak")
+
+    backend = SubprocessBackend(SandboxConfig())
+    env = backend._build_safe_env(tmp_path)
+
+    assert "SECRET_MARKER_VAR" not in env
+    assert "AWS_SECRET_ACCESS_KEY" not in env
+    assert "OPENAI_API_KEY" not in env
+    assert env["HOME"] == str(tmp_path)
+    assert env["NODE_PATH"] == ""
+    assert env["BASH_ENV"] == ""
+    assert "PATH" in env
 

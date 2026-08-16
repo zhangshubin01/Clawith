@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from contextlib import asynccontextmanager
 import fcntl
+import logging
 import os
 from pathlib import Path
 import shutil
@@ -23,6 +24,9 @@ from app.services.storage_runtime.base import (
     content_hash_bytes,
 )
 from app.services.storage_runtime.utils import normalize_storage_key
+
+
+logger = logging.getLogger(__name__)
 
 
 class LocalStorageBackend(StorageBackend):
@@ -56,8 +60,31 @@ class LocalStorageBackend(StorageBackend):
         for entry in sorted(base.iterdir(), key=lambda item: (not item.is_dir(), item.name)):
             if entry.name == ".gitkeep" or entry.name.startswith(self._TEMP_FILE_PREFIX):
                 continue
-            stat = entry.stat()
-            rel = str(entry.resolve().relative_to(self.root.resolve()))
+            try:
+                stat = entry.stat()
+            except (FileNotFoundError, OSError) as exc:
+                # 断链或并发删除的条目（stat 跟随链接抛 FileNotFoundError）：
+                # 单个坏条目不应瘫痪整个目录列举，跳过并记录 debug。
+                logger.debug(
+                    "Skipping unresolvable storage entry in list_dir",
+                    extra={"entry": str(entry), "error": exc.__class__.__name__},
+                )
+                continue
+            try:
+                rel = str(entry.resolve().relative_to(self.root.resolve()))
+            except ValueError:
+                # Symlink resolving outside the storage root: never expose it.
+                logger.debug(
+                    "Skipping storage entry resolving outside storage root",
+                    extra={"entry": str(entry)},
+                )
+                continue
+            if ".." in rel.split("/"):
+                logger.debug(
+                    "Skipping storage entry with traversal segment",
+                    extra={"entry": str(entry)},
+                )
+                continue
             entries.append(
                 StorageEntry(
                     name=entry.name,

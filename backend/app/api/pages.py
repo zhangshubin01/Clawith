@@ -13,7 +13,7 @@ from app.core.security import get_current_user
 from app.database import get_db
 from app.models.published_page import PublishedPage
 from app.models.user import User
-from app.services.storage import get_storage_backend, normalize_storage_key
+from app.services.storage import InvalidStorageKeyError, get_storage_backend, normalize_storage_key
 
 # Public router — no /api prefix, no auth
 public_router = APIRouter(tags=["pages"])
@@ -34,7 +34,12 @@ async def render_page(short_id: str, db: AsyncSession = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Page not found")
 
     storage = get_storage_backend()
-    storage_key = normalize_storage_key(f"{page.agent_id}/{page.source_path}")
+    try:
+        storage_key = normalize_storage_key(f"{page.agent_id}/{page.source_path}")
+    except InvalidStorageKeyError:
+        # Dirty DB row: a source_path with traversal segments is unreachable
+        # content, not an error to surface to anonymous visitors.
+        raise HTTPException(status_code=404, detail="Page not found")
     if not await storage.exists(storage_key) or not await storage.is_file(storage_key):
         raise HTTPException(status_code=404, detail="Source file no longer exists")
 

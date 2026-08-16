@@ -28,7 +28,7 @@ class SandboxConfig(BaseModel):
     # Local sandbox options
     cpu_limit: str = "0.5"
     memory_limit: str = "256m"
-    allow_network: bool = True
+    allow_network: bool = False
     allow_unsafe_fallback_when_bwrap_missing: bool = False
 
     # API sandbox options
@@ -99,11 +99,16 @@ class SandboxConfig(BaseModel):
             return value
 
         # Map config key names to SandboxConfig attributes
+        # Fail closed: an invalid sandbox_type must never silently degrade to
+        # SUBPROCESS, which would move code execution to a weaker boundary.
         sandbox_type_str = get_value("sandbox_type", "subprocess")
         try:
             sandbox_type = SandboxType(sandbox_type_str)
         except ValueError:
-            sandbox_type = SandboxType.SUBPROCESS
+            raise ValueError(
+                f"Invalid sandbox_type: {sandbox_type_str!r} "
+                f"(valid: {', '.join(t.value for t in SandboxType)})"
+            ) from None
 
         result = cls(
             type=sandbox_type,

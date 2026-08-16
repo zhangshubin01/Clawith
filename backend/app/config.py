@@ -60,8 +60,14 @@ def _default_agent_template_dir() -> str:
 
 
 def _default_allow_unsafe_bwrap_fallback() -> bool:
-    """Allow local source runs to work without bubblewrap by default."""
-    return not _running_in_container()
+    """Fail closed by default.
+
+    Running untrusted code directly on the host (no bubblewrap) exposes the
+    full host environment — env vars, filesystem, network — to the code.
+    Opt in explicitly with
+    SANDBOX_ALLOW_UNSAFE_FALLBACK_WHEN_BWRAP_MISSING=true.
+    """
+    return False
 
 
 def _read_version() -> str:
@@ -89,8 +95,20 @@ class Settings(BaseSettings):
     # Database
     DATABASE_URL: str = "postgresql+asyncpg://clawith:clawith@localhost:5432/clawith"
     DATABASE_AUTO_CREATE_TABLES: bool = False
-    DB_POOL_SIZE: int = 20
-    DB_MAX_OVERFLOW: int = 10
+    # Connection budget: the SQLAlchemy pool and the checkpoint pool share one
+    # PostgreSQL max_connections limit with per-session MCP runtimes. Keep the
+    # primary pool small — chat latency does not scale with pool size, and an
+    # oversized base pool idles out the whole database.
+    DB_POOL_SIZE: int = 8
+    DB_MAX_OVERFLOW: int = 4
+    # Connections reserved for consumers the backend does not own (per-session
+    # MCP runtimes, admin tooling, migration jobs). Used by the startup budget
+    # check to warn before PostgreSQL max_connections is exhausted.
+    DB_RESERVED_CONNECTIONS: int = 20
+    # Process-level shared checkpoint pool (LangGraph AsyncPostgresSaver).
+    CHECKPOINT_POOL_MIN_SIZE: int = 1
+    CHECKPOINT_POOL_MAX_SIZE: int = 4
+    CHECKPOINT_POOL_TIMEOUT_SECONDS: int = 10
 
     # Redis
     REDIS_URL: str = "redis://localhost:6379/0"
@@ -146,6 +164,7 @@ class Settings(BaseSettings):
     AGENT_RUNTIME_RECURSION_LIMIT: int = Field(default=200, gt=0)
     AGENT_RUNTIME_COMMAND_MAX_ATTEMPTS: int = Field(default=5, gt=0)
     AGENT_RUNTIME_ASYNC_TOOL_POLL_SCAN_SECONDS: float = Field(default=0.25, gt=0)
+    AGENT_RUNTIME_TOOL_LEASE_RECONCILE_SCAN_SECONDS: float = Field(default=1.0, gt=0)
     AGENT_RUNTIME_CHANNEL_DELIVERY_CLAIM_TTL_SECONDS: int = Field(default=120, gt=0)
     AGENT_RUNTIME_CHANNEL_DELIVERY_MAX_ATTEMPTS: int = Field(default=8, gt=0)
     AGENT_RUNTIME_CHANNEL_DELIVERY_SCAN_SECONDS: float = Field(default=0.5, gt=0)
@@ -168,6 +187,11 @@ class Settings(BaseSettings):
     AGENT_RUNTIME_EVENT_PAYLOAD_MAX_BYTES: int = Field(default=16384, gt=0)
     AGENT_RUNTIME_TOOL_RESULT_INLINE_MAX_BYTES: int = Field(default=8192, gt=0)
     MAX_AGENT_CYCLE_COUNT: int = Field(default=5, gt=0)
+    # Hard cap for file-upload endpoints (all of them buffer the whole body
+    # into memory before writing). Without it a single authenticated request
+    # can exhaust the process (see P0 fix plan D3). Override via env if a
+    # tenant legitimately needs larger uploads.
+    MAX_UPLOAD_BYTES: int = Field(default=50 * 1024 * 1024, gt=0)
 
     # Docker (for Agent containers)
     DOCKER_NETWORK: str = "clawith_network"

@@ -86,6 +86,10 @@ from app.services.agent_runtime.session_context_completion import (
     SessionContextCompletionHandler,
 )
 from app.services.agent_runtime.task_completion import TaskRuntimeCompletionHandler
+from app.services.agent_runtime.tool_lease_reconcile import (
+    ToolLeaseReconcileResult,
+    ToolLeaseReconcileScheduler,
+)
 from app.services.agent_runtime.tool_step_service import RuntimeToolStepService
 from app.services.agent_runtime.tool_result_store import (
     ToolResultReconcileResult,
@@ -130,6 +134,7 @@ class RuntimeWorkerComponents:
     driver: LangGraphRuntimeDriver
     worker: RuntimeCommandWorker
     async_tool_poll_scheduler: AsyncToolPollScheduler
+    tool_lease_reconciler: ToolLeaseReconcileScheduler
     tool_result_reconciler: ToolResultReconciler
     product_reconciler: RuntimeProductReconciler
     channel_delivery_worker: ChannelDeliveryWorker
@@ -328,6 +333,9 @@ def build_runtime_worker_components(
     async_tool_poll_scheduler = AsyncToolPollScheduler(
         session_factory=session_factory,
     )
+    tool_lease_reconciler = ToolLeaseReconcileScheduler(
+        session_factory=session_factory,
+    )
     product_reconciler = RuntimeProductReconciler(
         session_factory=session_factory,
         checkpoint_reader=driver,
@@ -346,6 +354,7 @@ def build_runtime_worker_components(
         driver=driver,
         worker=worker,
         async_tool_poll_scheduler=async_tool_poll_scheduler,
+        tool_lease_reconciler=tool_lease_reconciler,
         tool_result_reconciler=tool_result_reconciler,
         product_reconciler=product_reconciler,
         channel_delivery_worker=channel_delivery_worker,
@@ -478,6 +487,42 @@ class AsyncToolPollDaemon:
 
     def _delay_after(self, result: AsyncToolPollResult) -> float:
         if result.status in {"idle", "deferred"}:
+            return self._scan_delay_seconds
+        return 0.0
+
+
+class ToolLeaseReconcileDaemon:
+    """Recover Runs parked behind expired Tool executor leases."""
+
+    def __init__(
+        self,
+        scheduler: ToolLeaseReconcileScheduler,
+        *,
+        scan_delay_seconds: float,
+        error_delay_seconds: float = 1.0,
+    ) -> None:
+        if scan_delay_seconds <= 0 or error_delay_seconds <= 0:
+            raise ValueError("tool lease reconcile daemon delays must be positive")
+        self._scheduler = scheduler
+        self._scan_delay_seconds = scan_delay_seconds
+        self._error_delay_seconds = error_delay_seconds
+
+    async def run(self, stop: asyncio.Event) -> None:
+        while not stop.is_set():
+            try:
+                result = await self._scheduler.run_once()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("Runtime tool lease reconciliation iteration failed")
+                delay = self._error_delay_seconds
+            else:
+                delay = self._delay_after(result)
+            if delay:
+                await RuntimeCommandDaemon._wait(stop, delay)
+
+    def _delay_after(self, result: ToolLeaseReconcileResult) -> float:
+        if result.status == "idle":
             return self._scan_delay_seconds
         return 0.0
 
@@ -644,6 +689,15 @@ async def running_runtime_worker_context(
             ).run(stop),
             name="agent-runtime-async-tool-poll",
         )
+        tool_lease_reconcile_task = asyncio.create_task(
+            ToolLeaseReconcileDaemon(
+                components.tool_lease_reconciler,
+                scan_delay_seconds=(
+                    runtime_settings.AGENT_RUNTIME_TOOL_LEASE_RECONCILE_SCAN_SECONDS
+                ),
+            ).run(stop),
+            name="agent-runtime-tool-lease-reconcile",
+        )
         product_reconcile_task = asyncio.create_task(
             ProductReconcileDaemon(components.product_reconciler).run(stop),
             name="agent-runtime-product-reconcile",
@@ -661,6 +715,7 @@ async def running_runtime_worker_context(
             compact_task.cancel()
             channel_delivery_task.cancel()
             async_tool_poll_task.cancel()
+            tool_lease_reconcile_task.cancel()
             product_reconcile_task.cancel()
             tool_result_reconcile_task.cancel()
             for task in command_tasks:
@@ -673,6 +728,8 @@ async def running_runtime_worker_context(
             with suppress(asyncio.CancelledError):
                 await async_tool_poll_task
             with suppress(asyncio.CancelledError):
+                await tool_lease_reconcile_task
+            with suppress(asyncio.CancelledError):
                 await product_reconcile_task
             with suppress(asyncio.CancelledError):
                 await tool_result_reconcile_task
@@ -681,6 +738,7 @@ async def running_runtime_worker_context(
 __all__ = [
     "ChannelDeliveryDaemon",
     "AsyncToolPollDaemon",
+    "ToolLeaseReconcileDaemon",
     "ProductReconcileDaemon",
     "ToolResultReconcileDaemon",
     "RuntimeCommandDaemon",

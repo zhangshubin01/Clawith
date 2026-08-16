@@ -498,6 +498,66 @@ async def enqueue_resume(
     )
 
 
+async def enqueue_thread_holder_reconcile_wake(
+    db: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    owner_run_id: uuid.UUID,
+    idempotency_key: str,
+    reason: str,
+    tool_call_id: str | None = None,
+) -> uuid.UUID | None:
+    """Wake the active lane holder on the owner Run's shared Thread.
+
+    A Run that dies mid-tool leaves its started executions behind. The
+    schedulers settle those executions and enqueue a resume for the *dead*
+    Run, which the worker rejects as ``already_terminal``. A newer Run on
+    the same Thread can meanwhile be parked in ``waiting_external`` with
+    correlation ``tool-reconcile:<run_id>`` and would never wake up. This
+    helper routes the wake-up to that active holder instead.
+
+    The resume is harmless when no holder is waiting: the worker rejects
+    mismatched correlations or non-waiting Runs without retrying.
+    """
+    thread_subquery = (
+        select(AgentRun.runtime_thread_id)
+        .where(
+            AgentRun.tenant_id == tenant_id,
+            AgentRun.id == owner_run_id,
+        )
+        .scalar_subquery()
+    )
+    holder_result = await db.execute(
+        select(AgentRun.id)
+        .where(
+            AgentRun.tenant_id == tenant_id,
+            AgentRun.runtime_thread_id == thread_subquery,
+            AgentRun.lane_held.is_(True),
+            AgentRun.id != owner_run_id,
+        )
+        .order_by(AgentRun.created_at, AgentRun.id)
+        .limit(1)
+    )
+    holder_id = holder_result.scalar_one_or_none()
+    if holder_id is None:
+        return None
+    payload_extra: dict[str, Any] = {"reason": reason}
+    if tool_call_id:
+        payload_extra["tool_call_id"] = tool_call_id
+    await enqueue_resume(
+        db,
+        tenant_id=tenant_id,
+        run_id=holder_id,
+        payload={
+            "resume_type": "timer",
+            "correlation_id": f"tool-reconcile:{holder_id}",
+            "payload": payload_extra,
+        },
+        idempotency_key=idempotency_key,
+    )
+    return holder_id
+
+
 async def enqueue_cancel(
     db: AsyncSession,
     *,

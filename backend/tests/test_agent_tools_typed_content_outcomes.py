@@ -314,15 +314,6 @@ async def test_execute_code_uses_exit_code_and_never_reexecutes_unknown(
     assert failed.error_code == "sandbox_execution_failed"
 
     backend.error = ValueError("transport lost after dispatch")
-
-    async def forbidden_fallback(*args, **kwargs):
-        raise AssertionError("an unknown execution must not be re-executed")
-
-    monkeypatch.setattr(
-        agent_tools,
-        "_execute_code_legacy_outcome",
-        forbidden_fallback,
-    )
     unknown = await agent_tools._execute_code_outcome(
         uuid.uuid4(),
         tmp_path,
@@ -330,6 +321,134 @@ async def test_execute_code_uses_exit_code_and_never_reexecutes_unknown(
     )
     assert unknown.status == "unknown"
     assert unknown.error_code == "sandbox_execution_outcome_unknown"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "bad_tool_config",
+    [
+        {"sandbox_type": "dockerr"},
+        {"default_timeout": "abc"},
+        {"max_timeout": 99999},
+        {"max_timeout": 0},
+    ],
+)
+async def test_execute_code_bad_config_fails_closed_without_backend(
+    monkeypatch,
+    tmp_path: Path,
+    bad_tool_config: dict,
+) -> None:
+    """Misconfigured sandbox config must fail closed.
+
+    Previously an invalid sandbox_type silently degraded to SUBPROCESS and a
+    pydantic ValidationError re-executed through a legacy bare-host path.
+    Now the outcome is sandbox_configuration_invalid and no backend is ever
+    instantiated.
+    """
+    import app.config as config_module
+    from app.services.sandbox import registry
+    from app.services.sandbox.config import SandboxConfig
+
+    monkeypatch.setattr(config_module, "get_sandbox_config", SandboxConfig)
+
+    async def fake_tool_config(_agent_id, _name):
+        return bad_tool_config
+
+    monkeypatch.setattr(agent_tools, "_get_tool_config", fake_tool_config)
+
+    registry_calls: list[object] = []
+
+    def backend_forbidden(_config):
+        registry_calls.append(_config)
+        raise AssertionError("misconfigured sandbox must not reach the registry")
+
+    monkeypatch.setattr(registry, "get_sandbox_backend", backend_forbidden)
+
+    outcome = await agent_tools._execute_code_outcome(
+        uuid.uuid4(),
+        tmp_path,
+        {"language": "python", "code": "print('never runs')"},
+    )
+
+    assert outcome.status == "failed"
+    assert outcome.error_code == "sandbox_configuration_invalid"
+    assert registry_calls == []
+
+
+@pytest.mark.asyncio
+async def test_execute_code_registry_valueerror_fails_closed(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """A ValueError raised by the registry (sandbox disabled) must fail closed."""
+    import app.config as config_module
+    from app.services.sandbox import registry
+    from app.services.sandbox.config import SandboxConfig
+
+    monkeypatch.setattr(config_module, "get_sandbox_config", SandboxConfig)
+
+    async def fake_tool_config(_agent_id, _name):
+        return None
+
+    monkeypatch.setattr(agent_tools, "_get_tool_config", fake_tool_config)
+
+    def backend_forbidden(_config):
+        raise ValueError("Sandbox is disabled")
+
+    monkeypatch.setattr(registry, "get_sandbox_backend", backend_forbidden)
+
+    outcome = await agent_tools._execute_code_outcome(
+        uuid.uuid4(),
+        tmp_path,
+        {"language": "python", "code": "print('never runs')"},
+    )
+
+    assert outcome.status == "failed"
+    assert outcome.error_code == "sandbox_configuration_invalid"
+
+
+@pytest.mark.asyncio
+async def test_execute_code_e2b_constructor_error_fails_closed(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """An out-of-range E2B timeout must surface as invalid config.
+
+    The SandboxConfig constructor raises a pydantic ValidationError (a
+    ValueError subclass); it must not trigger local execution and must not
+    even load the local fallback config.
+    """
+    import app.config as config_module
+    from app.services.sandbox import registry
+
+    def fallback_forbidden():
+        raise AssertionError("E2B config errors must not load the local fallback")
+
+    monkeypatch.setattr(config_module, "get_sandbox_config", fallback_forbidden)
+
+    async def fake_tool_config(_agent_id, _name):
+        return {
+            "sandbox_type": "e2b",
+            "api_key": "e2b-secret-key",
+            "default_timeout": 99999,
+        }
+
+    monkeypatch.setattr(agent_tools, "_get_tool_config", fake_tool_config)
+
+    def backend_forbidden(_config):
+        raise AssertionError("misconfigured E2B sandbox must not reach the registry")
+
+    monkeypatch.setattr(registry, "get_sandbox_backend", backend_forbidden)
+
+    outcome = await agent_tools._execute_code_outcome(
+        uuid.uuid4(),
+        tmp_path,
+        {"language": "python", "code": "print('never runs')"},
+        tool_name="execute_code_e2b",
+    )
+
+    assert outcome.status == "failed"
+    assert outcome.error_code == "sandbox_configuration_invalid"
 
 
 @pytest.mark.asyncio

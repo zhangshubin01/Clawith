@@ -3,6 +3,7 @@
 from contextlib import asynccontextmanager
 from pathlib import Path
 import shutil
+import sys
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -61,6 +62,13 @@ def _log_bwrap_startup_status() -> None:
         logger.warning(
             "[startup] bubblewrap (bwrap) is not installed on the host. "
             "Local execute_code will use the reduced-isolation fallback."
+        )
+    elif sys.platform == "darwin":
+        logger.warning(
+            "[startup] bubblewrap (bwrap) is unavailable on macOS (Linux-only tool). "
+            "For local development set SANDBOX_ALLOW_UNSAFE_FALLBACK_WHEN_BWRAP_MISSING=true "
+            "(reduced isolation) or SANDBOX_TYPE=docker (Docker Desktop). "
+            "execute_code will fail closed otherwise."
         )
     else:
         logger.warning(
@@ -133,6 +141,14 @@ async def lifespan(app: FastAPI):
             "[startup] WARNING: SECRET_KEY or JWT_SECRET_KEY contains default 'change-me' value. "
             "This is insecure for production. Set unique secrets in your .env file."
         )
+
+    # Compare the configured connection budget against PostgreSQL max_connections.
+    try:
+        from app.database import warn_on_connection_budget
+
+        await warn_on_connection_budget()
+    except Exception as e:  # pragma: no cover - budget check must never block boot
+        logger.warning(f"[startup] connection budget check failed: {e}")
 
     import asyncio
     import os
@@ -344,6 +360,9 @@ async def lifespan(app: FastAPI):
         # Runtime shutdown cancels the active command task before closing its
         # Checkpointer, which releases the advisory lock and claim heartbeat.
         await runtime_stack.aclose()
+        from app.services.agent_runtime.checkpointer import close_checkpointer_pool
+
+        await close_checkpointer_pool()
         await realtime_router.stop()
         await close_redis()
 

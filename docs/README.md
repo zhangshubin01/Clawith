@@ -26,13 +26,10 @@
 
 ## 3. 功能交付归档 (SDD 产出)
 
-`docs/features/` — 按 `v{X.Y.Z}/{NNN}-{name}/` 组织。每个需求包含 `spec.md` (需求与验收标准)、`design.md` (架构设计与已知坑)、`tasks.md` (任务日志)。
+`docs/features/`（暂无内容）— 按 `v{X.Y.Z}/{NNN}-{name}/` 组织。每个需求包含 `spec.md` (需求与验收标准)、`design.md` (架构设计与已知坑)、`tasks.md` (任务日志)。
 
 ---
 
 ## 4. 重大技术方案与迁移计划
 
-[`technical-plans/`](technical-plans/) — 重大技术重构与迁移方案归档：
-
-- [`20260728-private-chat-finish-migration-plan.md`](technical-plans/20260728-private-chat-finish-migration-plan.md)：私有会话结束逻辑迁移方案
-- [`20260728-dao-migration-plan.md`](technical-plans/20260728-dao-migration-plan.md)：DAO 重构与数据库迁移方案
+[`technical-plans/`](technical-plans/) — 重大技术重构与迁移方案归档（按日期命名；已执行完毕的计划会随清理删除，历史可从 git 找回）。

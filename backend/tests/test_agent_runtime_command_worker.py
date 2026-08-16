@@ -65,9 +65,15 @@ class _Transaction:
 
 
 class _Session:
-    def __init__(self, timeline: list[str], run: AgentRun | None) -> None:
+    def __init__(
+        self,
+        timeline: list[str],
+        run: AgentRun | None,
+        tool_execution_status: str | None = None,
+    ) -> None:
         self.timeline = timeline
         self.run = run
+        self.tool_execution_status = tool_execution_status
 
     async def __aenter__(self):
         self.timeline.append("session_enter")
@@ -80,7 +86,10 @@ class _Session:
     def begin(self) -> _Transaction:
         return _Transaction(self.timeline)
 
-    async def execute(self, _statement) -> _ScalarResult:
+    async def execute(self, statement) -> _ScalarResult:
+        if "agent_tool_executions" in str(statement):
+            self.timeline.append("load_tool_execution")
+            return _ScalarResult(self.tool_execution_status)
         self.timeline.append("load_run")
         return _ScalarResult(self.run)
 
@@ -89,14 +98,24 @@ class _Session:
 
 
 class _SessionFactory:
-    def __init__(self, timeline: list[str], run: AgentRun | None) -> None:
+    def __init__(
+        self,
+        timeline: list[str],
+        run: AgentRun | None,
+        tool_execution_status: str | None = None,
+    ) -> None:
         self.timeline = timeline
         self.run = run
+        self.tool_execution_status = tool_execution_status
         self.calls = 0
 
     def __call__(self) -> _Session:
         self.calls += 1
-        return _Session(self.timeline, self.run)
+        return _Session(
+            self.timeline,
+            self.run,
+            self.tool_execution_status,
+        )
 
 
 class _Connection:
@@ -284,7 +303,18 @@ def _checkpoint(
     command: AgentRunCommand | None = None,
     checkpoint_id: str = "checkpoint-1",
     registry: RunRegistrySnapshot | None = None,
+    waiting_request: dict | None = None,
 ) -> CheckpointObservation:
+    lifecycle: dict = {
+        "status": status,  # type: ignore[typeddict-item]
+        "next_route": (
+            "terminal"
+            if status in {"completed", "failed", "cancelled"}
+            else ("wait" if status.startswith("waiting_") else "model")
+        ),
+    }
+    if waiting_request is not None:
+        lifecycle["waiting_request"] = waiting_request
     state: RuntimeGraphState = {
         "registry": registry or _registry(run),
         "snapshots": RunInputSnapshots(
@@ -294,14 +324,7 @@ def _checkpoint(
             related_run_summaries=(),
             initial_input={},
         ),
-        "lifecycle": {
-            "status": status,  # type: ignore[typeddict-item]
-            "next_route": (
-                "terminal"
-                if status in {"completed", "failed", "cancelled"}
-                else ("wait" if status.startswith("waiting_") else "model")
-            ),
-        },
+        "lifecycle": lifecycle,
     }
     terminal = status in {"completed", "failed", "cancelled"}
     waiting = status.startswith("waiting_")
@@ -329,9 +352,14 @@ def _worker(
     rejection_handler: _RejectionHandler | None = None,
     acquired: bool = True,
     claim_renew_seconds: float = 10,
+    tool_execution_status: str | None = None,
 ) -> RuntimeCommandWorker:
     return RuntimeCommandWorker(
-        session_factory=_SessionFactory(timeline, run),  # type: ignore[arg-type]
+        session_factory=_SessionFactory(
+            timeline,
+            run,
+            tool_execution_status,
+        ),  # type: ignore[arg-type]
         lock_engine=_Engine(_Connection(timeline, acquired=acquired)),  # type: ignore[arg-type]
         checkpoint_reader=reader,
         command_executor=executor,
@@ -1026,6 +1054,189 @@ async def test_resume_without_checkpoint_is_rejected_without_execution() -> None
     assert result.error_code == "thread_not_started"
     assert reject.await_args.kwargs["error_code"] == "thread_not_started"
     assert executor.calls == []
+
+
+_TIMER_RESUME_PAYLOAD = {
+    "resume_type": "timer",
+    "correlation_id": "corr-tool-1",
+    "payload": {
+        "reason": "tool_execution_lease_expired",
+        "tool_call_id": "call-1",
+    },
+}
+
+
+@pytest.mark.asyncio
+async def test_stale_resume_for_settled_execution_is_rejected_without_execution() -> None:
+    timeline: list[str] = []
+    run = _run()
+    command = _command(run, "resume")
+    command.payload = dict(_TIMER_RESUME_PAYLOAD)
+    reader = _Reader(
+        command=(None,),
+        latest=(_checkpoint(run, status="running"),),
+    )
+    executor = _Executor(timeline)
+
+    with (
+        patch(
+            "app.services.agent_runtime.command_worker.claim_next_command",
+            new=AsyncMock(return_value=command),
+        ),
+        patch(
+            "app.services.agent_runtime.command_worker.mark_command_rejected",
+            new=AsyncMock(),
+        ) as reject,
+    ):
+        result = await _worker(
+            timeline=timeline,
+            run=run,
+            reader=reader,
+            executor=executor,
+            tool_execution_status="failed",
+        ).run_once()
+
+    assert result.status == "rejected"
+    assert result.error_code == "superseded_tool_execution"
+    assert reject.await_args.kwargs["error_code"] == "superseded_tool_execution"
+    assert executor.calls == []
+    assert "load_tool_execution" in timeline
+
+
+@pytest.mark.asyncio
+async def test_resume_waiting_on_settled_execution_still_executes() -> None:
+    timeline: list[str] = []
+    run = _run()
+    command = _command(run, "resume")
+    command.payload = dict(_TIMER_RESUME_PAYLOAD)
+    waiting = _checkpoint(
+        run,
+        status="waiting_external",
+        command=command,
+        waiting_request={"correlation_id": "corr-tool-1"},
+    )
+    reader = _Reader(command=(None, waiting), latest=(waiting,))
+    executor = _Executor(timeline)
+
+    with (
+        patch(
+            "app.services.agent_runtime.command_worker.claim_next_command",
+            new=AsyncMock(return_value=command),
+        ),
+        patch(
+            "app.services.agent_runtime.command_worker.mark_command_applied",
+            new=AsyncMock(),
+        ),
+    ):
+        result = await _worker(
+            timeline=timeline,
+            run=run,
+            reader=reader,
+            executor=executor,
+            tool_execution_status="failed",
+        ).run_once()
+
+    assert result.status == "applied"
+    assert len(executor.calls) == 1
+    assert "load_tool_execution" in timeline
+
+
+@pytest.mark.asyncio
+async def test_resume_without_tool_call_id_skips_execution_lookup() -> None:
+    timeline: list[str] = []
+    run = _run()
+    command = _command(run, "resume")
+    waiting = _checkpoint(run, status="waiting_user", command=command)
+    reader = _Reader(command=(None, waiting), latest=(waiting,))
+    executor = _Executor(timeline)
+
+    with (
+        patch(
+            "app.services.agent_runtime.command_worker.claim_next_command",
+            new=AsyncMock(return_value=command),
+        ),
+        patch(
+            "app.services.agent_runtime.command_worker.mark_command_applied",
+            new=AsyncMock(),
+        ),
+    ):
+        result = await _worker(
+            timeline=timeline,
+            run=run,
+            reader=reader,
+            executor=executor,
+            tool_execution_status=None,
+        ).run_once()
+
+    assert result.status == "applied"
+    assert len(executor.calls) == 1
+    assert "load_tool_execution" not in timeline
+
+
+@pytest.mark.asyncio
+async def test_resume_referencing_other_run_execution_still_executes() -> None:
+    timeline: list[str] = []
+    run = _run()
+    command = _command(run, "resume")
+    command.payload = dict(_TIMER_RESUME_PAYLOAD)
+    waiting = _checkpoint(run, status="waiting_user", command=command)
+    reader = _Reader(command=(None, waiting), latest=(waiting,))
+    executor = _Executor(timeline)
+
+    with (
+        patch(
+            "app.services.agent_runtime.command_worker.claim_next_command",
+            new=AsyncMock(return_value=command),
+        ),
+        patch(
+            "app.services.agent_runtime.command_worker.mark_command_applied",
+            new=AsyncMock(),
+        ),
+    ):
+        result = await _worker(
+            timeline=timeline,
+            run=run,
+            reader=reader,
+            executor=executor,
+            tool_execution_status=None,
+        ).run_once()
+
+    assert result.status == "applied"
+    assert len(executor.calls) == 1
+    assert "load_tool_execution" in timeline
+
+
+@pytest.mark.asyncio
+async def test_resume_for_started_tool_execution_still_executes() -> None:
+    timeline: list[str] = []
+    run = _run()
+    command = _command(run, "resume")
+    command.payload = dict(_TIMER_RESUME_PAYLOAD)
+    waiting = _checkpoint(run, status="waiting_user", command=command)
+    reader = _Reader(command=(None, waiting), latest=(waiting,))
+    executor = _Executor(timeline)
+
+    with (
+        patch(
+            "app.services.agent_runtime.command_worker.claim_next_command",
+            new=AsyncMock(return_value=command),
+        ),
+        patch(
+            "app.services.agent_runtime.command_worker.mark_command_applied",
+            new=AsyncMock(),
+        ),
+    ):
+        result = await _worker(
+            timeline=timeline,
+            run=run,
+            reader=reader,
+            executor=executor,
+            tool_execution_status="started",
+        ).run_once()
+
+    assert result.status == "applied"
+    assert len(executor.calls) == 1
+    assert "load_tool_execution" in timeline
 
 
 @pytest.mark.asyncio

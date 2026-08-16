@@ -22,6 +22,8 @@ venv/
 *.db
 .DS_Store
 .gstack/
+# Graphify knowledge-graph output (generated, history-purged 2026-08-16)
+graphify-out/
 # Runtime agent data
 backend/data/
 backend/agent_data/
@@ -51,3 +53,10 @@ backend/tests/test_agent_runtime_benchmark.py
 # Prevent accidental commit of database dumps and backups
 .pgdata/
 backups/
+
+# Agent tool-state scratch dirs (never tracked)
+.omc/
+.reasonix/
+.playwright-mcp/
+.opencode/
+.omo/

@@ -1,7 +1,0 @@
-{
-  "tool_name": "Bash",
-  "tool_input_preview": "{\"command\":\"echo \\\"安装的插件总数:\\\" && claude plugins list 2>&1 | grep -c \\\"│\\\" && echo \\\"\\\" && echo \\\"逐个更新 (单插件只支持逐更新)...\\\" && claude plugins list 2>&1 | grep \\\"│\\\" | awk -F'│' '{print $2}' | tr -d ' ' | w...",
-  "error": "Exit code 1\n安装的插件总数:\n0",
-  "timestamp": "2026-08-06T15:39:07.175Z",
-  "retry_count": 4
-}

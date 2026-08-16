@@ -258,6 +258,61 @@ class TestDevShmSize:
 
 
 # ─────────────────────────────────────────────────────────
+# Fix 6: /home/builduser/.android tmpfs 权限 + 代理透传
+# ─────────────────────────────────────────────────────────
+
+
+class TestAndroidTmpfsPermissions:
+    """验证 /home/builduser/.android tmpfs 带 uid/gid（P5 Fix 2 遗漏项）。
+
+    容器以 read_only rootfs + user=builduser(uid=1000) 运行，.android 由 tmpfs
+    覆盖。若挂载选项缺 uid=1000,gid=1000，tmpfs 默认 root 所有，
+    sdkmanager 写 $ANDROID_USER_HOME 报 Permission denied。
+    """
+
+    def test_android_tmpfs_has_uid_gid(self, backend, mock_docker_client):
+        asyncio.run(backend.execute(
+            code="", language="java",
+            timeout=30, work_dir="/workspace",
+            project_path="/workspace/app",
+            gradle_task="assembleDebug",
+        ))
+        last_kwargs = mock_docker_client.containers.last_run_kwargs
+        assert last_kwargs is not None, "containers.run 应该已被调用"
+        tmpfs = last_kwargs.get("tmpfs", {})
+        android_tmpfs = tmpfs.get("/home/builduser/.android", "")
+        assert "uid=1000" in android_tmpfs and "gid=1000" in android_tmpfs, (
+            f"预期 .android tmpfs 带 uid=1000,gid=1000, 实际: {android_tmpfs!r}"
+        )
+
+
+class TestProxyPassthrough:
+    """验证容器 env 透传代理（与 docker_backend/subprocess_backend 对齐）。
+
+    sdkmanager/AGP 在容器内联网下载缺失 SDK 组件时依赖代理出口，
+    否则 dl.google.com 不可达导致自动下载失败。
+    """
+
+    def test_proxy_env_passed_into_container(self, backend, mock_docker_client, monkeypatch):
+        monkeypatch.setenv("http_proxy", "http://proxy.local:3128")
+        monkeypatch.setenv("HTTPS_PROXY", "http://proxy.local:3128")
+        monkeypatch.setenv("no_proxy", "localhost,127.0.0.1")
+
+        asyncio.run(backend.execute(
+            code="", language="java",
+            timeout=30, work_dir="/workspace",
+            project_path="/workspace/app",
+            gradle_task="assembleDebug",
+        ))
+        last_kwargs = mock_docker_client.containers.last_run_kwargs
+        assert last_kwargs is not None, "containers.run 应该已被调用"
+        env = last_kwargs.get("environment", {})
+        assert env.get("http_proxy") == "http://proxy.local:3128"
+        assert env.get("HTTPS_PROXY") == "http://proxy.local:3128"
+        assert env.get("no_proxy") == "localhost,127.0.0.1"
+
+
+# ─────────────────────────────────────────────────────────
 # Fix 1: Semaphore 并发控制
 # ─────────────────────────────────────────────────────────
 

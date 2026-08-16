@@ -1,6 +1,7 @@
 # ─── Backend Dockerfile (Optimized) ─────────────────────
 # Multi-stage: deps → production
-FROM python:3.12-slim AS deps
+# 基础镜像走国内加速（docker.m.daocloud.io），加速器不可用时回退 docker.io
+FROM docker.m.daocloud.io/library/python:3.12-slim AS deps
 
 WORKDIR /app
 RUN if [ -f /etc/apt/sources.list.d/debian.sources ]; then \
@@ -26,7 +27,7 @@ RUN if [ -n "$CLAWITH_PIP_INDEX_URL" ] && [ -n "$CLAWITH_PIP_TRUSTED_HOST" ]; th
 RUN pip install --no-cache-dir lark-channel-sdk>=1.2.0
 
 # ─── Production ─────────────────────────────────────────
-FROM python:3.12-slim AS production
+FROM docker.m.daocloud.io/library/python:3.12-slim AS production
 
 WORKDIR /app
 RUN if [ -f /etc/apt/sources.list.d/debian.sources ]; then \

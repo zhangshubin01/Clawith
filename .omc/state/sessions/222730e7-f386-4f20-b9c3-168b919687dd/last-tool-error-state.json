@@ -1,7 +1,0 @@
-{
-  "tool_name": "Bash",
-  "tool_input_preview": "{\"command\":\"docker compose -p clawith-agent exec -T postgres psql -U clawith -c \\\"SELECT e.tool_name, e.status, e.result_summary, e.retry_policy, e.effect, e.created_at FROM agent_tool_executions e WH...",
-  "error": "Exit code 1\nERROR:  column e.created_at does not exist\nLINE 1: ...atus, e.result_summary, e.retry_policy, e.effect, e.created_...\n                                                             ^\nHINT:  Perhaps you meant to reference the column \"e.updated_at\".",
-  "timestamp": "2026-07-22T17:03:08.919Z",
-  "retry_count": 1
-}
