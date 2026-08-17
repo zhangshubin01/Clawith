@@ -228,7 +228,7 @@ def _usage_from_response_or_estimate(response, api_messages: list[LLMMessage]) -
 async def _get_agent_config(agent_id) -> tuple[int, str | None]:
     """Get agent config: max_tool_rounds and token limit status."""
     if not agent_id:
-        return 200, None
+        return 10000, None
 
     try:
         from app.models.agent import Agent as AgentModel
@@ -236,7 +236,7 @@ async def _get_agent_config(agent_id) -> tuple[int, str | None]:
             _ar = await _db.execute(select(AgentModel).where(AgentModel.id == agent_id))
             _agent = _ar.scalar_one_or_none()
             if _agent:
-                max_rounds = _agent.max_tool_rounds or 200
+                max_rounds = _agent.max_tool_rounds or 10000
                 if _agent.max_tokens_per_day and _agent.tokens_used_today >= _agent.max_tokens_per_day:
                     return max_rounds, f"⚠️ Daily token usage has reached the limit ({_agent.tokens_used_today:,}/{_agent.max_tokens_per_day:,}). Please try again tomorrow or ask admin to increase the limit."
                 if _agent.max_tokens_per_month and _agent.tokens_used_month >= _agent.max_tokens_per_month:

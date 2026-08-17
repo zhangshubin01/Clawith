@@ -503,7 +503,7 @@
       "month": "This Month",
       "maxToolRounds": "Model Step Limit",
       "maxToolRoundsLabel": "Maximum model steps per run",
-      "maxToolRoundsDesc": "Each model step that returns a result counts, including wait or error results. Tool-call count is separate. Default: 200",
+      "maxToolRoundsDesc": "Each model step that returns a result counts, including wait or error results. Tool-call count is separate. Default: 10000",
       "saveSettings": "Save Settings",
       "save": "Save",
       "saving": "Saving...",
