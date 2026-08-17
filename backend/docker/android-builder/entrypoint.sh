@@ -140,6 +140,61 @@ else
     echo "[INFO] JDK $JAVA_VERSION 命中共享缓存 → ${JDK_HOME}"
 fi
 
+# ─── 国内镜像注入（根治 fake-ip 代理劫持导致的依赖下载挂死） ───
+# 背景: 宿主 Clash fake-ip 模式下 google()/mavenCentral() 被解析成 198.18.x.x 假 IP,
+# TCP 能建立但代理节点不吐数据 → Gradle 下载线程无限挂起, checkDebugAarMetadata 卡死。
+# 镜像仓库国内直连, 经 beforeSettings 先于 settings.gradle 求值注入到仓库列表最前,
+# 外部仓库退化为兜底; 构建不再依赖代理出口。关闭: ANDROID_GRADLE_MIRRORS=off。
+setup_gradle_mirrors() {
+    mkdir -p "${GRADLE_USER_HOME:-/home/builduser/.gradle}/init.d"
+    cat > "${GRADLE_USER_HOME:-/home/builduser/.gradle}/init.d/aliyun-mirrors.gradle" << 'GRADLE_SCRIPT'
+    // 默认外部仓库 (google/mavenCentral/gradlePluginPortal) 重定向到阿里云镜像:
+    // 镜像位于仓库列表最前, 命中的构件不再访问外部仓库, 自定义仓库保持原顺序兜底。
+    beforeSettings { settings ->
+        settings.pluginManagement {
+            repositories {
+                maven { url 'https://maven.aliyun.com/repository/google' }
+                maven { url 'https://maven.aliyun.com/repository/public' }
+                maven { url 'https://maven.aliyun.com/repository/gradle-plugin' }
+            }
+        }
+        // dependencyResolutionManagement 自 Gradle 6.8 起提供, 旧 wrapper 项目跳过
+        if (settings.metaClass.respondsTo(settings, 'getDependencyResolutionManagement')) {
+            settings.dependencyResolutionManagement {
+                repositories {
+                    maven { url 'https://maven.aliyun.com/repository/google' }
+                    maven { url 'https://maven.aliyun.com/repository/public' }
+                }
+            }
+        }
+    }
+GRADLE_SCRIPT
+}
+
+remove_gradle_mirrors() {
+    # 关闭镜像时同时清理持久卷中的残留脚本, 否则旧容器写入的 init.d 仍会生效
+    rm -f "${GRADLE_USER_HOME:-/home/builduser/.gradle}/init.d/aliyun-mirrors.gradle"
+}
+
+if [ "${ANDROID_GRADLE_MIRRORS:-on}" != "off" ]; then
+    setup_gradle_mirrors
+else
+    remove_gradle_mirrors
+fi
+
+# ─── 下载超时硬化 ───
+# 任何仓库(含租户自定义)连接建立后 30s 连不上 / 60s 读不到一个字节即失败,
+# 下载死连接快速报错而非无限挂起(此前的 500s+ 假 IP 挂死由 socketTimeout 兜底)。
+setup_gradle_download_timeouts() {
+    local props="${GRADLE_USER_HOME:-/home/builduser/.gradle}/gradle.properties"
+    touch "$props"
+    grep -q '^systemProp.org.gradle.internal.http.connectionTimeout=' "$props" || \
+        echo 'systemProp.org.gradle.internal.http.connectionTimeout=30000' >> "$props"
+    grep -q '^systemProp.org.gradle.internal.http.socketTimeout=' "$props" || \
+        echo 'systemProp.org.gradle.internal.http.socketTimeout=60000' >> "$props"
+}
+setup_gradle_download_timeouts
+
 # P5: select_java 统一设置 JAVA_HOME + PATH（带回退）
 select_java
 

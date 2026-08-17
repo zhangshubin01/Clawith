@@ -324,6 +324,12 @@ class AndroidBuildBackend(BaseSandboxBackend):
                 env["no_proxy"] = no_proxy
                 env["NO_PROXY"] = no_proxy
 
+            # 镜像仓库开关透传（entrypoint 默认开启国内镜像注入）：
+            # 部署方可通过宿主环境 ANDROID_GRADLE_MIRRORS=off 关闭
+            mirror_switch = os.environ.get("ANDROID_GRADLE_MIRRORS")
+            if mirror_switch:
+                env["ANDROID_GRADLE_MIRRORS"] = mirror_switch
+
             # 卷挂载（SDK 卷只读，避免并发写入损坏）
             volumes = {
                 host_project_path: {"bind": "/workspace", "mode": "rw"},

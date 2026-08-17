@@ -326,6 +326,30 @@ class TestProxyPassthrough:
         assert env.get("no_proxy") == "localhost,127.0.0.1"
 
 
+class TestMirrorSwitchPassthrough:
+    """验证 ANDROID_GRADLE_MIRRORS 开关透传进构建容器 env。
+
+    entrypoint 默认开启国内镜像注入；部署方可通过宿主环境
+    ANDROID_GRADLE_MIRRORS=off 关闭（fake-ip 代理挂死根治方案的开关）。
+    """
+
+    def test_mirror_switch_env_passed_into_container(
+        self, backend, mock_docker_client, monkeypatch
+    ):
+        monkeypatch.setenv("ANDROID_GRADLE_MIRRORS", "off")
+
+        asyncio.run(backend.execute(
+            code="", language="java",
+            timeout=30, work_dir="/workspace",
+            project_path="/workspace/app",
+            gradle_task="assembleDebug",
+        ))
+        last_kwargs = mock_docker_client.containers.last_run_kwargs
+        assert last_kwargs is not None, "containers.run 应该已被调用"
+        env = last_kwargs.get("environment", {})
+        assert env.get("ANDROID_GRADLE_MIRRORS") == "off"
+
+
 # ─────────────────────────────────────────────────────────
 # Fix 1: Semaphore 并发控制
 # ─────────────────────────────────────────────────────────
