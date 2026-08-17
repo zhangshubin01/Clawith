@@ -753,7 +753,7 @@ class RuntimeRunCompactorService:
                     temperature=0,
                 )
             except Exception as exc:
-                if classify_error(exc) == FailoverErrorType.RETRYABLE:
+                if classify_error(exc) != FailoverErrorType.NON_RETRYABLE:
                     raise TransientRunCompactorError(
                         "thread_compact_provider_transient",
                         "Thread Compact provider call failed transiently",
