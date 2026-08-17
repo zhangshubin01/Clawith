@@ -158,7 +158,7 @@ export default function SettingsTab(props: Props) {
                         min={10}
                         max={500}
                         value={settingsForm.context_window_size}
-                        onChange={(e) => setSettingsForm((form) => ({ ...form, context_window_size: Math.max(10, Math.min(500, parseInt(e.target.value) || 100)) }))}
+                        onChange={(e) => setSettingsForm((form) => ({ ...form, context_window_size: Math.max(10, Math.min(500, parseInt(e.target.value) || 200)) }))}
                         style={{ width: '120px' }}
                     />
                     <div style={{ fontSize: '11px', color: 'var(--text-tertiary)', marginTop: '4px' }}>{t('agent.settings.roundsDesc')}</div>

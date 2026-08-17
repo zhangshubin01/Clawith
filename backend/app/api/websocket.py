@@ -370,7 +370,7 @@ class WebSocketChatHandler:
                     self.agent_type = self.agent.agent_type or ""
                     self.role_description = self.agent.role_description or ""
                     self.welcome_message = self.agent.welcome_message or ""
-                    self.ctx_size = self.agent.context_window_size or 100
+                    self.ctx_size = self.agent.context_window_size or 200
                     self.user_display_name = (self.user.display_name or "").strip() or "there"
                     logger.info(
                         f"[WS] Agent: {self.agent_name}, type: {self.agent_type}, model_id: {self.agent.primary_model_id}, ctx: {self.ctx_size}"
