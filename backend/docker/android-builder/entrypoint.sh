@@ -258,6 +258,13 @@ fi
 # ─── Gradle 配置 ───
 export GRADLE_OPTS="${GRADLE_OPTS:--Dorg.gradle.daemon=false -Dorg.gradle.jvmargs=-Xmx4096m -XX:+HeapDumpOnOutOfMemoryError}"
 
+# ─── SDK 组件补齐（根治 AGP 自动补全直连 dl.google.com 挂死） ───
+# 构建前主动检测项目声明的 SDK 需求, 缺失组件从国内镜像补进共享卷 (sdk-provision.sh)
+[ -f /usr/local/bin/sdk-provision.sh ] && . /usr/local/bin/sdk-provision.sh
+if command -v sync_sdk_components >/dev/null 2>&1; then
+    sync_sdk_components
+fi
+
 # ─── 签名密钥写入 tmpfs（/dev/shm 已挂载 tmpfs，容器销毁自动释放） ───
 # 环境变量在 docker inspect 中可见，因此使用 tmpfs 文件传递密钥
 if [ -n "${KEY_STORE_PASSWORD:-}" ]; then
@@ -278,6 +285,24 @@ wait "$BUILD_PID"
 BUILD_RC=$?
 set -e
 trap - TERM INT
+
+# ─── SDK 组件自愈重试 ───
+# 首次同步若因镜像抖动失败, 缺失组件会在构建期暴露; 失败后再次同步,
+# 若补到新组件则重试构建一次（有界: 最多一次）。
+if [ "$BUILD_RC" -ne 0 ] && command -v sync_sdk_components >/dev/null 2>&1; then
+    sync_sdk_components
+    if [ "${SDK_PROVISION_INSTALLED_COUNT:-0}" -gt 0 ]; then
+        echo "[entrypoint] SDK 组件补齐 ${SDK_PROVISION_INSTALLED_COUNT} 项, 重试构建"
+        "$@" &
+        BUILD_PID=$!
+        trap 'kill -TERM "$BUILD_PID" 2>/dev/null || true' TERM INT
+        set +e
+        wait "$BUILD_PID"
+        BUILD_RC=$?
+        set -e
+        trap - TERM INT
+    fi
+fi
 
 # ─── 产物路径输出（纯信息，无代码消费方） ───
 # 构建完成后输出本次 APK/AAB 路径列表，覆盖多模块和自定义 buildDir 项目

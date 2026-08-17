@@ -122,7 +122,8 @@ RUN git config --global --add safe.directory /workspace
 
 # ─── 第七层：入口脚本 ───
 COPY docker/android-builder/entrypoint.sh /usr/local/bin/entrypoint.sh
-RUN chmod +x /usr/local/bin/entrypoint.sh
+COPY docker/android-builder/sdk-provision.sh /usr/local/bin/sdk-provision.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh /usr/local/bin/sdk-provision.sh
 
 USER builduser
 WORKDIR /workspace
