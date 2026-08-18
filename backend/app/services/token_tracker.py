@@ -20,6 +20,7 @@ class TokenUsage:
     output_tokens: int = 0
     cache_read_tokens: int = 0
     cache_creation_tokens: int = 0
+    cache_miss_tokens: int = 0
     estimated_tokens: int = 0
 
     def add(self, other: "TokenUsage") -> None:
@@ -28,6 +29,7 @@ class TokenUsage:
         self.output_tokens += other.output_tokens
         self.cache_read_tokens += other.cache_read_tokens
         self.cache_creation_tokens += other.cache_creation_tokens
+        self.cache_miss_tokens += other.cache_miss_tokens
         self.estimated_tokens += other.estimated_tokens
 
 
@@ -74,29 +76,33 @@ def extract_token_usage(usage: dict | None) -> TokenUsage | None:
             "cached_tokens",
             "cache_read_tokens",
             "cache_read_input_tokens",
+            "prompt_cache_hit_tokens",  # DeepSeek KV cache hit
         )
         cache_creation = _token_counter(
             usage,
             "cache_creation_tokens",
             "cache_creation_input_tokens",
         )
+        # DeepSeek reports misses explicitly; for other OpenAI-compatible
+        # providers the miss is the uncached remainder of the prompt.
+        cache_miss = _token_counter(usage, "prompt_cache_miss_tokens")
         for details in detail_sources:
             cached += _token_counter(
                 details,
                 "cached_tokens",
                 "cache_read_tokens",
                 "cache_read_input_tokens",
+                "prompt_cache_hit_tokens",
             )
             cache_creation += _token_counter(
                 details,
                 "cache_creation_tokens",
                 "cache_creation_input_tokens",
             )
+        if not cache_miss:
+            cache_miss = max(_int_token(usage.get("prompt_tokens")) - cached, 0)
         if cached or cache_creation:
-            logger.debug(
-                f"[Token Cache] API Provider -> Created: {cache_creation} tokens, "
-                f"Read: {cached} tokens"
-            )
+            logger.debug(f"[Token Cache] API Provider -> Created: {cache_creation} tokens, Read: {cached} tokens")
         input_tokens = _int_token(usage.get("prompt_tokens", usage.get("input_tokens", 0)))
         output_tokens = _int_token(usage.get("completion_tokens", usage.get("output_tokens", 0)))
         total_tokens = _int_token(usage.get("total_tokens", input_tokens + output_tokens))
@@ -106,6 +112,7 @@ def extract_token_usage(usage: dict | None) -> TokenUsage | None:
             output_tokens=output_tokens,
             cache_read_tokens=cached,
             cache_creation_tokens=cache_creation,
+            cache_miss_tokens=cache_miss,
         )
 
     # Anthropic:
@@ -128,6 +135,7 @@ def extract_token_usage(usage: dict | None) -> TokenUsage | None:
             output_tokens=output_tokens,
             cache_read_tokens=cache_read,
             cache_creation_tokens=cache_creation,
+            cache_miss_tokens=max(input_tokens - cache_read - cache_creation, 0),
         )
 
     # Gemini usage metadata can be normalized by the client, but keep a direct
@@ -142,6 +150,7 @@ def extract_token_usage(usage: dict | None) -> TokenUsage | None:
             input_tokens=input_tokens,
             output_tokens=output_tokens,
             cache_read_tokens=cached,
+            cache_miss_tokens=max(input_tokens - cached, 0),
         )
 
     return None
@@ -173,13 +182,17 @@ async def record_token_usage(
     Safely updates tokens_used_today, tokens_used_month, and tokens_used_total.
     Uses an independent DB session to avoid interfering with the caller's transaction.
     """
-    usage = tokens if isinstance(tokens, TokenUsage) else TokenUsage(
-        total_tokens=tokens,
-        input_tokens=input_tokens,
-        output_tokens=output_tokens,
-        cache_read_tokens=cache_read_tokens,
-        cache_creation_tokens=cache_creation_tokens,
-        estimated_tokens=estimated_tokens,
+    usage = (
+        tokens
+        if isinstance(tokens, TokenUsage)
+        else TokenUsage(
+            total_tokens=tokens,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            cache_read_tokens=cache_read_tokens,
+            cache_creation_tokens=cache_creation_tokens,
+            estimated_tokens=estimated_tokens,
+        )
     )
     if usage.total_tokens <= 0:
         return
@@ -207,31 +220,55 @@ async def record_token_usage(
                 agent.cache_creation_tokens_total = (
                     agent.cache_creation_tokens_total or 0
                 ) + usage.cache_creation_tokens
+                agent.cache_miss_tokens_today = (agent.cache_miss_tokens_today or 0) + usage.cache_miss_tokens
+                agent.cache_miss_tokens_month = (agent.cache_miss_tokens_month or 0) + usage.cache_miss_tokens
+                agent.cache_miss_tokens_total = (agent.cache_miss_tokens_total or 0) + usage.cache_miss_tokens
+
+                # Cache health watchdog: a large share of uncached prompt tokens
+                # on a non-trivial request usually means the stable prefix was
+                # broken (schema reorder, prompt edit, cache eviction).
+                if usage.cache_miss_tokens >= 1024:
+                    miss_ratio = usage.cache_miss_tokens / max(usage.input_tokens, 1)
+                    if miss_ratio >= 0.5:
+                        logger.warning(
+                            "[Token Cache] Low hit rate agent={} miss={} input={} "
+                            "ratio={:.0%} — check prompt/tool-schema stability",
+                            agent.name,
+                            usage.cache_miss_tokens,
+                            usage.input_tokens,
+                            miss_ratio,
+                        )
 
                 from datetime import datetime, timezone
                 from sqlalchemy.dialects.postgresql import insert
                 from app.models.activity_log import DailyTokenUsage
 
                 today_date = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
-                stmt = insert(DailyTokenUsage).values(
-                    tenant_id=agent.tenant_id,
-                    agent_id=agent.id,
-                    date=today_date,
-                    tokens_used=usage.total_tokens,
-                    input_tokens=usage.input_tokens,
-                    output_tokens=usage.output_tokens,
-                    cache_read_tokens=usage.cache_read_tokens,
-                    cache_creation_tokens=usage.cache_creation_tokens,
-                    estimated_tokens=usage.estimated_tokens,
-                ).on_conflict_do_update(
-                    index_elements=["agent_id", "date"],
-                    set_=dict(
-                        tokens_used=DailyTokenUsage.tokens_used + usage.total_tokens,
-                        input_tokens=DailyTokenUsage.input_tokens + usage.input_tokens,
-                        output_tokens=DailyTokenUsage.output_tokens + usage.output_tokens,
-                        cache_read_tokens=DailyTokenUsage.cache_read_tokens + usage.cache_read_tokens,
-                        cache_creation_tokens=DailyTokenUsage.cache_creation_tokens + usage.cache_creation_tokens,
-                        estimated_tokens=DailyTokenUsage.estimated_tokens + usage.estimated_tokens,
+                stmt = (
+                    insert(DailyTokenUsage)
+                    .values(
+                        tenant_id=agent.tenant_id,
+                        agent_id=agent.id,
+                        date=today_date,
+                        tokens_used=usage.total_tokens,
+                        input_tokens=usage.input_tokens,
+                        output_tokens=usage.output_tokens,
+                        cache_read_tokens=usage.cache_read_tokens,
+                        cache_creation_tokens=usage.cache_creation_tokens,
+                        cache_miss_tokens=usage.cache_miss_tokens,
+                        estimated_tokens=usage.estimated_tokens,
+                    )
+                    .on_conflict_do_update(
+                        index_elements=["agent_id", "date"],
+                        set_=dict(
+                            tokens_used=DailyTokenUsage.tokens_used + usage.total_tokens,
+                            input_tokens=DailyTokenUsage.input_tokens + usage.input_tokens,
+                            output_tokens=DailyTokenUsage.output_tokens + usage.output_tokens,
+                            cache_read_tokens=DailyTokenUsage.cache_read_tokens + usage.cache_read_tokens,
+                            cache_creation_tokens=DailyTokenUsage.cache_creation_tokens + usage.cache_creation_tokens,
+                            cache_miss_tokens=DailyTokenUsage.cache_miss_tokens + usage.cache_miss_tokens,
+                            estimated_tokens=DailyTokenUsage.estimated_tokens + usage.estimated_tokens,
+                        ),
                     )
                 )
                 await query_dao.execute(db, stmt)

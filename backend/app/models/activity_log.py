@@ -47,6 +47,7 @@ class DailyTokenUsage(Base):
     output_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     cache_read_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     cache_creation_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    cache_miss_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     estimated_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())

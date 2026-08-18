@@ -810,7 +810,9 @@ async def get_agent_tools_for_llm(agent_id: uuid.UUID) -> list[dict]:
 
         async with async_session() as db:
             # Get agent-specific assignments
-            agent_tools_r = await db.execute(select(AgentTool).where(AgentTool.agent_id == agent_id))
+            agent_tools_r = await db.execute(
+                select(AgentTool).where(AgentTool.agent_id == agent_id).order_by(AgentTool.tool_id)
+            )
             assignments = {str(at.tool_id): at for at in agent_tools_r.scalars().all()}
             assigned_tool_ids = [uuid.UUID(tool_id) for tool_id in assignments]
 
@@ -825,8 +827,10 @@ async def get_agent_tools_for_llm(agent_id: uuid.UUID) -> list[dict]:
                 visible_clauses.append(Tool.id.in_(assigned_tool_ids))
 
             # Get all tools visible within this agent's tenant boundary.
+            # Stable name ordering keeps the tool-schema prefix byte-identical
+            # across calls — a requirement for provider KV-cache hits.
             all_tools_r = await db.execute(
-                select(Tool).where(Tool.enabled, or_(*visible_clauses))
+                select(Tool).where(Tool.enabled, or_(*visible_clauses)).order_by(Tool.name)
             )
             all_tools = all_tools_r.scalars().all()
 
