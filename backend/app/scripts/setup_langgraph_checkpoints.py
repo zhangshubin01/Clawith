@@ -11,6 +11,7 @@ from psycopg import AsyncConnection
 from app.config import Settings
 from app.services.agent_runtime.checkpointer import (
     checkpoint_database_url,
+    close_checkpointer_pool,
     create_checkpointer,
 )
 
@@ -66,7 +67,15 @@ async def setup_checkpoint_tables(settings: Settings | None = None) -> None:
 
 
 def main() -> None:
-    asyncio.run(setup_checkpoint_tables())
+    async def _run() -> None:
+        try:
+            await setup_checkpoint_tables()
+        finally:
+            # 显式关闭共享池，避免依赖 asyncio.run 取消后台连接任务
+            # （异步池 worker 在 teardown 阶段可能拖住事件循环，曾导致本脚本挂起）。
+            await close_checkpointer_pool()
+
+    asyncio.run(_run())
 
 
 if __name__ == "__main__":
