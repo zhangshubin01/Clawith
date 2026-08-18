@@ -96,7 +96,9 @@ if role_contains "bootstrap"; then
 
         echo "[entrypoint] Step 2: Installing LangGraph checkpoint tables..."
         set +e
-        CHECKPOINT_OUTPUT=$(python -m app.scripts.setup_langgraph_checkpoints 2>&1)
+        # 超时保护: 该步骤偶发挂起(详见 docs/technical-plans 启动问题排查记录),
+        # SIGABRT + faulthandler 让超时现场以 Python 堆栈形式留在 CHECKPOINT_OUTPUT 里。
+        CHECKPOINT_OUTPUT=$(timeout -s ABRT ${CHECKPOINT_SETUP_TIMEOUT_SECONDS:-120} python -X faulthandler -m app.scripts.setup_langgraph_checkpoints 2>&1)
         CHECKPOINT_EXIT=$?
         set -e
 
