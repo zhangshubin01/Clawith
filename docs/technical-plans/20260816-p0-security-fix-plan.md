@@ -3,7 +3,7 @@
 - 日期：2026-08-16
 - 范围：backend（`backend/app/`）三项 P0 —— 沙箱执行回退、存储 key 前缀逃逸、上传文件名穿越
 - 方法：三路子代理并行深研（沙箱 / 存储 key / 上传）+ 主代理逐条复核（含路径穿越实证、死代码确认、调用点清单核对）
-- 状态：已按推荐值实施（D1-D8 完成，D4 实际选择"保留加固"；D8 因 macOS 无法安装 bwrap 修正为开发降级引导，见「实施状态」章节；D9 部署层待做）。本文所有行号以当前 `f-shubin-0806` 分支为准，实施时以引用代码片段定位。
+- 状态：已按推荐值实施（D1-D8 完成，D4 实际选择"保留加固"；D8 因 macOS 无法安装 bwrap 修正为开发降级引导，见「实施状态」章节；D9 已完成，见「实施状态」章节；另完成三项环境问题 P1/P2/P3 的定位与修复，其中 P1 已实证为上游 buildkitd 问题（官方镜像 v0.29.0/v0.32.2 均复现），修复以两 Dockerfile 兜底清理落地，详见「实施状态」）。本文所有行号以当前 `f-shubin-0806` 分支为准，实施时以引用代码片段定位。
 
 ## 0. 总结论
 
@@ -40,9 +40,21 @@
   - `.env.example`：新增沙箱配置段——macOS 开发二选一（`SANDBOX_ALLOW_UNSAFE_FALLBACK_WHEN_BWRAP_MISSING=true` 降级隔离（保留代码安全审查 + rlimits + 环境净化，仅无文件系统隔离；仅限开发）或 `SANDBOX_TYPE=docker`）；Linux 开发机 `apt install bubblewrap`。
   - `main.py` 启动诊断：darwin 上给出准确指引（bwrap 为 Linux-only），不再泛泛提示"未安装"。
 
+- **D9（已完成）**：backend 容器 `/app` 只读化（`backend/Dockerfile`）。
+  - `/app` 平台代码 root 属主交付：`chown -R clawith:clawith /data`（不再 chown `/app`），运行用户 clawith 对 `/app` 只读可执行。
+  - `ENV PYTHONDONTWRITEBYTECODE=1`：禁止运行期写回 `__pycache__`（镜像构建时不带 pyc，运行期也不生成）。
+  - `COPY . .` 后显式清理构建上下文带入的宿主编译产物（`__pycache__`/`*.pyc`/`.venv*`/`.pytest_cache`/`agent_data`/`*.egg-info`）：本机 OrbStack + docker CLI 29.4.0 下 `.dockerignore` 未被应用（已最小复现实证，与 D9 无关的环境问题），清理显式化与 dockerignore 解耦。
+  - 运行期写路径核查与验证：日志走 stdout；存储/venv/uv 缓存均在 `/data/agents`（保留 clawith 属主）；git 全局配置在 `/home/clawith`。镜像实测（与 compose 同参：privileged + SYS_ADMIN + group_add 0）：clawith 身份写 `/app` 被拒、`/data` 与 `/home/clawith` 可写、entrypoint 降权后 uvicorn 以 clawith 运行、health 200、bwrap 冒烟与沙箱 `/workspace` 写读正常、运行后 `/app` 无 pycache。
+  - 注：setuid bwrap 的 caps 需求已查明（见下方 P2），compose 已从 `privileged: true` 收紧为最小 cap 集；此前「普通 docker run 下 capset failed 属预期差异」的判断不准确——那是缺 caps 的症状而非 docker run 本身的问题。
+
+**环境问题 P1/P2/P3（2026-08-16 定位与修复）**：
+
+- **P1（`.dockerignore` 被无视）**：真 bug，**已实证为上游 buildkitd 问题，非 OrbStack 特有**（2026-08-16 网络恢复后复核，替代此前"OrbStack 内置 v0.29.0 丢弃排除模式"的中间结论）：从 docker.1ms.run 拉取 moby/buildkit **v0.29.0 与 v0.32.2（2026-08-04 最新）官方镜像**各起独立 buildkitd 容器，docker CLI 29.7.2 最小复现（`FROM scratch`+`COPY . /x`，`.dockerignore` 含 `__pycache__/`、`*.pyc`，上下文含 `foo/__pycache__/a.pyc`）——**两者产物 tar 均含 a.pyc，全部复现**（v0.19.0 基线已拉取、因结论已定未再跑）。机制（源码确认）：过滤发生在**客户端**——moby/buildkit `session/filesync/filesync.go` 的 `fsSyncProvider.handle()` 从 DiffCopy 流 gRPC metadata 读取 `exclude-patterns` 并用 `fsutil.NewFilterFS` 过滤；daemon 侧 `FSSync()` 负责把 Solve 请求里的 `local.excludepatterns` 写进该 metadata。TCP 代理抓包（daemon v0.32.2，第一手证据）：SolveRequest 正确携带 `local.excludepatterns=["*.pyc","__pycache__"]`；**daemon→CLI 方向 `exclude-patterns` 与 `dir-name` 均为 0 次**（DiffCopy 索取请求未带排除元数据），CLI→daemon 方向却有 8 次 `DiffCopy` 方法名与序列化后的排除模式串（`*.pyc\n__pycache__/\n`），客户端过滤空转、pyc 全量入镜。**精确断点未最终定位**：源码审计 v0.32.2 该链条完整（`source/local/source.go` 解析 `pb.AttrExcludePatterns` → snapshot() 传 `FSSendRequestOpt.ExcludePatterns` → filesync.go FSSync 写 metadata）与抓包现象矛盾，疑在会话/连接复用链路，上报上游时附抓包由 buildkit 维护者定位。排除项：CLI 版本二分（静态 CLI 27.5.0 / 28.4.0 / 29.0.0 + brew 29.7.2 对同一 daemon **全部复现**）→ 与客户端版本无关；`/tmp` 上下文同样复现 → 非 OrbStack 直读 /Users 的优化；非 pattern 语法问题。**全网搜索**（DuckDuckGo 多轮 + GitHub issues 语义搜索 moby/buildkit、docker/cli、docker/buildx、orbstack/orbstack）：**无任何公开报告**，属未上报的 bug；社区"dockerignore 不生效"内容全是用户错误（bind mount 混淆、文件位置、语法）；buildx #3776「client-side global dockerignore」提案（2026-04 提出）至今未落地。**修复（已落地、用户确认采纳）**：`backend/Dockerfile` 与 `frontend/Dockerfile` 均已在 `COPY . .` 后显式清理宿主带入产物（backend：`.venv*/agent_data/__pycache__` 等 + `.env*`，`.dockerignore` 同步补 `.env*`；frontend：经暂存目录过滤 `node_modules/dist/.git/tests/.env*` 后合并，避免 macOS node_modules 二进制污染 linux 产物且保住 npm ci 层缓存），镜像均实测干净——不依赖任何 docker 组件修复，是当前最稳的选择。残余影响：被排除文件仍会经上下文传输进入 daemon 构建缓存（backend 列表仅编译产物，无敏感内容，可接受；如需「敏感文件永不出宿主机」再升级 rsync staging）；构建上下文仍含大目录（backend 6.3G agent_data / frontend 601M node_modules），传输耗时不变，建议定期检查 context 体积。可选后续：上报 moby/buildkit issue（附 /tmp/d9cap 抓包，报告对象从 OrbStack 改为上游）。
+- **P2（bwrap 需要 privileged）**：已收紧并实测。根因：bwrap 0.11 的 `set_required_caps` 硬性要求 `SYS_ADMIN|SYS_CHROOT|NET_ADMIN|SETUID|SETGID|SYS_PTRACE`，其中 **NET_ADMIN 与 SYS_PTRACE 不在 Docker 默认 caps 内**；setuid 执行只授予 bounding set（默认+SYS_ADMIN），capset 缺这两个 → `capset failed`（privileged 下 bounding=全量所以正常）。另发现 OrbStack 默认 seccomp 会拦 bwrap 的 mount/pivot_root（`security_opt: seccomp=unconfined` 在 OrbStack 上实测生效，原注释有误）。**compose 已改**（仅改文件，未重启用户栈）：去 `privileged: true`，改 `cap_add: [SYS_ADMIN, NET_ADMIN, SYS_PTRACE]` + `security_opt: [seccomp=unconfined]`，保留 `group_add: "0"`（docker.sock 访问）。验证：d9-readonly 镜像 + 新配置起容器，entrypoint 降权、health 200、bwrap 全参数沙箱冒烟（clawith 身份、/workspace 写读）、chromium headless、chown 路径全部通过。
+- **P3（Dockerfile 曾被外部回退）**：git 工作区现状仅本次改动的文件；backend 多文件 mtime 异常但无 git diff（疑 iCloud 同步重应用或并行会话改后还原）；检测到多对并行 MCP 进程，确认存在并行 agent 会话。**风险提示**：并行会话可能互相覆盖改动，建议重要提交前 `git status` 复核并尽量避免多会话同时改同一批文件。
+
 **未完成（部署层，另开任务）**：
 
-- **D9**：backend 容器 `/app` 只读化（Dockerfile root 属主交付 + 启动后降权，需验证 bwrap 等运行期写路径）。
 - nginx `client_max_body_size` 下调与 8008 直连治理（D3 附项）。
 
 ---
@@ -322,4 +334,4 @@ cd .. && scripts/arch-guard.sh
 | D6 | 其余 3 个无大小限制端点（files.py×2、groups.py×1）是否本次一并加统一上限 helper | 本次一并加（改动小） |
 | D7 | 分支与提交粒度：建议新分支 `feat/security-p0`，三步各一个 commit | 建议 |
 | D8 | 开发机 bwrap 安装引导（文档/Makefile 步骤，随 D1 落地） | 做（已完成，修正：macOS 无法安装 bwrap，改为开发降级引导；见「实施状态」） |
-| D9 | backend 容器代码目录只读化（`/app` 对运行用户 clawith 可写，穿越写可覆盖平台自身代码）：Dockerfile chmod / root 属主交付，P0-1 修复后实施 | 做 |
+| D9 | backend 容器代码目录只读化（`/app` 对运行用户 clawith 可写，穿越写可覆盖平台自身代码）：Dockerfile chmod / root 属主交付，P0-1 修复后实施 | **已完成**（root 属主交付 + PYTHONDONTWRITEBYTECODE=1 + 构建上下文清理；镜像实测，见「实施状态」） |

@@ -95,10 +95,10 @@ class Agent(Base):
     cache_creation_tokens_today: Mapped[int] = mapped_column(Integer, default=0)
     cache_creation_tokens_month: Mapped[int] = mapped_column(Integer, default=0)
     cache_creation_tokens_total: Mapped[int] = mapped_column(Integer, default=0)
-    context_window_size: Mapped[int] = mapped_column(Integer, default=100)
+    context_window_size: Mapped[int] = mapped_column(Integer, default=200)
     # Historical field name: this is the maximum number of model-decision turns
     # allowed for one Agent Run, not the number of tools executed.
-    max_tool_rounds: Mapped[int] = mapped_column(Integer, default=50)
+    max_tool_rounds: Mapped[int] = mapped_column(Integer, default=10000)
 
     # Trigger limits (per-agent, configurable from Settings UI)
     max_triggers: Mapped[int] = mapped_column(Integer, default=20)

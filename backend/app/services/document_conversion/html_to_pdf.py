@@ -151,6 +151,7 @@ async def convert_html_to_pdf(src_file: Path, tgt_file: Path, target_path: str, 
                 except Exception:
                     try:
                         proc.kill()
+                        proc.wait()
                     except Exception:
                         pass
                 profile_dir.cleanup()

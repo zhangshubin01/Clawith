@@ -3054,8 +3054,8 @@ export default function AgentDetailPage() {
     const [settingsForm, setSettingsForm] = useState({
         primary_model_id: '',
         fallback_model_id: '',
-        context_window_size: 100,
-        max_tool_rounds: 50,
+        context_window_size: 200,
+        max_tool_rounds: 10000,
         max_tokens_per_day: '' as string | number,
         max_tokens_per_month: '' as string | number,
         max_triggers: 20,
@@ -3073,8 +3073,8 @@ export default function AgentDetailPage() {
             setSettingsForm({
                 primary_model_id: agent.primary_model_id || '',
                 fallback_model_id: agent.fallback_model_id || '',
-                context_window_size: agent.context_window_size ?? 100,
-                max_tool_rounds: (agent as any).max_tool_rounds ?? 50,
+                context_window_size: agent.context_window_size ?? 200,
+                max_tool_rounds: (agent as any).max_tool_rounds ?? 10000,
                 max_tokens_per_day: agent.max_tokens_per_day || '',
                 max_tokens_per_month: agent.max_tokens_per_month || '',
                 max_triggers: (agent as any).max_triggers ?? 20,
@@ -3093,8 +3093,8 @@ export default function AgentDetailPage() {
     const hasSettingsChanges = (
         settingsForm.primary_model_id !== (agent?.primary_model_id || '') ||
         settingsForm.fallback_model_id !== (agent?.fallback_model_id || '') ||
-        settingsForm.context_window_size !== (agent?.context_window_size ?? 100) ||
-        settingsForm.max_tool_rounds !== ((agent as any)?.max_tool_rounds ?? 50) ||
+        settingsForm.context_window_size !== (agent?.context_window_size ?? 200) ||
+        settingsForm.max_tool_rounds !== ((agent as any)?.max_tool_rounds ?? 10000) ||
         String(settingsForm.max_tokens_per_day) !== String(agent?.max_tokens_per_day || '') ||
         String(settingsForm.max_tokens_per_month) !== String(agent?.max_tokens_per_month || '') ||
         settingsForm.max_triggers !== ((agent as any)?.max_triggers ?? 20) ||
@@ -5678,7 +5678,7 @@ export default function AgentDetailPage() {
                                             </div>
                                             <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '13px' }}>
                                                 <span style={{ color: 'var(--text-tertiary)' }}>{t('agent.modelConfig.contextRounds')}</span>
-                                                <span>{(agent as any).context_window_size || 100}</span>
+                                                <span>{(agent as any).context_window_size || 200}</span>
                                             </div>
                                         </div>
                                     </div>

@@ -84,8 +84,8 @@ from app.services.autonomy_service import autonomy_service
 from app.services.agent_tools import (
     agentbay_run_scope_id,
     execute_builtin_tool_outcome,
-    get_runtime_agent_tools_for_llm,
 )
+from app.services.agent_tools_cache import cached_runtime_agent_tools
 from app.services.builtin_tool_definitions import (
     builtin_cross_space_action,
     builtin_policy,
@@ -585,7 +585,7 @@ class RuntimeToolStepService:
         *,
         session_factory: RuntimeSessionFactory,
         cancel_source: RuntimeCancelSource,
-        tool_provider: ToolProvider = get_runtime_agent_tools_for_llm,
+        tool_provider: ToolProvider = cached_runtime_agent_tools,
         tool_executor: ToolExecutor = execute_builtin_tool_outcome,
         group_tool_service: GroupRuntimeToolService | None = None,
         a2a_service: RuntimeA2AService | None = None,

@@ -58,7 +58,7 @@ from app.services.agent_runtime.tool_result_store import (
 from app.services.agent_runtime.thread_visibility import (
     model_visible_thread_messages,
 )
-from app.services.agent_tools import get_runtime_agent_tools_for_llm
+from app.services.agent_tools_cache import cached_runtime_agent_tools
 from app.services.vision_inject import compress_bytes_to_base64
 from app.services.llm.client import LLMMessage
 from app.services.llm.failover import FailoverErrorType, classify_error
@@ -1035,7 +1035,7 @@ class RuntimeModelStepService:
         session_factory: RuntimeSessionFactory,
         context_builder: ContextBuilder,
         completion: CompletionPort = complete_llm_once,
-        tool_provider: ToolProvider = get_runtime_agent_tools_for_llm,
+        tool_provider: ToolProvider = cached_runtime_agent_tools,
         prompt_builder: PromptBuilder = build_agent_context,
         tool_result_store: ToolResultStore | None = None,
         model_retry_attempts: int = _DEFAULT_MODEL_RETRY_ATTEMPTS,
@@ -1488,7 +1488,13 @@ class RuntimeModelStepService:
         on_chunk: Callable[[str], Awaitable[None]] | None = None,
         on_thinking: Callable[[str], Awaitable[None]] | None = None,
     ) -> LLMCompletionStep:
-        """Retry only transient provider failures before model failover."""
+        """Retry provider failures before model failover.
+
+        Fails fast only on deterministic errors (NON_RETRYABLE). Transient
+        network failures (RETRYABLE) and unclassified errors (UNKNOWN) are
+        retried with backoff: a single DNS/connect blip must never kill a
+        durable Run just because its message did not match a keyword.
+        """
         total_attempts = self._model_retry_attempts + 1
         for attempt in range(1, total_attempts + 1):
             try:
@@ -1503,10 +1509,10 @@ class RuntimeModelStepService:
             except Exception as exc:
                 classification = classify_error(exc)
                 if (
-                    classification != FailoverErrorType.RETRYABLE
+                    classification == FailoverErrorType.NON_RETRYABLE
                     or attempt >= total_attempts
                 ):
-                    if classification == FailoverErrorType.RETRYABLE:
+                    if classification != FailoverErrorType.NON_RETRYABLE:
                         logger.warning(
                             "[RuntimeModelRetry] exhausted provider={} model={} "
                             "attempts={} error_type={} http_status={} classification={}",
@@ -1699,7 +1705,7 @@ class RuntimeModelStepService:
                 if _flush is not None:
                     _flush.dispose()
                 primary_classification = classify_error(primary_error)
-                if primary_classification != FailoverErrorType.RETRYABLE:
+                if primary_classification == FailoverErrorType.NON_RETRYABLE:
                     logger.error(
                         "[RuntimeModelFailure] run_id={} agent_id={} stage=primary "
                         "provider={} model={} classification={} http_status={} "
@@ -1788,7 +1794,7 @@ class RuntimeModelStepService:
                     if _flush is not None:
                         _flush.dispose()
                     fallback_classification = classify_error(fallback_error)
-                    if fallback_classification == FailoverErrorType.RETRYABLE:
+                    if fallback_classification != FailoverErrorType.NON_RETRYABLE:
                         return self._provider_retry_wait(
                             context=context,
                             model=fallback,

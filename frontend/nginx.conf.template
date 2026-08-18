@@ -14,8 +14,9 @@ server {
     resolver 127.0.0.11 ipv6=off valid=30s;
     set $api_upstream http://${API_UPSTREAM};
 
-    # Allow large file uploads (up to 100MB)
-    client_max_body_size 500m;
+    # Body 上限对齐后端 MAX_UPLOAD_BYTES(50MB) + 余量：multipart 元数据计入 body，
+    # nginx 值略高于后端限值，保证合法边界请求由后端返回友好错误而非被 nginx 提前 413 截断
+    client_max_body_size 60m;
 
     # SPA fallback — index.html must never be cached so users always get the latest build
     location / {
@@ -36,7 +37,7 @@ server {
         proxy_set_header Host $http_host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-Proto $scheme;
-        client_max_body_size 500m;
+        client_max_body_size 60m;
         proxy_read_timeout 120s;
         proxy_send_timeout 120s;
     }

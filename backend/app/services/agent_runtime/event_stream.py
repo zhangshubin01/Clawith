@@ -5,14 +5,18 @@ from __future__ import annotations
 from collections.abc import AsyncIterator, Mapping, Sequence
 import asyncio
 from copy import deepcopy
+from datetime import UTC, datetime
 import math
 import time as time_module
 from typing import cast
 
-from sqlalchemy import and_, or_, select
+from sqlalchemy import and_, exists, or_, select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.agent_run import AgentRun
+from app.models.agent_run_command import AgentRunCommand
 from app.models.agent_run_event import AgentRunEvent
+from app.models.agent_tool_execution import AgentToolExecution
 from app.services.agent_runtime.command_worker import RuntimeSessionFactory
 from app.services.agent_runtime.contracts import (
     RunHandle,
@@ -182,6 +186,49 @@ class DatabaseRuntimeEventStream:
             )
         return run
 
+    async def _worker_alive(self, db: AsyncSession, handle: RunHandle) -> bool:
+        """Check durable liveness signals before declaring a silent Run dead.
+
+        The command worker renews its claim every
+        ``AGENT_RUNTIME_COMMAND_CLAIM_RENEW_SECONDS`` for the whole Run, and the
+        tool step service renews tool execution leases while a long-running
+        tool handler is active. Long tools stream their output out-of-band
+        without persisting events, so an idle event table alone does not mean
+        the worker stopped processing the Run. Only when every liveness signal
+        has gone cold is the Run truly unattended.
+        """
+        now = datetime.now(UTC)
+        command_result = await db.execute(
+            select(
+                AgentRunCommand.status,
+                AgentRunCommand.claim_expires_at,
+            ).where(
+                AgentRunCommand.tenant_id == handle.tenant_id,
+                AgentRunCommand.id == handle.command_id,
+            )
+        )
+        command_row = command_result.one_or_none()
+        if command_row is not None:
+            if (
+                command_row.claim_expires_at is not None
+                and command_row.claim_expires_at > now
+            ):
+                return True
+            if command_row.status == "pending":
+                # Queued but not yet claimed; keep the stream waiting.
+                return True
+        lease_result = await db.execute(
+            select(
+                exists().where(
+                    AgentToolExecution.tenant_id == handle.tenant_id,
+                    AgentToolExecution.run_id == handle.run_id,
+                    AgentToolExecution.status == "started",
+                    AgentToolExecution.lease_expires_at > now,
+                )
+            )
+        )
+        return bool(lease_result.scalar())
+
     async def stream_run(
         self,
         handle: RunHandle,
@@ -240,10 +287,18 @@ class DatabaseRuntimeEventStream:
                 self._idle_timeout_seconds is not None
                 and time_module.monotonic() - last_event_time > self._idle_timeout_seconds
             ):
+                async with self._session_factory() as db:
+                    worker_alive = await self._worker_alive(db, handle)
+                if worker_alive:
+                    # A live worker can be legitimately busy without new
+                    # events (long tools stream output out-of-band). Restart
+                    # the idle clock instead of killing the stream.
+                    last_event_time = time_module.monotonic()
+                    continue
                 raise RuntimeEventStreamError(
                     "runtime_event_stream_idle_timeout",
-                    f"No Runtime events received for {self._idle_timeout_seconds:.0f}s; "
-                    "the command worker may not be processing this Run",
+                    f"No Runtime events received for {self._idle_timeout_seconds:.0f}s "
+                    "and the Run's command worker shows no liveness signal",
                 )
 
             await asyncio.sleep(self._poll_interval_seconds)

@@ -510,7 +510,7 @@
       "month": "本月",
       "maxToolRounds": "模型决策步数上限",
       "maxToolRoundsLabel": "单次任务的最大模型决策步数",
-      "maxToolRoundsDesc": "模型决策步骤返回结果时即计入，包括等待或错误结果；工具调用次数单独计算。默认值：50",
+      "maxToolRoundsDesc": "模型决策步骤返回结果时即计入，包括等待或错误结果；工具调用次数单独计算。默认值：10000",
       "saveSettings": "保存设置",
       "save": "保存",
       "saving": "保存中...",

@@ -43,7 +43,6 @@ from app.database import async_session
 from urllib.parse import urlsplit
 
 from app.config import get_settings
-_FEISHU_BASE = get_settings().FEISHU_DOMAIN
 from app.models.agent import Agent as AgentModel
 from app.models.audit import ChatMessage
 from app.models.chat_session import ChatSession
@@ -78,7 +77,6 @@ from app.services.workspace_collaboration import (
 from app.services.storage import get_storage_backend, normalize_storage_key
 from app.services.storage_runtime.base import WriteCondition, content_hash_bytes
 from app.services.workspace_locking import workspace_locks
-from app.config import get_settings
 from app.services.llm.finish import (
     FINISH_TOOL_NAME,
 )
@@ -96,6 +94,8 @@ from app.services.agent_runtime.tool_execution import (
     ToolExecutionOutcome,
     sanitize_tool_arguments,
 )
+
+_FEISHU_BASE = get_settings().FEISHU_DOMAIN
 
 
 _settings = get_settings()
@@ -914,7 +914,7 @@ async def get_agent_tools_for_llm(agent_id: uuid.UUID) -> list[dict]:
                 db_tool_names.add(t.name)
 
             if default_included_names:
-                logger.info(
+                logger.debug(
                     f"[Tools] agent={agent_id} included via default fallback (no AgentTool record): "
                     f"{sorted(default_included_names)}"
                 )
@@ -936,7 +936,7 @@ async def get_agent_tools_for_llm(agent_id: uuid.UUID) -> list[dict]:
                 result = _patch_computer_tool_descriptions(result, computer_os_type)
                 # Final diagnostic: log the complete tool list and assignment stats
                 final_names = sorted(t["function"]["name"] for t in result)
-                logger.info(
+                logger.debug(
                     f"[Tools] agent={agent_id} FINAL {len(result)} tools "
                     f"(assignments={len(assignments)}, "
                     f"disabled={len(explicitly_disabled_names)}, "
@@ -1046,7 +1046,7 @@ async def _get_runtime_dynamic_mcp_tool_names(
             or parsed.scheme not in {"http", "https"}
             or not parsed.netloc
         ):
-            logger.info(
+            logger.debug(
                 "[Tools] Durable Runtime hid locally unready MCP tool {}",
                 name or "<unnamed>",
             )
@@ -1073,7 +1073,7 @@ async def get_runtime_agent_tools_for_llm(agent_id: uuid.UUID) -> list[dict]:
                     await _agent_is_designated_okr_agent(agent_id)
                 )
             if not is_designated_okr_agent:
-                logger.info(
+                logger.debug(
                     "[Tools] Durable Runtime hid {} because this Agent is "
                     "not the tenant's designated OKR Agent",
                     name,
@@ -1098,7 +1098,7 @@ async def get_runtime_agent_tools_for_llm(agent_id: uuid.UUID) -> list[dict]:
             ):
                 ready.append(tool)
             else:
-                logger.info(
+                logger.debug(
                     "[Tools] Durable Runtime hid web_search because its local "
                     "engine configuration is not ready"
                 )
@@ -1119,7 +1119,7 @@ async def get_runtime_agent_tools_for_llm(agent_id: uuid.UUID) -> list[dict]:
             ):
                 ready.append(tool)
             else:
-                logger.info(
+                logger.debug(
                     "[Tools] Durable Runtime hid execute_code_e2b because "
                     "its local E2B configuration is not ready"
                 )
@@ -1129,7 +1129,7 @@ async def get_runtime_agent_tools_for_llm(agent_id: uuid.UUID) -> list[dict]:
                 if await _agent_has_any_channel(agent_id):
                     ready.append(tool)
                 else:
-                    logger.info(
+                    logger.debug(
                         "[Tools] Durable Runtime hid {} because no channel is configured",
                         name,
                     )
@@ -1145,7 +1145,7 @@ async def get_runtime_agent_tools_for_llm(agent_id: uuid.UUID) -> list[dict]:
                 if await _agent_has_feishu(agent_id):
                     ready.append(tool)
                 else:
-                    logger.info(
+                    logger.debug(
                         "[Tools] Durable Runtime hid {} because the local "
                         "Feishu channel credentials are incomplete",
                         name,
@@ -1178,7 +1178,7 @@ async def get_runtime_agent_tools_for_llm(agent_id: uuid.UUID) -> list[dict]:
             if required_protocols and required_protocols <= ready_protocols:
                 ready.append(tool)
             else:
-                logger.info(
+                logger.debug(
                     "[Tools] Durable Runtime hid {} because its local Email "
                     "protocol configuration is incomplete",
                     name,
@@ -1211,7 +1211,7 @@ async def get_runtime_agent_tools_for_llm(agent_id: uuid.UUID) -> list[dict]:
             ):
                 ready.append(tool)
             else:
-                logger.info(
+                logger.debug(
                     "[Tools] Durable Runtime hid {} because its local "
                     "AgentBay configuration is incomplete",
                     name,
@@ -1280,7 +1280,7 @@ async def get_runtime_agent_tools_for_llm(agent_id: uuid.UUID) -> list[dict]:
         ):
             ready.append(tool)
         else:
-            logger.info(
+            logger.debug(
                 "[Tools] Durable Runtime hid {} because credentials are not configured",
                 name,
             )
@@ -1294,7 +1294,7 @@ async def get_runtime_agent_tools_for_llm(agent_id: uuid.UUID) -> list[dict]:
         - {""}
     )
     if hidden:
-        logger.info(
+        logger.debug(
             "[Tools] Durable Runtime hid tools without typed outcomes: {}",
             hidden,
         )
@@ -1947,8 +1947,8 @@ def _propose_experience_draft_outcome(
     arguments: dict,
 ) -> ToolExecutionOutcome:
     """Validate the human-gated draft without claiming a storage write."""
-    for field in ("title", "body", "applicability"):
-        value = arguments.get(field)
+    for field_name in ("title", "body", "applicability"):
+        value = arguments.get(field_name)
         if not isinstance(value, str) or not value.strip():
             return _typed_failure(
                 "propose_experience_draft requires non-empty title, body, and applicability.",
@@ -7736,7 +7736,8 @@ async def _convert_csv_to_xlsx(agent_id: uuid.UUID, ws: Path, arguments: dict) -
         tgt_file = _resolve_tool_target_path(ws, target_path)
     except ValueError as exc:
         return str(exc)
-    if not src_file.exists(): return f"❌ Source file not found: {source_path}"
+    if not src_file.exists():
+        return f"❌ Source file not found: {source_path}"
 
     try:
         import csv
@@ -7803,13 +7804,15 @@ async def _convert_html_to_pptx(agent_id: uuid.UUID, ws: Path, arguments: dict) 
 async def _convert_markdown_to_docx(agent_id: uuid.UUID, ws: Path, arguments: dict) -> str:
     source_path = arguments.get("source_path")
     target_path = arguments.get("target_path")
-    if not source_path or not target_path: return "❌ Missing paths."
+    if not source_path or not target_path:
+        return "❌ Missing paths."
     try:
         src_file = _resolve_tool_source_path(ws, source_path)
         tgt_file = _resolve_tool_target_path(ws, target_path)
     except ValueError as exc:
         return str(exc)
-    if not src_file.exists(): return "❌ Source file not found."
+    if not src_file.exists():
+        return "❌ Source file not found."
 
     try:
         from docx import Document
@@ -7893,13 +7896,15 @@ async def _convert_markdown_to_docx(agent_id: uuid.UUID, ws: Path, arguments: di
 async def _convert_markdown_to_pdf(agent_id: uuid.UUID, ws: Path, arguments: dict) -> str:
     source_path = arguments.get("source_path")
     target_path = arguments.get("target_path")
-    if not source_path or not target_path: return "❌ Missing paths."
+    if not source_path or not target_path:
+        return "❌ Missing paths."
     try:
         src_file = _resolve_tool_source_path(ws, source_path)
         tgt_file = _resolve_tool_target_path(ws, target_path)
     except ValueError as exc:
         return str(exc)
-    if not src_file.exists(): return "❌ Source file not found."
+    if not src_file.exists():
+        return "❌ Source file not found."
 
     try:
         from weasyprint import HTML
@@ -13096,7 +13101,8 @@ async def _bitable_list_tables(agent_id: uuid.UUID, arguments: dict) -> str:
     try:
         resp = await feishu_service.bitable_list_tables(app_id, app_secret, app_token)
         err = _check_feishu_err(resp)
-        if err: return err
+        if err:
+            return err
 
         tables = resp.get("data", {}).get("items", [])
         if not tables:
@@ -13178,7 +13184,8 @@ async def _bitable_list_fields(agent_id: uuid.UUID, arguments: dict) -> str:
     try:
         resp = await feishu_service.bitable_list_fields(app_id, app_secret, app_token, table_id)
         err = _check_feishu_err(resp)
-        if err: return err
+        if err:
+            return err
 
         fields = resp.get("data", {}).get("items", [])
         if not fields:
@@ -13342,7 +13349,8 @@ async def _bitable_delete_record(agent_id: uuid.UUID, arguments: dict) -> str:
     try:
         resp = await feishu_service.bitable_delete_record(app_id, app_secret, app_token, table_id, record_id)
         err = _check_feishu_err(resp)
-        if err: return err
+        if err:
+            return err
 
         # Provide a user-accessible link so they can verify the deletion
         tenant_token = await feishu_service.get_tenant_access_token(app_id, app_secret)
@@ -13385,7 +13393,8 @@ async def _feishu_read_doc(agent_id: uuid.UUID, arguments: dict) -> str:
     try:
         resp = await feishu_service.read_feishu_doc(app_id, app_secret, doc_token)
         err = _check_feishu_err(resp)
-        if err: return err
+        if err:
+            return err
 
         content = resp.get("data", {}).get("content", "")
         if not content:
@@ -13407,7 +13416,8 @@ async def _feishu_create_doc(agent_id: uuid.UUID, arguments: dict) -> str:
     try:
         resp = await feishu_service.create_feishu_doc(app_id, app_secret, folder_token or None, title)
         err = _check_feishu_err(resp)
-        if err: return err
+        if err:
+            return err
 
         doc = resp.get("data", {}).get("document", {})
         doc_id = doc.get("document_id")
@@ -13439,7 +13449,8 @@ async def _feishu_append_doc(agent_id: uuid.UUID, arguments: dict) -> str:
         # Feishu uses the document_id as the root block_id to append entirely to the document
         resp = await feishu_service.append_feishu_doc(app_id, app_secret, doc_token, content)
         err = _check_feishu_err(resp)
-        if err: return err
+        if err:
+            return err
 
         return "OK: Content appended successfully to the end of the document."
     except Exception as e:
@@ -14736,7 +14747,8 @@ async def _feishu_doc_read(agent_id: uuid.UUID, arguments: dict) -> str:
     try:
         resp = await feishu_service.read_feishu_doc(app_id, app_secret, read_token)
         err = _check_feishu_err(resp)
-        if err: return err
+        if err:
+            return err
         
         content = resp.get("data", {}).get("content", "")
         if not content:
@@ -14833,7 +14845,8 @@ async def _feishu_doc_create(agent_id: uuid.UUID, arguments: dict) -> str:
         # ── Regular Drive branch (original behavior) ─────────────────────
         resp = await feishu_service.create_feishu_doc(app_id, app_secret, folder_token, title)
         err = _check_feishu_err(resp)
-        if err: return err
+        if err:
+            return err
         
         doc = resp.get("data", {}).get("document", {})
         doc_token = doc.get("document_id", "")
@@ -15073,7 +15086,8 @@ async def _feishu_doc_append(agent_id: uuid.UUID, arguments: dict) -> str:
                 headers={"Authorization": f"Bearer {tenant_token}"},
             )).json()
             err = _check_feishu_err(meta_resp)
-            if err: return err
+            if err:
+                return err
 
             body_block_id = (
                 meta_resp.get("data", {}).get("document", {}).get("body", {}).get("block_id")
@@ -15092,7 +15106,8 @@ async def _feishu_doc_append(agent_id: uuid.UUID, arguments: dict) -> str:
             )).json()
 
             err = _check_feishu_err(result)
-            if err: return err
+            if err:
+                return err
 
         doc_url = await _get_feishu_tenant_doc_url(tenant_token, docx_token)
         return (
@@ -15533,14 +15548,14 @@ async def _feishu_calendar_create_outcome(
         )
 
     required: dict[str, str] = {}
-    for field in ("summary", "start_time", "end_time"):
-        value = arguments.get(field)
+    for field_name in ("summary", "start_time", "end_time"):
+        value = arguments.get(field_name)
         if not isinstance(value, str) or not value.strip():
             return _typed_failure(
-                f"feishu_calendar_create requires {field}.",
+                f"feishu_calendar_create requires {field_name}.",
                 "invalid_tool_arguments",
             )
-        required[field] = value.strip()
+        required[field_name] = value.strip()
     timezone_name = arguments.get("timezone", "Asia/Shanghai")
     if not isinstance(timezone_name, str) or not timezone_name.strip():
         return _typed_failure(
@@ -19311,16 +19326,16 @@ def _agentbay_find_installed_app_match(query: str, apps: list) -> tuple[dict | N
             _agentbay_app_field(app, "start_cmd", "startCmd"),
             _agentbay_app_field(app, "work_directory", "workDirectory"),
         ]
-        for field in fields:
-            field_norm = _agentbay_normalize_text(field)
-            if not field_norm:
+        for app_field in fields:
+            app_field_norm = _agentbay_normalize_text(app_field)
+            if not app_field_norm:
                 continue
-            if query_norm == field_norm:
+            if query_norm == app_field_norm:
                 score = 1.0
-            elif query_norm in field_norm or field_norm in query_norm:
+            elif query_norm in app_field_norm or app_field_norm in query_norm:
                 score = 0.9
             else:
-                score = SequenceMatcher(None, query_norm, field_norm).ratio()
+                score = SequenceMatcher(None, query_norm, app_field_norm).ratio()
             if score > best_score:
                 best_app, best_score = app, score
 
@@ -21149,10 +21164,10 @@ async def _update_kr_content_outcome(
             "At least one KR content field must be provided.",
             "invalid_tool_arguments",
         )
-    for field in ("title", "unit", "focus_ref"):
-        if field in updates and not isinstance(updates[field], str):
+    for field_name in ("title", "unit", "focus_ref"):
+        if field_name in updates and not isinstance(updates[field_name], str):
             return _typed_failure(
-                f"{field} must be a string.",
+                f"{field_name} must be a string.",
                 "invalid_tool_arguments",
             )
     if "title" in updates and not updates["title"].strip():
@@ -22002,10 +22017,10 @@ async def _create_key_result_outcome(
     )
     if argument_error is not None:
         return argument_error
-    for field in ("unit", "focus_ref"):
-        if field in arguments and not isinstance(arguments[field], str):
+    for field_name in ("unit", "focus_ref"):
+        if field_name in arguments and not isinstance(arguments[field_name], str):
             return _typed_failure(
-                f"{field} must be a string.",
+                f"{field_name} must be a string.",
                 "invalid_tool_arguments",
             )
     designated_error = await _require_designated_okr_agent(agent_id)
@@ -22321,10 +22336,10 @@ async def _update_objective_outcome(
             "update_objective requires at least one supported field to update.",
             "invalid_tool_arguments",
         )
-    for field in ("title", "description"):
-        if field in arguments and not isinstance(arguments[field], str):
+    for field_name in ("title", "description"):
+        if field_name in arguments and not isinstance(arguments[field_name], str):
             return _typed_failure(
-                f"update_objective {field} must be a string.",
+                f"update_objective {field_name} must be a string.",
                 "invalid_tool_arguments",
             )
     if "title" in arguments and not arguments["title"].strip():

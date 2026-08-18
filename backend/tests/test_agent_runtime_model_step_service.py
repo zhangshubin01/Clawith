@@ -8,6 +8,7 @@ import json
 from unittest.mock import AsyncMock, patch
 import uuid
 
+import httpx
 import pytest
 
 from app.models.agent import Agent
@@ -28,6 +29,7 @@ from app.services.agent_runtime.state import (
     RuntimeContext,
     RuntimeGraphState,
 )
+from app.services.llm.client import LLMRequestShapeError
 from app.services.llm.single_step import LLMCompletionStep
 from app.services.llm.finish import FINISH_PROTOCOL_REMINDER
 from app.services.token_tracker import TokenUsage
@@ -2901,3 +2903,82 @@ async def test_failed_prior_run_execution_merges_into_new_run_ledger() -> None:
         assert recovered["result_summary"].startswith(
             "The tool executor's lease expired"
         )
+
+@pytest.mark.asyncio
+async def test_transient_dns_error_is_retried_instead_of_failing_run() -> None:
+    tenant_id = uuid.uuid4()
+    model = _model(tenant_id)
+    agent = _agent(tenant_id)
+    state = _state(tenant_id, model, agent)
+    builder = _ContextBuilder(_build())
+    completion = AsyncMock(
+        side_effect=[
+            httpx.ConnectError("[Errno -2] Name or service not known"),
+            LLMCompletionStep(
+                content="Recovered after the DNS blip.",
+                tool_calls=(),
+                reasoning_content=None,
+                retry_instruction=None,
+                usage=TokenUsage(total_tokens=20),
+            ),
+        ]
+    )
+
+    result = await _service(model, agent, builder, completion).complete_once(
+        state, _context(state)
+    )
+
+    assert result.intent == "finish"
+    assert result.finish_content == "Recovered after the DNS blip."
+    assert completion.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_unclassified_error_is_retried_instead_of_failing_run() -> None:
+    tenant_id = uuid.uuid4()
+    model = _model(tenant_id)
+    agent = _agent(tenant_id)
+    state = _state(tenant_id, model, agent)
+    builder = _ContextBuilder(_build())
+    completion = AsyncMock(
+        side_effect=[
+            Exception("something weird the classifier cannot name"),
+            LLMCompletionStep(
+                content="Recovered after the mystery error.",
+                tool_calls=(),
+                reasoning_content=None,
+                retry_instruction=None,
+                usage=TokenUsage(total_tokens=20),
+            ),
+        ]
+    )
+
+    result = await _service(model, agent, builder, completion).complete_once(
+        state, _context(state)
+    )
+
+    assert result.intent == "finish"
+    assert result.finish_content == "Recovered after the mystery error."
+    assert completion.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_non_retryable_error_fails_fast_without_retry() -> None:
+    tenant_id = uuid.uuid4()
+    model = _model(tenant_id)
+    agent = _agent(tenant_id)
+    state = _state(tenant_id, model, agent)
+    builder = _ContextBuilder(_build())
+    completion = AsyncMock(
+        side_effect=[
+            LLMRequestShapeError("final provider request violates shape invariant")
+        ]
+    )
+
+    result = await _service(model, agent, builder, completion).complete_once(
+        state, _context(state)
+    )
+
+    assert result.intent == "error"
+    assert result.error["code"] == "model_call_failed"
+    assert completion.await_count == 1

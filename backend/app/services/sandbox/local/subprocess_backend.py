@@ -292,6 +292,37 @@ class SubprocessBackend(BaseSandboxBackend):
         except Exception:
             return False
 
+    async def _terminate_process_group(self, proc: asyncio.subprocess.Process) -> None:
+        """SIGTERM the sandbox process group, then SIGKILL stragglers and reap.
+
+        Reaping is mandatory on every path: asyncio only waitpid()s a child
+        while a ``proc.wait()`` waiter is active, so a child that exits with
+        no waiter stays a zombie.  The parent here is uvicorn (PID 1 in the
+        container), which never reaps children it did not explicitly wait on.
+        """
+        if proc.returncode is not None:
+            return
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+        except (ProcessLookupError, PermissionError):
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                pass
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=5)
+            return
+        except asyncio.TimeoutError:
+            pass
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                pass
+        await proc.wait()
+
     async def execute(
         self,
         code: str,
@@ -434,15 +465,23 @@ class SubprocessBackend(BaseSandboxBackend):
 
             is_timeout = False
             try:
-                await asyncio.wait_for(proc.wait(), timeout=timeout)
-            except asyncio.TimeoutError:
                 try:
-                    os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
-                except Exception:
-                    proc.kill()
-                is_timeout = True
-
-            await asyncio.gather(task1, task2)
+                    await asyncio.wait_for(proc.wait(), timeout=timeout)
+                except asyncio.TimeoutError:
+                    is_timeout = True
+                    # Kill and reap so the timed-out sandbox cannot linger as
+                    # a zombie under uvicorn (see _terminate_process_group).
+                    await self._terminate_process_group(proc)
+            finally:
+                # Reap on every exit path: a cancelled run (client disconnect,
+                # run cancel) or an unexpected error must not leave the
+                # sandbox running or unreaped.
+                if proc.returncode is None:
+                    await asyncio.shield(self._terminate_process_group(proc))
+                for task in (task1, task2):
+                    if not task.done():
+                        task.cancel()
+                await asyncio.gather(task1, task2, return_exceptions=True)
             stdout = bytes(stdout_data)
             stderr = bytes(stderr_data)
 

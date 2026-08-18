@@ -158,7 +158,7 @@ export default function SettingsTab(props: Props) {
                         min={10}
                         max={500}
                         value={settingsForm.context_window_size}
-                        onChange={(e) => setSettingsForm((form) => ({ ...form, context_window_size: Math.max(10, Math.min(500, parseInt(e.target.value) || 100)) }))}
+                        onChange={(e) => setSettingsForm((form) => ({ ...form, context_window_size: Math.max(10, Math.min(500, parseInt(e.target.value) || 200)) }))}
                         style={{ width: '120px' }}
                     />
                     <div style={{ fontSize: '11px', color: 'var(--text-tertiary)', marginTop: '4px' }}>{t('agent.settings.roundsDesc')}</div>
@@ -173,12 +173,12 @@ export default function SettingsTab(props: Props) {
                         className="input"
                         type="number"
                         min={5}
-                        max={200}
+                        max={10000}
                         value={settingsForm.max_tool_rounds}
-                        onChange={(e) => setSettingsForm((form) => ({ ...form, max_tool_rounds: Math.max(5, Math.min(200, parseInt(e.target.value) || 50)) }))}
+                        onChange={(e) => setSettingsForm((form) => ({ ...form, max_tool_rounds: Math.max(5, Math.min(10000, parseInt(e.target.value) || 10000)) }))}
                         style={{ width: '120px' }}
                     />
-                    <div style={{ fontSize: '11px', color: 'var(--text-tertiary)', marginTop: '4px' }}>{t('agent.settings.maxToolRoundsDesc', 'Each model step that returns a result counts, including wait or error results. Tool-call count is separate. Default: 50')}</div>
+                    <div style={{ fontSize: '11px', color: 'var(--text-tertiary)', marginTop: '4px' }}>{t('agent.settings.maxToolRoundsDesc', 'Each model step that returns a result counts, including wait or error results. Tool-call count is separate. Default: 10000')}</div>
                 </div>
             </div>
 

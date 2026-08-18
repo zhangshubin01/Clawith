@@ -265,8 +265,8 @@ class AgentOut(BaseModel):
     cache_creation_tokens_total: int = 0
     max_tokens_per_day: int | None = None
     max_tokens_per_month: int | None = None
-    context_window_size: int = 100
-    max_tool_rounds: int = 50
+    context_window_size: int = 200
+    max_tool_rounds: int = 10000
     max_triggers: int = 20
     min_poll_interval_min: int = 5
     webhook_rate_limit: int = 5

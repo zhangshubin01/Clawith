@@ -210,3 +210,114 @@ def test_safe_env_whitelist_does_not_leak_host_secrets(monkeypatch, tmp_path: Pa
     assert env["BASH_ENV"] == ""
     assert "PATH" in env
 
+
+class _EofStream:
+    async def read(self, _n: int) -> bytes:
+        return b""
+
+
+class _HungProcess:
+    """Fake subprocess whose first wait() hangs until killpg releases it.
+
+    Mirrors the real zombie risk: the sandbox is killed via the process
+    group and only reaped when wait() is awaited again afterwards.
+    """
+
+    def __init__(self) -> None:
+        self.returncode = None
+        self.pid = 789
+        self.stdout = _EofStream()
+        self.stderr = _EofStream()
+        self.wait_calls = 0
+        self._release = asyncio.Event()
+
+    async def wait(self):
+        self.wait_calls += 1
+        if self.wait_calls == 1:
+            await self._release.wait()
+        self.returncode = -15
+        return self.returncode
+
+    def kill(self):
+        self.returncode = -9
+        self._release.set()
+
+
+def _fake_unsafe_execute_env(monkeypatch, tmp_path: Path) -> tuple[SubprocessBackend, list[_HungProcess]]:
+    """Monkeypatch the execute() surroundings so a bare-host fallback run is faked."""
+    monkeypatch.setattr(subprocess_backend.shutil, "which", lambda _cmd: None)
+    monkeypatch.setattr(
+        subprocess_backend,
+        "resolve_path_within_root",
+        lambda path, *_args, **_kwargs: path,
+    )
+
+    async def no_venv(self, venv_path):
+        del self, venv_path
+
+    monkeypatch.setattr(SubprocessBackend, "_ensure_workspace_venv", no_venv)
+    created: list[_HungProcess] = []
+
+    async def fake_create(*_args, **_kwargs):
+        proc = _HungProcess()
+        created.append(proc)
+        return proc
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create)
+    backend = SubprocessBackend(
+        SandboxConfig(allow_unsafe_fallback_when_bwrap_missing=True)
+    )
+    return backend, created
+
+
+@pytest.mark.asyncio
+async def test_execute_timeout_reaps_the_killed_sandbox(monkeypatch, tmp_path: Path) -> None:
+    """A timed-out sandbox must be killed AND reaped (no zombie under PID 1)."""
+    terminated: list[int] = []
+    backend, created = _fake_unsafe_execute_env(monkeypatch, tmp_path)
+
+    def fake_killpg(pgid, _signal):
+        terminated.append(pgid)
+        if created:
+            created[0]._release.set()
+
+    monkeypatch.setattr(subprocess_backend.os, "getpgid", lambda pid: pid)
+    monkeypatch.setattr(subprocess_backend.os, "killpg", fake_killpg)
+
+    result = await backend.execute("print('x')", "python", timeout=0.01, work_dir=str(tmp_path))
+
+    assert result.success is False
+    assert result.exit_code == 124
+    assert terminated == [789]
+    proc = created[0]
+    # The kill alone is not enough: wait() must have been awaited again so
+    # the child is actually reaped instead of lingering as a zombie.
+    assert proc.wait_calls >= 2
+    assert proc.returncode == -15
+
+
+@pytest.mark.asyncio
+async def test_execute_cancellation_kills_and_reaps_sandbox(monkeypatch, tmp_path: Path) -> None:
+    """Cancelling a run mid-execution must not leak a running sandbox."""
+    terminated: list[int] = []
+    backend, created = _fake_unsafe_execute_env(monkeypatch, tmp_path)
+    monkeypatch.setattr(subprocess_backend.os, "getpgid", lambda pid: pid)
+    monkeypatch.setattr(
+        subprocess_backend.os,
+        "killpg",
+        lambda pgid, _signal: (terminated.append(pgid), created[0]._release.set()),
+    )
+
+    task = asyncio.create_task(
+        backend.execute("print('x')", "python", timeout=3600, work_dir=str(tmp_path))
+    )
+    await asyncio.sleep(0.05)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert terminated == [789]
+    proc = created[0]
+    assert proc.wait_calls >= 2
+    assert proc.returncode == -15
+

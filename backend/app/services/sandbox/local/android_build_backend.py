@@ -148,6 +148,7 @@ class AndroidBuildBackend(BaseSandboxBackend):
 
     async def _enforce_gradle_cache_quota(self):
         """Gradle 依赖缓存目录数超过阈值时告警（清理由 Gradle 内置 30 天 GC 处理）。"""
+        proc: asyncio.subprocess.Process | None = None
         try:
             proc = await asyncio.create_subprocess_exec(
                 "docker", "run", "--rm",
@@ -165,8 +166,17 @@ class AndroidBuildBackend(BaseSandboxBackend):
                 )
             else:
                 logger.debug(f"[AndroidBuild] gradle module dirs={dir_count}")
-        except (asyncio.TimeoutError, ValueError, ProcessLookupError, FileNotFoundError):
-            pass  # 超时/解析失败/容器不存在/docker CLI 不可用 — 不影响构建
+        except asyncio.TimeoutError:
+            # communicate() was cancelled: kill and reap the docker CLI child
+            # so it cannot linger as a zombie under uvicorn.
+            if proc is not None and proc.returncode is None:
+                try:
+                    proc.kill()
+                except ProcessLookupError:
+                    pass
+                await proc.wait()
+        except (ValueError, ProcessLookupError, FileNotFoundError):
+            pass  # 解析失败/容器不存在/docker CLI 不可用 — 不影响构建
 
     async def _check_sdk_version_drift(self, container) -> bool:
         """比较镜像 SDK 版本与卷中版本，检测漂移。"""
@@ -189,6 +199,32 @@ class AndroidBuildBackend(BaseSandboxBackend):
             return True
         except Exception:
             return True  # 检测失败不阻塞构建
+
+    async def _preheat_gradle_cache_ownership(self, container) -> None:
+        """卷属主预热（幂等保险丝）。
+
+        gradle_cache_global 卷在镜像历史版本间迁移/重建时可能残留 root 属主内容
+        （旧镜像无 chown、或空卷首次挂载时 daemon 创建 root 目录），而构建容器以
+        builduser (uid=1000) 运行且根文件系统只读，无法自行修复，会以
+        Permission denied 失败。此处以 root exec 幂等 chown：属主正确时是 no-op，
+        毫秒级完成；失败仅告警不阻塞（预热是保险丝，非构建前提）。
+        """
+        try:
+            result = await asyncio.to_thread(
+                container.exec_run,
+                [
+                    "sh", "-c",
+                    "chown -R 1000:1000 /home/builduser/.gradle 2>/dev/null || true",
+                ],
+                user="root",
+            )
+            if result.exit_code != 0:
+                logger.warning(
+                    f"[AndroidBuild] gradle cache 属主预热失败: "
+                    f"{(result.output or b'').decode(errors='replace')[:200]}"
+                )
+        except Exception as e:
+            logger.warning(f"[AndroidBuild] gradle cache 属主预热异常: {e}")
 
     async def execute(
         self,
@@ -287,6 +323,12 @@ class AndroidBuildBackend(BaseSandboxBackend):
             if no_proxy:
                 env["no_proxy"] = no_proxy
                 env["NO_PROXY"] = no_proxy
+
+            # 镜像仓库开关透传（entrypoint 默认开启国内镜像注入）：
+            # 部署方可通过宿主环境 ANDROID_GRADLE_MIRRORS=off 关闭
+            mirror_switch = os.environ.get("ANDROID_GRADLE_MIRRORS")
+            if mirror_switch:
+                env["ANDROID_GRADLE_MIRRORS"] = mirror_switch
 
             # 卷挂载（SDK 卷只读，避免并发写入损坏）
             volumes = {
@@ -389,6 +431,10 @@ class AndroidBuildBackend(BaseSandboxBackend):
                 logger.info(
                     f"[AndroidBuild] container_start id={container.id[:12]}"
                 )
+
+                # 卷属主预热：卷内容可能残留 root 属主（历史镜像/重建卷），
+                # builduser 只读根文件系统无法自行修复 → root exec 幂等 chown
+                await self._preheat_gradle_cache_ownership(container)
 
                 # 检测 SDK 版本漂移（容器启动后立即检查）
                 await self._check_sdk_version_drift(container)

@@ -14,6 +14,10 @@ from app.core.permissions import can_manage_agent
 from app.database import get_db
 from app.models.tool import Tool, AgentTool
 from app.models.user import User
+from app.services.agent_tools_cache import (
+    invalidate_agent_tool_resolution,
+    invalidate_all_tool_resolutions,
+)
 from app.services.tool_config import (
     decrypt_sensitive_fields,
     encrypt_sensitive_fields,
@@ -343,6 +347,7 @@ async def update_tools_bulk(
             tools_map[update.tool_id].enabled = update.enabled
             
     await db.commit()
+    invalidate_all_tool_resolutions()
     return {"ok": True}
 
 
@@ -379,6 +384,7 @@ async def update_tool(
     for field, value in update_data.items():
         setattr(tool, field, value)
     await db.commit()
+    invalidate_all_tool_resolutions()
     return {"ok": True}
 
 
@@ -401,6 +407,7 @@ async def delete_tool(
     await db.execute(delete(AgentTool).where(AgentTool.tool_id == tool_id))
     await db.delete(tool)
     await db.commit()
+    invalidate_all_tool_resolutions()
     return {"ok": True}
 
 
@@ -530,6 +537,7 @@ async def update_agent_tools(
         else:
             db.add(AgentTool(agent_id=agent_id, tool_id=tool_id, enabled=u.enabled))
     await db.commit()
+    invalidate_agent_tool_resolution(agent_id)
     return {"ok": True}
 
 
@@ -777,6 +785,7 @@ async def delete_agent_tool(
         if tool and tool.type == "mcp":
             await db.delete(tool)
     await db.commit()
+    invalidate_agent_tool_resolution(at.agent_id)
     return {"ok": True}
 
 
@@ -867,6 +876,7 @@ async def update_agent_tool_config(
         # Create assignment if not exists
         db.add(AgentTool(agent_id=agent_id, tool_id=tool_id, enabled=True, config=encrypted_config))
     await db.commit()
+    invalidate_agent_tool_resolution(agent_id)
     return {"ok": True}
 
 
