@@ -202,7 +202,11 @@ class Settings(BaseSettings):
     FEISHU_APP_ID: str = ""
     FEISHU_APP_SECRET: str = ""
     FEISHU_REDIRECT_URI: str = ""
-    FEISHU_DOMAIN: str = "https://open.larksuite.com"  # 飞书国内版用 open.feishu.cn，Lark 国际版用 open.larksuite.com
+    # Lark 国际版: API 网关固定用 open.larksuite.com（开发者后台网页才是 open.larkoffice.com，
+    # 不能拿 larkoffice 调 API）；飞书国内版用 open.feishu.cn。
+    # 注意: WS 端点(/callback/ws/endpoint)按 app 迁移进度分流，部分 app 只认 open.larkoffice.com，
+    # 需在 channel_configs.extra_config.domain 里按 agent 覆盖（feishu_ws.py 已支持）。
+    FEISHU_DOMAIN: str = "https://open.larksuite.com"
     PUBLIC_BASE_URL: str = ""
     HTTP_PROXY: str = ""
     HTTPS_PROXY: str = ""
