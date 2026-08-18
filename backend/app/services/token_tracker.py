@@ -93,7 +93,7 @@ def extract_token_usage(usage: dict | None) -> TokenUsage | None:
                 "cache_creation_input_tokens",
             )
         if cached or cache_creation:
-            logger.info(
+            logger.debug(
                 f"[Token Cache] API Provider -> Created: {cache_creation} tokens, "
                 f"Read: {cached} tokens"
             )

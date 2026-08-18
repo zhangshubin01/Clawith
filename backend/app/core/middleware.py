@@ -11,6 +11,10 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from app.core.error_contract import normalize_trace_id
 from app.dao.base import _tenant_ctx
 
+# Requests slower than this are worth a warning line; faster ones only log
+# at DEBUG level (INFO stays reserved for real signals, not access logs).
+_SLOW_REQUEST_THRESHOLD_SECONDS = 1.0
+
 
 class TraceIdMiddleware(BaseHTTPMiddleware):
     """Middleware to inject trace ID into request context and log requests."""
@@ -26,7 +30,7 @@ class TraceIdMiddleware(BaseHTTPMiddleware):
 
         # Log request
         client_host = request.client.host if request.client else "-"
-        logger.info(
+        logger.debug(
             f"--> {request.method} {request.url.path} "
             f"[client: {client_host}]"
         )
@@ -38,11 +42,25 @@ class TraceIdMiddleware(BaseHTTPMiddleware):
             # Add trace ID to response headers
             response.headers["X-Trace-Id"] = trace_id
 
-            # Log response
-            logger.info(
-                f"<-- {request.method} {request.url.path} "
-                f"{response.status_code} {duration:.3f}s"
-            )
+            # Log response: only slow requests and server errors stay visible
+            # at WARNING; everything else is DEBUG-level access noise.
+            if response.status_code >= 500:
+                logger.warning(
+                    f"<-- {request.method} {request.url.path} "
+                    f"{response.status_code} {duration:.3f}s "
+                    f"[client: {client_host}]"
+                )
+            elif duration >= _SLOW_REQUEST_THRESHOLD_SECONDS:
+                logger.warning(
+                    f"<-- SLOW {request.method} {request.url.path} "
+                    f"{response.status_code} {duration:.3f}s "
+                    f"[client: {client_host}]"
+                )
+            else:
+                logger.debug(
+                    f"<-- {request.method} {request.url.path} "
+                    f"{response.status_code} {duration:.3f}s"
+                )
 
             return response
 

@@ -22,6 +22,10 @@ NOISY_CONNECTION_LOGGERS = {
     "uvicorn.protocols.websockets.websockets_impl": logging.WARNING,
     # Supress "Failed to parse headers" warning from urllib3 when interacting with MinIO.
     "urllib3.connection": logging.ERROR,
+    # "HTTP Request: POST https://api.deepseek.com/chat/completions 200 OK"
+    # emitted by httpx/httpcore for every model call and tool HTTP request.
+    "httpx": logging.WARNING,
+    "httpcore": logging.WARNING,
 }
 
 
