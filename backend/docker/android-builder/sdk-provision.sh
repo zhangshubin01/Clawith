@@ -100,8 +100,8 @@ mirror_candidates_for_package() {
                 30) echo "platform-30_r03.zip" ;;
                 31) echo "platform-31_r01.zip" ;;
                 32) echo "platform-32_r01.zip" ;;
-                33) echo "platform-33_r03.zip"; echo "platform-33_r02.zip"; echo "platform-33_r01.zip" ;;
-                34) echo "platform-34_r02.zip"; echo "platform-34_r01.zip" ;;
+                33) echo "platform-33-ext3_r03.zip"; echo "platform-33_r02.zip" ;;
+                34) echo "platform-34-ext7_r03.zip"; echo "platform-34-ext7_r02.zip" ;;
                 35) echo "platform-35_r02.zip" ;;
                 36) echo "platform-36_r02.zip" ;;
                 *) echo "platform-${ver}_r03.zip"; echo "platform-${ver}_r02.zip"; echo "platform-${ver}_r01.zip" ;;
