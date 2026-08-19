@@ -26,6 +26,9 @@ async def test_setup_uses_the_pinned_saver_migration_ledger(monkeypatch) -> None
         received.append(("lock", actual_settings))
         yield
 
+    drop_indexes = AsyncMock()
+    ensure_metadata_index = AsyncMock()
+
     monkeypatch.setattr(
         setup_langgraph_checkpoints,
         "create_checkpointer",
@@ -36,11 +39,111 @@ async def test_setup_uses_the_pinned_saver_migration_ledger(monkeypatch) -> None
         "checkpoint_setup_lock",
         fake_lock,
     )
+    monkeypatch.setattr(
+        setup_langgraph_checkpoints,
+        "drop_redundant_thread_indexes",
+        drop_indexes,
+    )
+    monkeypatch.setattr(
+        setup_langgraph_checkpoints,
+        "ensure_checkpoint_metadata_index",
+        ensure_metadata_index,
+    )
 
     await setup_langgraph_checkpoints.setup_checkpoint_tables(settings)
 
     assert received == [("lock", settings), settings]
     saver.setup.assert_awaited_once_with()
+    drop_indexes.assert_awaited_once_with(settings)
+    ensure_metadata_index.assert_awaited_once_with(settings)
+
+
+@pytest.mark.asyncio
+async def test_drop_redundant_thread_indexes_emits_three_idempotent_drops(
+    monkeypatch,
+) -> None:
+    executed = []
+
+    class Cursor:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        async def execute(self, statement, parameters=None):
+            executed.append(statement)
+
+    class Connection:
+        def cursor(self):
+            return Cursor()
+
+        async def close(self):
+            executed.append("closed")
+
+    async def fake_connect(*args, **kwargs):
+        return Connection()
+
+    monkeypatch.setattr(
+        setup_langgraph_checkpoints.AsyncConnection,
+        "connect",
+        fake_connect,
+    )
+
+    await setup_langgraph_checkpoints.drop_redundant_thread_indexes(
+        Settings(DATABASE_URL="postgresql+asyncpg://app:secret@db/clawith")
+    )
+
+    assert executed == [
+        "DROP INDEX IF EXISTS langgraph_checkpoint.checkpoints_thread_id_idx",
+        "DROP INDEX IF EXISTS langgraph_checkpoint.checkpoint_blobs_thread_id_idx",
+        "DROP INDEX IF EXISTS langgraph_checkpoint.checkpoint_writes_thread_id_idx",
+        "closed",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_ensure_checkpoint_metadata_index_emits_idempotent_gin_create(
+    monkeypatch,
+) -> None:
+    executed = []
+
+    class Cursor:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        async def execute(self, statement, parameters=None):
+            executed.append(statement)
+
+    class Connection:
+        def cursor(self):
+            return Cursor()
+
+        async def close(self):
+            executed.append("closed")
+
+    async def fake_connect(*args, **kwargs):
+        return Connection()
+
+    monkeypatch.setattr(
+        setup_langgraph_checkpoints.AsyncConnection,
+        "connect",
+        fake_connect,
+    )
+
+    await setup_langgraph_checkpoints.ensure_checkpoint_metadata_index(
+        Settings(DATABASE_URL="postgresql+asyncpg://app:secret@db/clawith")
+    )
+
+    assert executed == [
+        "CREATE INDEX CONCURRENTLY IF NOT EXISTS "
+        "checkpoints_metadata_gin_idx "
+        "ON langgraph_checkpoint.checkpoints USING gin (metadata jsonb_path_ops)",
+        "closed",
+    ]
 
 
 @pytest.mark.asyncio
@@ -119,12 +222,11 @@ def _run_backend_entrypoint(
     _write_executable(bin_dir / "id", "printf '1000\\n'\n")
     _write_executable(
         bin_dir / "alembic",
-        "printf 'alembic %s\\n' \"$*\" >> \"$CALL_LOG\"\n",
+        'printf \'alembic %s\\n\' "$*" >> "$CALL_LOG"\n',
     )
     _write_executable(
         bin_dir / "python",
-        "printf 'python %s\\n' \"$*\" >> \"$CALL_LOG\"\n"
-        "exit \"${PYTHON_EXIT:-0}\"\n",
+        'printf \'python %s\\n\' "$*" >> "$CALL_LOG"\nexit "${PYTHON_EXIT:-0}"\n',
     )
     start_command = bin_dir / "start-app"
     _write_executable(start_command, "printf 'start\\n' >> \"$CALL_LOG\"\n")

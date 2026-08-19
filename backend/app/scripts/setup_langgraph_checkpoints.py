@@ -18,6 +18,30 @@ from app.services.agent_runtime.checkpointer import (
 
 _SETUP_LOCK_NAME = "clawith:langgraph_checkpoint:setup"
 
+# LangGraph's ``AsyncPostgresSaver.setup()`` creates these single-column
+# thread_id indexes with CREATE INDEX CONCURRENTLY IF NOT EXISTS on every
+# bootstrap, but each table's primary key already starts with (thread_id, ...),
+# so they are pure write amplification on the hottest tables. Alembic drops
+# them too (f066); this cleanup keeps them gone after setup() recreates them.
+_DROP_REDUNDANT_THREAD_INDEXES: tuple[str, ...] = (
+    "DROP INDEX IF EXISTS langgraph_checkpoint.checkpoints_thread_id_idx",
+    "DROP INDEX IF EXISTS langgraph_checkpoint.checkpoint_blobs_thread_id_idx",
+    "DROP INDEX IF EXISTS langgraph_checkpoint.checkpoint_writes_thread_id_idx",
+)
+
+# Run-boundary lookups (langgraph_driver.read_latest / read_for_command,
+# run_state_reader._read_unsettled) find a run's checkpoint via
+# ``aget_state_history(filter={"clawith_run_id": ...})``, which emits
+# ``metadata @> %s`` containment predicates. Without an index the planner
+# bitmap-scans every checkpoint of the thread (~1800 rows on hot threads) and
+# the query averaged ~0.9s (pg_stat_statements). jsonb_path_ops serves exactly
+# the @> predicate these lookups need, at a fraction of a full GIN index size.
+_METADATA_GIN_INDEX_DDL: str = (
+    "CREATE INDEX CONCURRENTLY IF NOT EXISTS "
+    "checkpoints_metadata_gin_idx "
+    "ON langgraph_checkpoint.checkpoints USING gin (metadata jsonb_path_ops)"
+)
+
 
 @asynccontextmanager
 async def checkpoint_setup_lock(
@@ -54,6 +78,46 @@ async def checkpoint_setup_lock(
         await connection.close()
 
 
+async def drop_redundant_thread_indexes(settings: Settings | None = None) -> None:
+    """Drop LangGraph thread_id indexes that are fully covered by each PK.
+
+    Runs right after ``AsyncPostgresSaver.setup()`` (which recreates them via
+    ``CREATE INDEX CONCURRENTLY IF NOT EXISTS``); idempotent via IF EXISTS.
+    Alembic migration f066 applies the same drop for environments that do not
+    run this bootstrap step again.
+    """
+    connection = await AsyncConnection.connect(
+        checkpoint_database_url(settings),
+        autocommit=True,
+    )
+    try:
+        async with connection.cursor() as cursor:
+            for statement in _DROP_REDUNDANT_THREAD_INDEXES:
+                await cursor.execute(statement)
+    finally:
+        await connection.close()
+
+
+async def ensure_checkpoint_metadata_index(settings: Settings | None = None) -> None:
+    """Create the GIN index backing run-boundary checkpoint lookups.
+
+    Runs right after ``AsyncPostgresSaver.setup()`` — the checkpoint tables are
+    guaranteed to exist by then, which is why this is not an Alembic migration
+    (migrations run before the LangGraph bootstrap on fresh environments).
+    Idempotent via IF NOT EXISTS; CONCURRENTLY keeps checkpoint writes flowing
+    during the first build on populated deployments.
+    """
+    connection = await AsyncConnection.connect(
+        checkpoint_database_url(settings),
+        autocommit=True,
+    )
+    try:
+        async with connection.cursor() as cursor:
+            await cursor.execute(_METADATA_GIN_INDEX_DDL)
+    finally:
+        await connection.close()
+
+
 async def setup_checkpoint_tables(settings: Settings | None = None) -> None:
     """Run the upstream idempotent migration ledger inside its isolated schema.
 
@@ -64,6 +128,8 @@ async def setup_checkpoint_tables(settings: Settings | None = None) -> None:
     async with checkpoint_setup_lock(settings):
         async with create_checkpointer(settings) as checkpointer:
             await checkpointer.setup()
+        await drop_redundant_thread_indexes(settings)
+        await ensure_checkpoint_metadata_index(settings)
 
 
 def main() -> None:
