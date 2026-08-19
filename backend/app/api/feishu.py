@@ -5,6 +5,7 @@ import asyncio
 import hashlib
 import hmac
 import json
+import re
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
@@ -39,6 +40,86 @@ _USER_RESOLUTION_ERROR_TIP = (
     "抱歉，我暂时无法稳定识别你的飞书账号，已停止本次处理以避免重复创建账号。"
     "请稍后重试，或联系管理员检查飞书 Contact API 权限。"
 )
+
+# 对话内中断指令 — 卡片按钮在长连接(WS)模式下收不到点击回调
+# (card.action.trigger 仅走 Webhook)，这是唯一可靠的停止方式。
+_FEISHU_INTERRUPT_PHRASES = frozenset(
+    {"中断", "停止", "取消", "中断回复", "停止回复", "取消回复", "stop", "cancel", "halt"}
+)
+
+
+async def _cancel_active_feishu_run(
+    *,
+    db: AsyncSession,
+    agent: Any,
+    user: Any,
+    session: Any,
+    config: ChannelConfig,
+    chat_type: str,
+    chat_id: str,
+    sender_open_id: str,
+) -> str:
+    """Cancel the sender's active Feishu run and confirm in-chat.
+
+    Returns a sentinel string instead of a ``ChatRuntimeIntake`` so the
+    caller can distinguish this early-exit from the normal intake flow.
+    """
+    from app.models.agent_run import AgentRun
+    from app.services.agent_runtime.adapter import RuntimeCommandIntake
+    from app.services.agent_runtime.contracts import CancelRunCommand
+    from app.services.agent_runtime.card_stream_bridge import get_bridge
+
+    reply_target = chat_id if chat_type == "group" else sender_open_id
+    receive_id_type = "chat_id" if chat_type == "group" else "open_id"
+
+    result = await db.execute(
+        select(AgentRun).where(
+            AgentRun.agent_id == agent.id,
+            AgentRun.session_id == session.id,
+            AgentRun.lane_held.is_(True),
+            AgentRun.source_type == "chat",
+        ).limit(1)
+    )
+    run = result.scalars().first()
+    if run is None:
+        await feishu_service.send_message(
+            config.app_id,
+            config.app_secret,
+            reply_target,
+            "text",
+            json.dumps({"text": "当前没有正在执行的任务。"}),
+            receive_id_type=receive_id_type,
+        )
+        return "no_active_run"
+
+    await RuntimeCommandIntake(db).cancel_run(
+        CancelRunCommand(
+            tenant_id=agent.tenant_id,
+            run_id=run.id,
+            idempotency_key=f"cancel:feishu:{run.id}",
+            reason="cancelled_by_user",
+            actor_user_id=user.id,
+        )
+    )
+    await db.commit()
+
+    bridge = get_bridge(str(run.id))
+    if bridge is not None:
+        try:
+            await bridge.abort("⏹ 回复已中断")
+        except Exception:
+            logger.exception("[FEISHU-CARD] interrupt_abort_failed run_id={}", run.id)
+
+    await feishu_service.send_message(
+        config.app_id,
+        config.app_secret,
+        reply_target,
+        "text",
+        json.dumps({"text": "⏹ 已中断当前任务。"}),
+        receive_id_type=receive_id_type,
+    )
+    logger.info("[Feishu] interrupt_cancelled run_id={}", run.id)
+    return "interrupted"
 
 
 def _verify_and_decode_feishu_callback(
@@ -411,8 +492,12 @@ async def _accept_feishu_runtime_message(
     content: str,
     display_content: str,
     external_event_id: str | None,
-) -> ChatRuntimeIntake:
-    """Persist a Feishu message and Runtime Command before acknowledging it."""
+) -> ChatRuntimeIntake | str:
+    """Persist a Feishu message and Runtime Command before acknowledging it.
+
+    Returns ``"interrupted"`` / ``"no_active_run"`` when the message was an
+    in-chat interrupt command handled inline (no Runtime Command enqueued).
+    """
     from app.models.agent import Agent
     from app.services.channel_session import find_or_create_channel_session
 
@@ -453,6 +538,20 @@ async def _accept_feishu_runtime_message(
             group_name=f"Feishu Group {chat_id[:8]}" if is_group else None,
             created_by_user_id=user.id,
         )
+        # 对话内中断指令 — 卡片按钮在长连接模式下收不到点击回调，
+        # 用户回复「中断/停止/取消」时直接取消当前活跃 run。
+        _normalized = re.sub(r"\s+", "", content).strip().lower()
+        if _normalized in _FEISHU_INTERRUPT_PHRASES:
+            return await _cancel_active_feishu_run(
+                db=db,
+                agent=agent,
+                user=user,
+                session=session,
+                config=config,
+                chat_type=chat_type,
+                chat_id=chat_id,
+                sender_open_id=sender_open_id,
+            )
         # 卡片创建 — session 后可用精确 resume 检查
         if card_mode:
             from app.models.agent_run import AgentRun as _AgentRun

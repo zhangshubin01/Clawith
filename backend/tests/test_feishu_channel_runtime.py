@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from datetime import UTC, datetime
 from types import SimpleNamespace
 import uuid
@@ -15,12 +16,23 @@ from app.services.agent_runtime.chat_intake import ChatRuntimeIntake
 from app.services.agent_runtime.contracts import RunHandle, RuntimeEventCursor
 
 
+class _Scalars:
+    def __init__(self, value: object) -> None:
+        self.value = value
+
+    def first(self):
+        return self.value
+
+
 class _Result:
     def __init__(self, value: object) -> None:
         self.value = value
 
     def scalar_one_or_none(self):
         return self.value
+
+    def scalars(self):
+        return _Scalars(self.value)
 
 
 class _Session:
@@ -271,3 +283,169 @@ async def test_feishu_image_keeps_base64_out_of_display_content(monkeypatch) -> 
     assert accepted["display_content"] == "[file:image_12345678.jpg]"
     assert "base64," in accepted["content"]
     assert "base64," not in accepted["display_content"]
+
+
+class _OrderedSession:
+    """Returns the queued values for successive execute() calls, in order."""
+
+    def __init__(self, *values: object) -> None:
+        self._values = list(values)
+        self.commits = 0
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, traceback):
+        return False
+
+    async def execute(self, _statement):
+        if not self._values:
+            raise AssertionError("unexpected extra query in interrupt flow")
+        return _Result(self._values.pop(0))
+
+    async def commit(self) -> None:
+        self.commits += 1
+
+
+@pytest.mark.asyncio
+async def test_feishu_interrupt_command_cancels_active_run_without_new_run(monkeypatch) -> None:
+    from app.services.agent_runtime import adapter as runtime_adapter
+    from app.services.agent_runtime import card_stream_bridge as bridge_module
+    from app.services.feishu_service import feishu_service as fs
+
+    tenant_id = uuid.uuid4()
+    agent_id = uuid.uuid4()
+    user_id = uuid.uuid4()
+    session_id = uuid.uuid4()
+    active_run_id = uuid.uuid4()
+    agent = SimpleNamespace(id=agent_id, tenant_id=tenant_id, creator_id=uuid.uuid4(), name="A")
+    user = SimpleNamespace(id=user_id, display_name="Alice")
+    session = SimpleNamespace(id=session_id)
+    config = SimpleNamespace(app_id="app-1", app_secret="secret-1")
+    db = _OrderedSession(agent, SimpleNamespace(id=active_run_id))
+    cancels: list = []
+    sent: list = []
+    intake_calls: list = []
+
+    class _FakeIntake:
+        def __init__(self, _db) -> None:
+            pass
+
+        async def cancel_run(self, command):
+            cancels.append(command)
+            return SimpleNamespace(run_id=command.run_id)
+
+    async def resolve_sender(_db, **_kwargs):
+        return user
+
+    async def find_session(**kwargs):
+        return session
+
+    async def send_message(app_id, app_secret, target, msg_type, content, **kwargs):
+        sent.append((target, msg_type, content, kwargs))
+
+    async def enqueue(_db, **kwargs):
+        intake_calls.append(kwargs)
+        raise AssertionError("interrupt must not enqueue a new run")
+
+    monkeypatch.setattr(feishu, "_async_session", lambda: db)
+    monkeypatch.setattr(feishu, "_resolve_feishu_sender", resolve_sender)
+    monkeypatch.setattr(channel_session, "find_or_create_channel_session", find_session)
+    monkeypatch.setattr(feishu, "enqueue_channel_chat_runtime", enqueue)
+    monkeypatch.setattr(runtime_adapter, "RuntimeCommandIntake", _FakeIntake)
+    monkeypatch.setattr(bridge_module, "get_bridge", lambda _key: None)
+    monkeypatch.setattr(fs, "send_message", send_message)
+
+    result = await feishu._accept_feishu_runtime_message(
+        agent_id=agent_id,
+        config=config,  # type: ignore[arg-type]
+        sender_open_id="ou_sender",
+        sender_user_id="feishu-user-1",
+        chat_type="p2p",
+        chat_id="",
+        content="中断",
+        display_content="中断",
+        external_event_id=f"evt-{uuid.uuid4()}",
+    )
+
+    assert result == "interrupted"
+    assert db.commits == 1
+    assert len(cancels) == 1
+    command = cancels[0]
+    assert command.run_id == active_run_id
+    assert command.tenant_id == tenant_id
+    assert command.actor_user_id == user_id
+    assert command.reason == "cancelled_by_user"
+    assert command.idempotency_key == f"cancel:feishu:{active_run_id}"
+    assert len(intake_calls) == 0
+    assert len(sent) == 1
+    target, msg_type, content, kwargs = sent[0]
+    assert target == "ou_sender"
+    assert msg_type == "text"
+    assert "已中断" in json.loads(content)["text"]
+    assert kwargs["receive_id_type"] == "open_id"
+
+
+@pytest.mark.asyncio
+async def test_feishu_interrupt_with_no_active_run_confirms_and_stays_idle(monkeypatch) -> None:
+    from app.services.agent_runtime import adapter as runtime_adapter
+    from app.services.feishu_service import feishu_service as fs
+
+    tenant_id = uuid.uuid4()
+    agent_id = uuid.uuid4()
+    user_id = uuid.uuid4()
+    session_id = uuid.uuid4()
+    agent = SimpleNamespace(id=agent_id, tenant_id=tenant_id, creator_id=uuid.uuid4(), name="A")
+    user = SimpleNamespace(id=user_id, display_name="Alice")
+    session = SimpleNamespace(id=session_id)
+    config = SimpleNamespace(app_id="app-1", app_secret="secret-1")
+    db = _OrderedSession(agent, None)
+    cancels: list = []
+    sent: list = []
+    intake_calls: list = []
+
+    class _FakeIntake:
+        def __init__(self, _db) -> None:
+            pass
+
+        async def cancel_run(self, command):
+            cancels.append(command)
+            return SimpleNamespace(run_id=command.run_id)
+
+    async def resolve_sender(_db, **_kwargs):
+        return user
+
+    async def find_session(**kwargs):
+        return session
+
+    async def send_message(app_id, app_secret, target, msg_type, content, **kwargs):
+        sent.append((target, content))
+
+    async def enqueue(_db, **kwargs):
+        intake_calls.append(kwargs)
+        raise AssertionError("interrupt must not enqueue a new run")
+
+    monkeypatch.setattr(feishu, "_async_session", lambda: db)
+    monkeypatch.setattr(feishu, "_resolve_feishu_sender", resolve_sender)
+    monkeypatch.setattr(channel_session, "find_or_create_channel_session", find_session)
+    monkeypatch.setattr(feishu, "enqueue_channel_chat_runtime", enqueue)
+    monkeypatch.setattr(runtime_adapter, "RuntimeCommandIntake", _FakeIntake)
+    monkeypatch.setattr(fs, "send_message", send_message)
+
+    result = await feishu._accept_feishu_runtime_message(
+        agent_id=agent_id,
+        config=config,  # type: ignore[arg-type]
+        sender_open_id="ou_sender",
+        sender_user_id="feishu-user-1",
+        chat_type="p2p",
+        chat_id="",
+        content="停止",
+        display_content="停止",
+        external_event_id=f"evt-{uuid.uuid4()}",
+    )
+
+    assert result == "no_active_run"
+    assert len(cancels) == 0
+    assert len(intake_calls) == 0
+    assert len(sent) == 1
+    assert "没有正在执行" in json.loads(sent[0][1])["text"]

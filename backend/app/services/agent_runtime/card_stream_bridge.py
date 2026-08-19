@@ -163,8 +163,8 @@ class CardStreamBridge:
     agent_name:
         Display name for the card header.
     run_id:
-        The real LangGraph run UUID; used for bridge registry lookup and for
-        the interrupt-button callback payload.
+        The real LangGraph run UUID; used for bridge registry lookup so the
+        in-chat 「中断」 command can abort the streaming card.
     """
 
     # Element IDs for the multi-panel streaming skeleton.
@@ -173,7 +173,7 @@ class CardStreamBridge:
         "thinking_live_md": "thinking_live_md",
         "tools_live_md": "tools_live_md",
         "main_content": "main_content",
-        "interrupt_btn": "interrupt_btn",
+        "interrupt_hint": "interrupt_hint",
         "footer_note": "footer_note",
     }
 
@@ -487,11 +487,12 @@ class CardStreamBridge:
                      "columns": [
                          {"tag": "column", "width": "auto",
                           "elements": [
-                              {"tag": "button", "element_id": "interrupt_btn",
-                               "text": {"tag": "plain_text", "content": "⏹ 中断回复"},
-                               "type": "default",
-                               "value": {"action": "interrupt_stream",
-                                          "run_id": self._run_id}},
+                              # 注意: 长连接(WS)模式下飞书不投递卡片按钮回调
+                              # (card.action.trigger 仅走 Webhook), 按钮永远点不响。
+                              # 因此用提示文案代替按钮 — 回复「中断」即可停止。
+                              {"tag": "markdown", "element_id": "interrupt_hint",
+                               "content": "💡 回复「中断」可停止",
+                               "text_size": "notation"},
                           ]},
                          {"tag": "column", "width": "weighted", "weight": 1,
                           "elements": [
