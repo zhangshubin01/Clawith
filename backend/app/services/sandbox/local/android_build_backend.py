@@ -82,6 +82,33 @@ class AndroidBuildBackend(BaseSandboxBackend):
     _MAX_STDOUT_CAPTURE = 5_000_000  # 5MB
     _GRADLE_CACHE_MODULE_DIRS_MAX = 500        # modules-2 目录数阈值
 
+    # ── Gradle 构建进度（方案 B + C）──
+    # 进度侧信道文件名：init script 在构建容器内写 /workspace/.gradle-progress，
+    # 后端经同一 bind-mount 存储（容器内 project_path）tail 该文件实时拿到任务边界。
+    _PROGRESS_FILE = ".gradle-progress"
+    # 静默期心跳阈值（秒）：超过该时长既无 docker 日志流、也无进度侧信道输出，
+    # 则发「构建进行中…」心跳，兜底配置阶段 / 单任务长静默段的「像卡死」观感。
+    _HEARTBEAT_INTERVAL = 15.0
+    _HEARTBEAT_POLL = 2.0
+    # 任务边界进度 init script。用 beforeProject + configureEach + doFirst/doLast 注入，
+    # 而非 Gradle.addListener(TaskExecutionListener)：后者与 configuration-cache 不兼容
+    # （会令缓存条目「存储但永不复用」），而 doFirst/doLast 随任务图序列化、缓存命中仍触发。
+    # 注意：进度走文件侧信道（绕过 daemon socket 转发缓冲），不写 stdout。
+    _GRADLE_PROGRESS_INIT_SCRIPT = """\
+def progressFile = new File(System.getenv('CLAWITH_PROGRESS_FILE') ?: '/workspace/.gradle-progress')
+
+gradle.beforeProject { project ->
+    project.tasks.configureEach { task ->
+        task.doFirst {
+            progressFile.append("TASK_START|${task.path}\\n")
+        }
+        task.doLast {
+            progressFile.append("TASK_END|${task.path}\\n")
+        }
+    }
+}
+"""
+
     # 模块级信号量 — get_sandbox_backend() 每次创建新实例，实例级 Semaphore 无效
     _build_semaphore = asyncio.Semaphore(_BUILD_MAX_CONCURRENT)
 
@@ -384,6 +411,16 @@ class AndroidBuildBackend(BaseSandboxBackend):
                             error=f"构建镜像不可用: {self.DEFAULT_IMAGE}，拉取失败原因: {e}。{hint}",
                         )
 
+                # 进度侧信道文件路径（容器内 project_path，即后端 /data/agents/<rel> 挂载，
+                # 与构建容器 /workspace 同一 bind-mount 存储）。构建前截断：init script 用
+                # append 写入，跨构建残留会污染本次进度。
+                progress_path = os.path.join(str(project_path), self._PROGRESS_FILE)
+                try:
+                    with open(progress_path, "w", encoding="utf-8"):
+                        pass
+                except OSError:
+                    logger.debug(f"[AndroidBuild] 进度侧信道不可写，跳过: {progress_path}")
+
                 container = self.client.containers.run(
                     image=self.DEFAULT_IMAGE,
                     command=[
@@ -394,7 +431,12 @@ class AndroidBuildBackend(BaseSandboxBackend):
                         f"yes | sdkmanager --licenses >/dev/null 2>&1 || true; "
                         f'echo "sdk.dir=/opt/android-sdk" > local.properties '
                         f"&& chmod +x ./gradlew "
-                        f"&& ./gradlew --no-daemon --console=plain {shlex.quote(str(gradle_task))} ",
+                        # 注入任务边界进度 init script（方案 B）：写到 /tmp（tmpfs），
+                        # 经 -I 显式加载，避免污染共享 gradle 卷的 init.d。
+                        f"&& cat > /tmp/gradle-progress.gradle << 'GRADLE_PROGRESS_EOF'\n"
+                        f"{self._GRADLE_PROGRESS_INIT_SCRIPT}\n"
+                        f"GRADLE_PROGRESS_EOF\n"
+                        f"&& ./gradlew --no-daemon --console=plain -I /tmp/gradle-progress.gradle {shlex.quote(str(gradle_task))} ",
                     ],
                     detach=True,
                     volumes=volumes,
@@ -443,6 +485,9 @@ class AndroidBuildBackend(BaseSandboxBackend):
                 stdout_buf = bytearray()
                 # threading.Queue 天然线程安全，用于流式线程→主协程通信
                 output_queue: thread_queue.Queue[bytes | None] = thread_queue.Queue()
+                # 共享活动时间戳：drain 流与进度侧信道都会更新 last_output，
+                # 心跳协程据此在静默期发「构建进行中…」（方案 C）。
+                activity = {"last_output": time.time(), "last_heartbeat": time.time()}
 
                 def _stream_logs():
                     """在后台线程中流式读取容器日志，写入线程安全队列。"""
@@ -473,6 +518,7 @@ class AndroidBuildBackend(BaseSandboxBackend):
                         merged = b"".join(batch)
                         batch.clear()
                         if on_output:
+                            activity["last_output"] = time.time()
                             try:
                                 await on_output(merged.decode("utf-8", errors="replace"))
                             except Exception:
@@ -511,6 +557,52 @@ class AndroidBuildBackend(BaseSandboxBackend):
 
                 drain_task = asyncio.create_task(_drain_queue())
 
+                # ── 方案 B：进度侧信道 tail ──
+                # init script 把任务边界写进 /workspace/.gradle-progress（绕过 daemon
+                # socket 转发缓冲），后端轮询同一文件把新行实时转发给 on_output。
+                async def _tail_progress():
+                    offset = 0
+                    try:
+                        while True:
+                            await asyncio.sleep(0.2)
+                            try:
+                                if not os.path.exists(progress_path):
+                                    continue
+                                with open(progress_path, "r", encoding="utf-8", errors="replace") as f:
+                                    f.seek(offset)
+                                    data = f.read()
+                                    offset = f.tell()
+                            except OSError:
+                                continue
+                            if data and on_output:
+                                activity["last_output"] = time.time()
+                                try:
+                                    await on_output(data)
+                                except Exception:
+                                    logger.opt(exception=True).warning("[AndroidBuild] on_output 进度回调异常")
+                    except asyncio.CancelledError:
+                        pass
+
+                # ── 方案 C：静默期心跳 ──
+                async def _heartbeat():
+                    try:
+                        while True:
+                            await asyncio.sleep(self._HEARTBEAT_POLL)
+                            now = time.time()
+                            silent = now - activity["last_output"]
+                            since_hb = now - activity["last_heartbeat"]
+                            if silent >= self._HEARTBEAT_INTERVAL and since_hb >= self._HEARTBEAT_INTERVAL and on_output:
+                                activity["last_heartbeat"] = now
+                                try:
+                                    await on_output(f"构建进行中… 已 {int(silent)}s，暂无新输出\n")
+                                except Exception:
+                                    logger.opt(exception=True).warning("[AndroidBuild] on_output 心跳回调异常")
+                    except asyncio.CancelledError:
+                        pass
+
+                progress_task = asyncio.create_task(_tail_progress())
+                heartbeat_task = asyncio.create_task(_heartbeat())
+
                 try:
                     result = await asyncio.wait_for(
                         asyncio.to_thread(container.wait),
@@ -519,12 +611,16 @@ class AndroidBuildBackend(BaseSandboxBackend):
                 except asyncio.TimeoutError:
                     drain_task.cancel()
                     stream_task.cancel()
+                    progress_task.cancel()
+                    heartbeat_task.cancel()
                     # 回收被取消的任务：drain 的 finally 在取消路径跳过
                     # 残留批次冲刷（见 _drain_queue），不再有晚到的
                     # on_output 回调；生产者的后台线程随容器 kill 结束。
                     await asyncio.gather(
                         drain_task,
                         stream_task,
+                        progress_task,
+                        heartbeat_task,
                         return_exceptions=True,
                     )
                     try:
@@ -550,6 +646,13 @@ class AndroidBuildBackend(BaseSandboxBackend):
 
                 # 等待队列消费完毕
                 await drain_task
+
+                # 构建正常结束：停掉进度 tail 与心跳（二者为无限轮询循环）。
+                # 停掉前 sleep 250ms 让 tail 再跑一轮轮询（200ms），追上进度文件尾部行。
+                await asyncio.sleep(0.25)
+                progress_task.cancel()
+                heartbeat_task.cancel()
+                await asyncio.gather(progress_task, heartbeat_task, return_exceptions=True)
 
                 # 异步检查 Gradle 缓存大小（不阻塞返回）
                 asyncio.ensure_future(self._enforce_gradle_cache_quota())
@@ -601,6 +704,20 @@ class AndroidBuildBackend(BaseSandboxBackend):
                         stream_task.cancel()
                 except Exception as e:
                     logger.warning(f"[AndroidBuild] stream_task 取消失败: {e}")
+                # 停掉进度 tail 与心跳（成功/异常路径可能在 return 前未停）
+                for _name in ('progress_task', 'heartbeat_task'):
+                    _t = locals().get(_name)
+                    if _t is not None:
+                        try:
+                            _t.cancel()
+                        except Exception as e:
+                            logger.warning(f"[AndroidBuild] {_name} 取消失败: {e}")
+                # 清理进度侧信道文件，避免污染用户工作区（dotfile，尽力而为）
+                try:
+                    if 'progress_path' in locals() and os.path.exists(progress_path):
+                        os.remove(progress_path)
+                except OSError as e:
+                    logger.debug(f"[AndroidBuild] 进度侧信道清理失败: {e}")
                 try:
                     if 'container' in locals():
                         container.remove(force=True)
