@@ -3794,3 +3794,108 @@ async def test_tool_lease_renewal_failure_does_not_break_the_tool(monkeypatch) -
 
     assert result.error is None
     assert result.messages[0]["execution_status"] == "succeeded"
+
+
+@pytest.mark.asyncio
+async def test_stream_output_final_flush_persists_end_burst(monkeypatch) -> None:
+    """回归：构建输出以「结束突发」到达时不得被 0.5s 节流窗口丢弃。
+
+    Gradle 的 stdout 经 JVM 块缓冲，整段构建输出在构建结束瞬间一次性
+    到达（2026-08-19 线上复现：每次编译只有一个 setup 行事件，任务行
+    全部丢失）。旧实现只在 on_output 触发节流条件时才落库——突发落在
+    上一次 flush 的 0.5s 窗口内就永远丢失；最终 flush 必须无条件冲刷。
+    """
+    tenant_id = uuid.uuid4()
+    agent = _agent(tenant_id)
+    call = _call("call-1", "android_compile")
+    state = _state(tenant_id, agent, (call,))
+    context = _context(state)
+    run_id = context.run_id
+    execution = _execution(
+        tenant_id,
+        uuid.UUID(run_id),
+        "call-1",
+        "android_compile",
+    )
+    statements: list = []
+
+    class _RecordingDB(_DB):
+        def __init__(self, agent, statements) -> None:
+            super().__init__(agent)
+            self.statements = statements
+
+        async def execute(self, statement):
+            self.statements.append(statement)
+            return _Result(self.agent)
+
+        async def commit(self):
+            pass
+
+    @asynccontextmanager
+    async def factory():
+        yield _RecordingDB(agent, statements)
+
+    async def reserve(db, **kwargs):
+        del db
+        return _reservation(execution)
+
+    async def mark(db, **kwargs):
+        del db, kwargs
+        execution.status = "succeeded"
+        execution.result_summary = "file contents"
+        return execution
+
+    async def execute(name, arguments, agent_id, user_id, session_id="", on_output=None):
+        del name, arguments, agent_id, user_id, session_id
+        assert on_output is not None
+        # 第一批输出在 0.5s 节流窗口之后到达 → 触发第一次 flush
+        await asyncio.sleep(0.55)
+        await on_output("[INFO] JDK 17 命中共享缓存\n")
+        # 突发紧接其后（0.5s 窗口内）→ 旧实现会丢弃
+        await on_output("> Task :app:assembleDebug\nBUILD SUCCESSFUL\n")
+        return ToolExecutionOutcome(
+            status="succeeded",
+            result_summary="ok",
+            result_ref=None,
+        )
+
+    async def android_tools(agent_id: uuid.UUID) -> list[dict]:
+        del agent_id
+        return [
+            {"type": "function", "function": {"name": "android_compile"}},
+        ]
+
+    monkeypatch.setattr(tool_step_service, "reserve_tool_execution", reserve)
+    monkeypatch.setattr(tool_step_service, "mark_tool_execution_succeeded", mark)
+
+    service = tool_step_service.RuntimeToolStepService(
+        session_factory=factory,
+        cancel_source=_CancelSource(None),
+        tool_provider=android_tools,
+        tool_executor=execute,
+        a2a_service=None,
+        tool_result_reconciler=None,
+        lease_ttl_seconds=300,
+    )
+
+    result = await service.execute_pending(state, context, (call,))
+
+    assert result.error is None
+    output_events = []
+    for statement in statements:
+        if not hasattr(statement, "compile"):
+            continue
+        params = dict(statement.compile().params)
+        payload = params.get("payload")
+        if isinstance(payload, dict) and payload.get("activity_type") == "tool_output":
+            output_events.append(params)
+    assert len(output_events) == 2, (
+        f"应有 2 个输出事件（定时 flush + 最终 flush），实际: {len(output_events)}"
+    )
+    joined = "".join(
+        str((event.get("payload") or {}).get("content", ""))
+        for event in output_events
+    )
+    assert "[INFO] JDK 17" in joined
+    assert "BUILD SUCCESSFUL" in joined
+    assert output_events[-1].get("payload", {}).get("output_seq") == 2

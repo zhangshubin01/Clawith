@@ -792,3 +792,61 @@ class TestGradleCacheOwnershipPreheat:
             if m[0] == "warning" and "属主预热" in m[2]
         ]
         assert warnings, "预热失败应产生 warning 日志"
+
+
+class _QuietStreamContainer(_MockContainer):
+    """logs 先发 2 帧，静默 0.6s（模拟 JVM 块缓冲），再发突发帧后结束。"""
+
+    def logs(self, *, stream=False, follow=False, stdout=True, stderr=True):
+        del stream, follow, stdout, stderr
+
+        def _gen():
+            yield b"setup-1\n"
+            yield b"setup-2\n"
+            time.sleep(0.6)
+            yield b"task-1\n"
+            yield b"task-2\n"
+
+        return _gen()
+
+
+class TestDrainQueueFlushTimer:
+    """回归：安静期批次必须由定时器按时冲刷，而非等下一个 chunk。
+
+    Gradle 输出经 JVM 块缓冲，构建安静期没有任何新帧；旧实现只在
+    「收到新 chunk」时检查 100ms 窗口——setup 行会滞留到构建结束才
+    送达（2026-08-19 线上：每次编译的输出事件只有 setup 行且时间在
+    构建结束）。
+    """
+
+    def test_quiet_stream_flushes_promptly(self, backend, mock_docker_client):
+        mock_docker_client.containers.run_result = _QuietStreamContainer()
+        received: list[tuple[float, str]] = []
+        start = time.monotonic()
+
+        async def on_output(text: str, stream: str = "stdout") -> None:
+            del stream
+            received.append((time.monotonic() - start, text))
+
+        result = asyncio.run(
+            backend.execute(
+                code="",
+                language="java",
+                timeout=30,
+                work_dir="/workspace",
+                project_path="/workspace/app",
+                gradle_task="assembleDebug",
+                on_output=on_output,
+            )
+        )
+
+        assert result.success is True
+        # 定时器驱动：setup 帧在静默期内就已送达（远早于 0.6s 的突发）
+        assert len(received) >= 2, f"on_output 应至少被调用 2 次，实际 {len(received)}"
+        assert received[0][0] < 0.5, (
+            f"setup 批应在定时器窗口内及时送达（<0.5s），实际 {received[0][0]:.2f}s"
+        )
+        all_text = "".join(text for _, text in received)
+        assert "setup-1" in all_text
+        assert "task-1" in all_text
+        assert "task-2" in all_text

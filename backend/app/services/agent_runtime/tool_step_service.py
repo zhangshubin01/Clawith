@@ -1865,39 +1865,47 @@ class RuntimeToolStepService:
                             _output_buf: list[str] = []
                             _output_seq = [0]
                             _last_flush = [time.monotonic()]
+                            _stream = ["stdout"]
+
+                            async def _flush_pending_output() -> None:
+                                """把缓冲的输出合并落库（定时 flush 与最终 flush 共用）。"""
+                                if not _output_buf:
+                                    return
+                                _output_seq[0] += 1
+                                async with self._session_factory() as db:
+                                    await db.execute(
+                                        insert(AgentRunEvent)
+                                        .values(
+                                            id=uuid.uuid5(
+                                                run_id, f"activity:tool:{call_id}:output:{_output_seq[0]}"
+                                            ),
+                                            tenant_id=tenant_id,
+                                            run_id=run_id,
+                                            event_type="status_changed",
+                                            summary=f"Runtime tool {tool_name} output",
+                                            payload={
+                                                "status": "running",
+                                                "activity_type": "tool_output",
+                                                "call_id": call_id,
+                                                "name": tool_name,
+                                                "content": "".join(_output_buf),
+                                                "stream": _stream[0],
+                                                "output_seq": _output_seq[0],
+                                            },
+                                            idempotency_key=f"activity:tool:{call_id}:output:{_output_seq[0]}",
+                                        )
+                                        .on_conflict_do_nothing()
+                                    )
+                                    await db.commit()
+                                _output_buf.clear()
+                                _last_flush[0] = time.monotonic()
 
                             async def _tool_on_output(text: str, stream: str = "stdout") -> None:
                                 _output_buf.append(text)
+                                _stream[0] = stream
                                 now = time.monotonic()
                                 if len(_output_buf) >= 10 or now - _last_flush[0] >= 0.5:
-                                    _output_seq[0] += 1
-                                    async with self._session_factory() as db:
-                                        await db.execute(
-                                            insert(AgentRunEvent)
-                                            .values(
-                                                id=uuid.uuid5(
-                                                    run_id, f"activity:tool:{call_id}:output:{_output_seq[0]}"
-                                                ),
-                                                tenant_id=tenant_id,
-                                                run_id=run_id,
-                                                event_type="status_changed",
-                                                summary=f"Runtime tool {tool_name} output",
-                                                payload={
-                                                    "status": "running",
-                                                    "activity_type": "tool_output",
-                                                    "call_id": call_id,
-                                                    "name": tool_name,
-                                                    "content": "".join(_output_buf),
-                                                    "stream": stream,
-                                                    "output_seq": _output_seq[0],
-                                                },
-                                                idempotency_key=f"activity:tool:{call_id}:output:{_output_seq[0]}",
-                                            )
-                                            .on_conflict_do_nothing()
-                                        )
-                                        await db.commit()
-                                    _output_buf.clear()
-                                    _last_flush[0] = now
+                                    await _flush_pending_output()
 
                             on_output_callback = _tool_on_output
 
@@ -1911,6 +1919,17 @@ class RuntimeToolStepService:
                                 on_output=on_output_callback,
                             )
                         finally:
+                            # 流结束后的最终 flush：Gradle 输出经 JVM 块缓冲，
+                            # 以构建结束时的一次性突发到达——落在 0.5s 窗口内
+                            # 会被上面的节流条件漏掉，必须无条件冲刷一次。
+                            if on_output_callback is not None:
+                                try:
+                                    await _flush_pending_output()
+                                except Exception:
+                                    logger.opt(exception=True).warning(
+                                        "[ToolStep] final output flush failed for call %s",
+                                        call_id,
+                                    )
                             if agentbay_run_token is not None:
                                 agentbay_run_scope_id.reset(agentbay_run_token)
                 except GroupWorkspaceReconciliationPending:

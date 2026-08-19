@@ -455,43 +455,53 @@ class AndroidBuildBackend(BaseSandboxBackend):
                 stream_task = asyncio.ensure_future(asyncio.to_thread(_stream_logs))
 
                 async def _drain_queue():
-                    """主协程消费队列：批量收集日志（100ms 窗口），合并后推送 WebSocket。
+                    """主协程消费队列：独立定时器每 100ms 冲刷一次批次。
 
-                    Docker 的 json-file log driver 按行分帧，container.logs(stream=True)
-                    每帧一个 chunk。逐帧推 WebSocket 会导致前端消息间产生空行。
-                    100ms 批量缓冲合并相邻 chunk，消除消息边界产生的视觉空行。
+                    Gradle 的 stdout 经 JVM 块缓冲，构建安静期没有任何新帧。
+                    旧实现只在「收到新 chunk」时检查 100ms 窗口——安静期的
+                    尾批会一直滞留到构建结束才送出去（历史线上现象：setup 行
+                    延迟到 build 结束才落事件）。定时器让帧到达与 flush 解耦，
+                    静默流也能在 ~100ms 内送达。
                     """
                     loop = asyncio.get_running_loop()
                     batch: list[bytes] = []
-                    last_flush = time.time()
                     BATCH_INTERVAL = 0.1  # 100ms 批处理窗口
 
                     async def _flush_batch():
-                        nonlocal last_flush
                         if not batch:
                             return
                         merged = b"".join(batch)
                         batch.clear()
-                        last_flush = time.time()
                         if on_output:
                             try:
                                 await on_output(merged.decode("utf-8", errors="replace"))
                             except Exception:
                                 logger.opt(exception=True).warning("[AndroidBuild] on_output 回调异常")
 
-                    while True:
-                        chunk = await loop.run_in_executor(None, output_queue.get)
-                        if chunk is None:
+                    async def _flush_timer():
+                        while True:
+                            await asyncio.sleep(BATCH_INTERVAL)
                             await _flush_batch()
-                            break
-                        # stdout 缓冲上限保护 — on_output 始终透传，不受上限影响
-                        if len(stdout_buf) < self._MAX_STDOUT_CAPTURE:
-                            allowed = self._MAX_STDOUT_CAPTURE - len(stdout_buf)
-                            stdout_buf.extend(chunk[:allowed])
-                        if on_output:
-                            batch.append(chunk)
-                            if time.time() - last_flush >= BATCH_INTERVAL:
-                                await _flush_batch()
+
+                    flush_timer = asyncio.create_task(_flush_timer())
+                    try:
+                        while True:
+                            chunk = await loop.run_in_executor(None, output_queue.get)
+                            if chunk is None:
+                                break
+                            # stdout 缓冲上限保护 — on_output 始终透传，不受上限影响
+                            if len(stdout_buf) < self._MAX_STDOUT_CAPTURE:
+                                allowed = self._MAX_STDOUT_CAPTURE - len(stdout_buf)
+                                stdout_buf.extend(chunk[:allowed])
+                            if on_output:
+                                batch.append(chunk)
+                    finally:
+                        flush_timer.cancel()
+                        try:
+                            await flush_timer
+                        except asyncio.CancelledError:
+                            pass
+                        await _flush_batch()
 
                 drain_task = asyncio.create_task(_drain_queue())
 
