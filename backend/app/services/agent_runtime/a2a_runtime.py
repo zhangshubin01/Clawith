@@ -629,13 +629,13 @@ async def enqueue_gateway_a2a_runtime(
                 user_id=owner_user_id,
                 role="user",
                 content=message,
-                conversation_id=str(session.id),
+                conversation_id=session.id,
                 participant_id=source_participant_id,
                 mentions=[],
             )
         )
     elif (
-        chat_message.conversation_id != str(session.id)
+        chat_message.conversation_id != session.id
         or chat_message.content != message
         or chat_message.participant_id != source_participant_id
     ):
@@ -859,13 +859,13 @@ class RuntimeA2AService:
                                 user_id=owner_user_id,
                                 role="user",
                                 content=request.message,
-                                conversation_id=str(session.id),
+                                conversation_id=session.id,
                                 participant_id=source_participant_id,
                                 mentions=[],
                             )
                         )
                     elif (
-                        message.conversation_id != str(session.id)
+                        message.conversation_id != session.id
                         or message.content != request.message
                         or message.participant_id != source_participant_id
                     ):

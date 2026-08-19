@@ -75,9 +75,6 @@ class SessionFactory:
 
 def _make_session(session_rows: list[SessionRow], stats: list[tuple], last_rows: list[tuple]) -> FakeSession:
     fake = FakeSession()
-    # web/channel queries carry a LIKE prefix AND a row_number subquery, so they
-    # must be routed before the generic row_number/count rules below.
-    fake.route(lambda sql: "LIKE" in sql, [])
     fake.route(lambda sql: "chat_sessions" in sql, session_rows)
     fake.route(lambda sql: "row_number" in sql, last_rows)
     # The batched agent-session stats query filters by conversation_id IN.
@@ -196,3 +193,20 @@ async def test_no_agent_sessions_yields_no_agent_entries(monkeypatch) -> None:
     summaries = await ActivityDAO().list_conversation_summaries(agent_id=_agent_id())
 
     assert all(c["partner_type"] != "agent" for c in summaries)
+
+
+@pytest.mark.asyncio
+async def test_legacy_prefixed_conv_id_returns_empty_without_querying(monkeypatch) -> None:
+    """Legacy web_/feishu_/slack_/discord_ conv ids predate the UUID migration;
+    they must short-circuit to [] and never touch the database."""
+    fake = _make_session(session_rows=[], stats=[], last_rows=[])
+    _inject(monkeypatch, fake)
+
+    messages = await ActivityDAO().list_conversation_messages(
+        agent_id=_agent_id(),
+        conv_id="feishu_legacy_channel",
+        limit=20,
+    )
+
+    assert messages == []
+    assert fake.executed_sqls == []

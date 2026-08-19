@@ -364,10 +364,9 @@ async def check_new_agent_messages(trigger: AgentTrigger) -> bool:
                 from_participant = result.scalar_one_or_none()
                 if not from_participant:
                     return False
-                from sqlalchemy import String as SaString, cast as sa_cast
                 result = await query_dao.execute(db, 
                     select(ChatMessage)
-                    .join(ChatSession, ChatMessage.conversation_id == sa_cast(ChatSession.id, SaString))
+                    .join(ChatSession, ChatMessage.conversation_id == ChatSession.id)
                     .where(
                         ChatMessage.participant_id == from_participant,
                         ChatMessage.created_at > since,
@@ -419,7 +418,7 @@ async def check_new_agent_messages(trigger: AgentTrigger) -> bool:
                 if target_user:
                     result = await query_dao.execute(db, 
                         select(ChatMessage)
-                        .join(ChatSession, ChatMessage.conversation_id == sa_cast(ChatSession.id, SaString))
+                        .join(ChatSession, ChatMessage.conversation_id == ChatSession.id)
                         .where(
                             ChatSession.agent_id == trigger.agent_id,
                             ChatSession.user_id == target_user.id,
@@ -433,7 +432,7 @@ async def check_new_agent_messages(trigger: AgentTrigger) -> bool:
                 else:
                     result = await query_dao.execute(db, 
                         select(ChatMessage)
-                        .join(ChatSession, ChatMessage.conversation_id == sa_cast(ChatSession.id, SaString))
+                        .join(ChatSession, ChatMessage.conversation_id == ChatSession.id)
                         .where(
                             ChatSession.agent_id == trigger.agent_id,
                             ChatSession.source_channel.in_(["feishu", "slack", "discord", "web"]),

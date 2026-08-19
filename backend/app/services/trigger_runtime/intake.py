@@ -183,7 +183,7 @@ async def _ensure_trigger_session(
             ChatMessage(
                 id=message_id,
                 agent_id=agent.id,
-                conversation_id=str(session.id),
+                conversation_id=session.id,
                 role="user",
                 content=context,
                 user_id=agent.creator_id,
@@ -191,7 +191,7 @@ async def _ensure_trigger_session(
                 mentions=[],
             )
         )
-    elif message.conversation_id != str(session.id) or message.content != context:
+    elif message.conversation_id != session.id or message.content != context:
         raise TriggerRuntimeIntakeError(
             "trigger_input_mismatch",
             "deterministic Trigger input message differs from the execution payload",

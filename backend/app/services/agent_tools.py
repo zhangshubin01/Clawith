@@ -8908,7 +8908,7 @@ async def _send_feishu_message_to_member_outcome(
                         user_id=platform_user.id,
                         role="assistant",
                         content=message_text,
-                        conversation_id=str(session.id),
+                        conversation_id=session.id,
                     )
                 )
                 session.last_message_at = datetime.now(timezone.utc)
@@ -9148,7 +9148,7 @@ async def _sync_proactive_channel_history(
                 user_id=platform_user.id,
                 role="assistant",
                 content=message_text,
-                conversation_id=str(session.id),
+                conversation_id=session.id,
             )
         )
         session.last_message_at = datetime.now(timezone.utc)
@@ -9448,7 +9448,7 @@ async def _send_slack_message(
                     user_id=platform_user.id,
                     role="assistant",
                     content=message_text,
-                    conversation_id=str(sess.id),
+                    conversation_id=sess.id,
                 ))
                 sess.last_message_at = datetime.now(timezone.utc)
                 await db.commit()
@@ -9527,7 +9527,7 @@ async def _send_teams_channel_message(
                 user_id=platform_user.id,
                 role="assistant",
                 content=message_text,
-                conversation_id=str(session.id),
+                conversation_id=session.id,
             ))
             session.last_message_at = datetime.now(timezone.utc)
             await db.commit()
@@ -9609,7 +9609,7 @@ async def _send_wechat_channel_message(
                 user_id=platform_user.id,
                 role="assistant",
                 content=message_text,
-                conversation_id=str(sess.id),
+                conversation_id=sess.id,
             ))
             sess.last_message_at = datetime.now(timezone.utc)
             await db.commit()
@@ -9666,7 +9666,7 @@ async def _send_platform_message_outcome(
                     user_id=target_user.id,
                     role="assistant",
                     content=message_text,
-                    conversation_id=str(session.id),
+                    conversation_id=session.id,
                 )
             )
             session.last_message_at = datetime.now(timezone.utc)
@@ -10013,7 +10013,7 @@ async def _send_file_to_agent_outcome(
                     user_id=source_creator_id,
                     role="user",
                     content=file_msg_content,
-                    conversation_id=str(chat_session.id),
+                    conversation_id=chat_session.id,
                     participant_id=src_part2.id if src_part2 else None,
                 ))
                 chat_session.last_message_at = ts
@@ -10794,10 +10794,9 @@ async def _handle_set_trigger_outcome(
         try:
             from app.models.audit import ChatMessage
             from app.models.chat_session import ChatSession
-            from sqlalchemy import cast as sa_cast, String as SaString
             async with async_session() as _snap_db:
                 _snap_q = select(ChatMessage.created_at).join(
-                    ChatSession, ChatMessage.conversation_id == sa_cast(ChatSession.id, SaString)
+                    ChatSession, ChatMessage.conversation_id == ChatSession.id
                 ).where(
                     ChatSession.agent_id == agent_id,
                     ChatMessage.created_at.isnot(None),

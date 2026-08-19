@@ -15,7 +15,7 @@ import math
 from typing import Any
 import uuid
 
-from sqlalchemy import String, and_, cast as sa_cast, func, or_, select, update
+from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
@@ -298,7 +298,7 @@ def _message_scope(tenant_id: uuid.UUID, session_id: uuid.UUID):
         ChatSession.tenant_id == tenant_id,
         ChatSession.id == session_id,
         ChatSession.deleted_at.is_(None),
-        ChatMessage.conversation_id == sa_cast(ChatSession.id, String),
+        ChatMessage.conversation_id == ChatSession.id,
         ChatMessage.role.in_(_USER_VISIBLE_ROLES),
         ChatMessage.created_at.is_not(None),
     )
@@ -314,7 +314,7 @@ def _recent_messages_statement(
         select(ChatMessage)
         .join(
             ChatSession,
-            ChatMessage.conversation_id == sa_cast(ChatSession.id, String),
+            ChatMessage.conversation_id == ChatSession.id,
         )
         .where(*_message_scope(tenant_id, session_id))
         .order_by(ChatMessage.created_at.desc(), ChatMessage.id.desc())
@@ -331,7 +331,7 @@ def _watermark_statement(
         select(ChatMessage)
         .join(
             ChatSession,
-            ChatMessage.conversation_id == sa_cast(ChatSession.id, String),
+            ChatMessage.conversation_id == ChatSession.id,
         )
         .where(
             *_message_scope(tenant_id, session_id),
@@ -349,7 +349,7 @@ def _incremental_messages_statement(
         select(ChatMessage)
         .join(
             ChatSession,
-            ChatMessage.conversation_id == sa_cast(ChatSession.id, String),
+            ChatMessage.conversation_id == ChatSession.id,
         )
         .where(*_message_scope(tenant_id, session_id))
     )
@@ -378,13 +378,13 @@ def _recent_message_ids_statement(
         select(recent_message.id)
         .join(
             recent_session,
-            recent_message.conversation_id == sa_cast(recent_session.id, String),
+            recent_message.conversation_id == recent_session.id,
         )
         .where(
             recent_session.tenant_id == tenant_id,
             recent_session.id == session_id,
             recent_session.deleted_at.is_(None),
-            recent_message.conversation_id == sa_cast(recent_session.id, String),
+            recent_message.conversation_id == recent_session.id,
             recent_message.role.in_(_USER_VISIBLE_ROLES),
             recent_message.created_at.is_not(None),
         )
@@ -426,13 +426,13 @@ def _recent_message_ids_through_statement(
         select(recent_message.id)
         .join(
             recent_session,
-            recent_message.conversation_id == sa_cast(recent_session.id, String),
+            recent_message.conversation_id == recent_session.id,
         )
         .where(
             recent_session.tenant_id == tenant_id,
             recent_session.id == session_id,
             recent_session.deleted_at.is_(None),
-            recent_message.conversation_id == sa_cast(recent_session.id, String),
+            recent_message.conversation_id == recent_session.id,
             recent_message.role.in_(_USER_VISIBLE_ROLES),
             recent_message.created_at.is_not(None),
             _at_or_before(recent_message, cutoff),
@@ -458,7 +458,7 @@ def _compactable_messages_statement(
         select(ChatMessage)
         .join(
             ChatSession,
-            ChatMessage.conversation_id == sa_cast(ChatSession.id, String),
+            ChatMessage.conversation_id == ChatSession.id,
         )
         .where(
             *_message_scope(tenant_id, session_id),
@@ -488,7 +488,7 @@ def _context_pack_messages_statement(
         select(ChatMessage, is_recent.label("is_recent"))
         .join(
             ChatSession,
-            ChatMessage.conversation_id == sa_cast(ChatSession.id, String),
+            ChatMessage.conversation_id == ChatSession.id,
         )
         .where(*_message_scope(tenant_id, session_id))
     )
@@ -519,7 +519,7 @@ def _context_pack_messages_through_statement(
         select(ChatMessage, is_recent.label("is_recent"))
         .join(
             ChatSession,
-            ChatMessage.conversation_id == sa_cast(ChatSession.id, String),
+            ChatMessage.conversation_id == ChatSession.id,
         )
         .where(
             *_message_scope(tenant_id, session_id),

@@ -295,7 +295,7 @@ async def test_public_message_and_single_mention_start_share_one_session() -> No
     assert message.created_at == NOW
     assert message.participant_id == scope.participant.id
     assert message.user_id == user.id
-    assert message.conversation_id == str(scope.session.id)
+    assert message.conversation_id == scope.session.id
     assert message.mentions == [mention.payload()]
     assert scope.session.last_message_at == NOW
     assert scope.session.title == "Please analyze the launch plan"

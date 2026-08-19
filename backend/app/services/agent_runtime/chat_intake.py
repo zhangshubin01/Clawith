@@ -437,7 +437,7 @@ async def _persist_user_message(
             user_id=None if group_message else user.id,
             role="user",
             content=content,
-            conversation_id=str(session.id),
+            conversation_id=session.id,
             participant_id=participant.id,
             mentions=[],
             created_at=now,
@@ -448,7 +448,7 @@ async def _persist_user_message(
         or existing.user_id != (None if session.session_type == "group" else user.id)
         or existing.role != "user"
         or existing.content != content
-        or existing.conversation_id != str(session.id)
+        or existing.conversation_id != session.id
         or existing.participant_id != participant.id
     ):
         raise ChatRuntimeIntakeError(

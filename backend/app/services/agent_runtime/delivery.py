@@ -912,7 +912,7 @@ async def deliver_runtime_message(
             role="system" if participant is None else "assistant",
             content=_safe_message_content(run, request),
             thinking=request.thinking if session.session_type == "direct" else None,
-            conversation_id=str(session.id),
+            conversation_id=session.id,
             participant_id=participant.id if participant is not None else None,
             mentions=[],
             created_at=now(),

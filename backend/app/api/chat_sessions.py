@@ -10,7 +10,7 @@ from typing import Any, Annotated, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import String, and_, cast, func, or_, select, tuple_
+from sqlalchemy import and_, func, or_, select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.permissions import check_agent_access
@@ -252,7 +252,7 @@ async def list_sessions(
     conversation_ids = [str(session_id) for session_id in session_ids]
     count_result = await db.execute(
         select(ChatMessage.conversation_id, func.count(ChatMessage.id))
-        .join(ChatSession, ChatMessage.conversation_id == cast(ChatSession.id, String))
+        .join(ChatSession, ChatMessage.conversation_id == ChatSession.id)
         .where(
             *session_filters,
             ChatSession.id.in_(session_ids),
@@ -264,7 +264,7 @@ async def list_sessions(
 
     unread_result = await db.execute(
         select(ChatSession.id, func.count(ChatMessage.id))
-        .join(ChatMessage, ChatMessage.conversation_id == cast(ChatSession.id, String))
+        .join(ChatMessage, ChatMessage.conversation_id == ChatSession.id)
         .where(
             *_active_direct_filters(tenant_id, agent_id),
             ChatSession.id.in_(session_ids),
@@ -813,7 +813,7 @@ async def get_session_messages(
 
     query = (
         select(ChatMessage)
-        .join(ChatSession, ChatMessage.conversation_id == cast(ChatSession.id, String))
+        .join(ChatSession, ChatMessage.conversation_id == ChatSession.id)
         .where(
             *_active_agent_session_filters(tenant_id, agent_id),
             ChatSession.id == session_id,

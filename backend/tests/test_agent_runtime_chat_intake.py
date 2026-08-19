@@ -186,7 +186,7 @@ async def test_chat_message_and_start_command_share_the_caller_session() -> None
     assert message.id == message_id
     assert message.content == "[file:evidence.txt]\nVisible question"
     assert message.participant_id == participant.id
-    assert message.conversation_id == str(session.id)
+    assert message.conversation_id == session.id
     assert session.last_message_at is not None
     assert session.title == "[file:evidence.txt]\nVisible question"[:40]
 

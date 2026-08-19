@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
 from loguru import logger
-from sqlalchemy import String, cast, delete, exists, func, select
+from sqlalchemy import delete, exists, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -110,7 +110,7 @@ async def _build_unread_count_by_agent(
     agent_ids = [agent.id for agent in agents]
     result = await db.execute(
         select(ChatSession.agent_id, func.count(ChatMessage.id))
-        .join(ChatMessage, ChatMessage.conversation_id == cast(ChatSession.id, String))
+        .join(ChatMessage, ChatMessage.conversation_id == ChatSession.id)
         .where(
             ChatSession.agent_id.in_(agent_ids),
             ChatSession.user_id == current_user.id,

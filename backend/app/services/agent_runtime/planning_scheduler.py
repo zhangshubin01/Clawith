@@ -237,7 +237,7 @@ def _validate_source(
     if (
         message.created_at is None
         or message.participant_id != scope.participant.id
-        or message.conversation_id != str(scope.session.id)
+        or message.conversation_id != scope.session.id
         or root.goal != message.content
         or root.origin_user_id != scope.user_id
         or root.origin_agent_id != scope.agent_id

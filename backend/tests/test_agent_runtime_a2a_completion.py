@@ -277,7 +277,7 @@ async def test_completed_request_projects_message_and_resumes_source_atomically(
         "a2a-terminal:target-terminal",
     )
     assert message.content == "Verified research result"
-    assert message.conversation_id == str(session.id)
+    assert message.conversation_id == session.id
     assert message.participant_id == participant.id
     command = resume_run.await_args.args[0]
     assert isinstance(command, ResumeRunCommand)

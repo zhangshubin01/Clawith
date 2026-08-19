@@ -288,7 +288,7 @@ async def test_direct_delivery_accepts_the_session_scoped_langgraph_thread() -> 
     assert run.runtime_thread_id == str(session.id)
     assert receipt.status == "delivered"
     assert receipt.actual_session_id == session.id
-    assert _added(db, ChatMessage)[0].conversation_id == str(session.id)
+    assert _added(db, ChatMessage)[0].conversation_id == session.id
     assert _added(db, ChatMessage)[0].thinking == "Checked the requested scope"
 
 
@@ -371,7 +371,7 @@ async def test_group_terminal_delivery_is_one_transaction_with_agent_identity() 
     assert message.participant_id == participant.id
     assert message.agent_id == agent_id
     assert message.user_id is None
-    assert message.conversation_id == str(session.id)
+    assert message.conversation_id == session.id
     assert message.content == "Public result"
     event = events[0]
     assert event.event_type == "delivery_succeeded"
@@ -658,7 +658,7 @@ async def test_external_group_delivery_uses_channel_scope_without_native_members
 
     assert receipt.status == "delivered"
     message = _added(db, ChatMessage)[0]
-    assert message.conversation_id == str(session.id)
+    assert message.conversation_id == session.id
     assert message.participant_id == participant.id
     assert message.user_id is None
     outbox = _added(db, ChannelDelivery)
@@ -802,7 +802,7 @@ async def test_background_direct_falls_back_to_same_scope_primary_before_first_w
     assert receipt.actual_session_id == primary.id
     assert receipt.fallback_reason == "requested_session_deleted"
     message = _added(db, ChatMessage)[0]
-    assert message.conversation_id == str(primary.id)
+    assert message.conversation_id == primary.id
     assert message.user_id == user_id
     primary_sql = _sql(db.statements[3])
     assert f"chat_sessions.tenant_id = '{tenant_id}'" in primary_sql

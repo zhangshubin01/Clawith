@@ -1,4 +1,3 @@
-from typing import Any
 """Gateway API for OpenClaw agent communication.
 
 OpenClaw agents authenticate via X-Api-Key header and use these endpoints
@@ -105,14 +104,22 @@ async def poll_messages(
         # Fetch conversation history (last 10 messages) for context
         history = []
         if msg.conversation_id:
-            from app.models.audit import ChatMessage
-            hist_result = await db.execute(
-                select(ChatMessage)
-                .where(ChatMessage.conversation_id == msg.conversation_id)
-                .order_by(ChatMessage.created_at.desc())
-                .limit(10)
-            )
-            hist_msgs = list(reversed(hist_result.scalars().all()))
+            # chat_messages.conversation_id is a UUID; gateway synthetic ids
+            # (gw_agent_*) have no history on the chat substrate.
+            try:
+                history_conv_id = uuid.UUID(str(msg.conversation_id))
+            except (ValueError, AttributeError):
+                history_conv_id = None
+            hist_msgs: list = []
+            if history_conv_id is not None:
+                from app.models.audit import ChatMessage
+                hist_result = await db.execute(
+                    select(ChatMessage)
+                    .where(ChatMessage.conversation_id == history_conv_id)
+                    .order_by(ChatMessage.created_at.desc())
+                    .limit(10)
+                )
+                hist_msgs = list(reversed(hist_result.scalars().all()))
             for h in hist_msgs:
                 # Resolve sender name for each history message
                 h_sender = None
@@ -260,25 +267,40 @@ async def report_result(
     if body.result and msg.conversation_id:
         from app.models.audit import ChatMessage
         from app.models.participant import Participant
-        # Look up OpenClaw agent's participant_id
-        part_r = await db.execute(select(Participant).where(Participant.type == "agent", Participant.ref_id == agent.id))
-        participant = part_r.scalar_one_or_none()
-
-        result_message_id = uuid.uuid5(msg.id, "gateway-report-result")
-        result_message = await db.get(ChatMessage, result_message_id)
-        if result_message is None:
-            db.add(
-                ChatMessage(
-                    id=result_message_id,
-                    agent_id=agent.id,
-                    user_id=msg.sender_user_id or getattr(agent, "creator_id", agent.id),
-                    role="assistant",
-                    content=body.result,
-                    conversation_id=msg.conversation_id,
-                    participant_id=participant.id if participant else None,
-                    mentions=[],
-                )
+        # chat_messages.conversation_id is a UUID (session id); gateway
+        # messages carry synthetic gw_agent_* conversation ids which stay in
+        # the gateway_messages channel table. Non-UUID ids are skipped here
+        # rather than breaking the uuid column at runtime.
+        try:
+            conversation_uuid = uuid.UUID(str(msg.conversation_id))
+        except (ValueError, AttributeError):
+            conversation_uuid = None
+        if conversation_uuid is None:
+            logger.warning(
+                "[Gateway] Skipping chat_messages persistence for non-UUID "
+                "conversation_id {!r} — report remains in gateway_messages",
+                msg.conversation_id,
             )
+        else:
+            # Look up OpenClaw agent's participant_id
+            part_r = await db.execute(select(Participant).where(Participant.type == "agent", Participant.ref_id == agent.id))
+            participant = part_r.scalar_one_or_none()
+
+            result_message_id = uuid.uuid5(msg.id, "gateway-report-result")
+            result_message = await db.get(ChatMessage, result_message_id)
+            if result_message is None:
+                db.add(
+                    ChatMessage(
+                        id=result_message_id,
+                        agent_id=agent.id,
+                        user_id=msg.sender_user_id or getattr(agent, "creator_id", agent.id),
+                        role="assistant",
+                        content=body.result,
+                        conversation_id=conversation_uuid,
+                        participant_id=participant.id if participant else None,
+                        mentions=[],
+                    )
+                )
 
     runtime_completion = None
     if body.result and msg.sender_agent_id:

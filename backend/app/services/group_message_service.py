@@ -442,7 +442,7 @@ async def _persist_message(
         user_id=scope.user_id,
         role=scope.role,
         content=content,
-        conversation_id=str(scope.session.id),
+        conversation_id=scope.session.id,
         participant_id=scope.participant.id,
         mentions=mention_payload,
         created_at=clock,
@@ -600,7 +600,7 @@ async def _persist_planning_configuration_failure(
                 f"错误码：{error_code}",
             )
         ),
-        conversation_id=str(scope.session.id),
+        conversation_id=scope.session.id,
         participant_id=None,
         mentions=[],
         created_at=created_at,

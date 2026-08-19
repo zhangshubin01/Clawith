@@ -211,7 +211,7 @@ async def test_completed_checkpoint_settles_execution_and_reflection_once() -> N
         "trigger-terminal:checkpoint-terminal",
     )
     assert message.content == "Upstream is ready"
-    assert message.conversation_id == str(session.id)
+    assert message.conversation_id == session.id
 
 
 @pytest.mark.asyncio

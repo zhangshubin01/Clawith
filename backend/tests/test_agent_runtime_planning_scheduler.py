@@ -218,7 +218,7 @@ def _records():
         agent_id=None,
         role="user",
         content="Research and review the launch",
-        conversation_id=str(session_id),
+        conversation_id=session_id,
         participant_id=sender.id,
         mentions=mentions,
         created_at=NOW,

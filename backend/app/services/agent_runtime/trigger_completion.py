@@ -172,7 +172,7 @@ class TriggerRuntimeCompletionHandler:
                         user_id=session.user_id,
                         role="assistant",
                         content=_reflection_content(status=status, detail=detail),
-                        conversation_id=str(session.id),
+                        conversation_id=session.id,
                         participant_id=session.participant_id,
                         mentions=[],
                         created_at=now,

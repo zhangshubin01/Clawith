@@ -220,7 +220,7 @@ def _group_scope(
         agent_id=None,
         role="user",
         content="Research and review the launch",
-        conversation_id=str(session.id),
+        conversation_id=session.id,
         participant_id=participant.id,
         mentions=[],
         created_at=NOW,
@@ -478,8 +478,8 @@ async def test_group_source_a2a_stays_pair_private_and_resumes_exact_source_run(
         source_agent.id,
         target_agent.id,
     }
-    assert all(message.conversation_id == str(pair_session.id) for message in private_messages)
-    assert all(message.conversation_id != str(scope.session.id) for message in private_messages)
+    assert all(message.conversation_id == pair_session.id for message in private_messages)
+    assert all(message.conversation_id != scope.session.id for message in private_messages)
     assert not any(isinstance(value, ChatSession) for value in intake_db.added)
     assert not any(
         isinstance(value, (SessionContextState, WorkspaceFileRevision))
