@@ -476,6 +476,28 @@ async def test_doc_search_clamps_count_and_offset_before_dispatch(monkeypatch) -
 
 
 @pytest.mark.asyncio
+async def test_doc_search_permission_denied_is_actionable_and_non_retryable(monkeypatch) -> None:
+    """99991672 must produce a stop-retrying, human-actionable outcome."""
+    provider = FakeDocDriveProvider()
+    provider.http.add(
+        "post",
+        FakeResponse({"code": 99991672, "msg": "No permission"}, status_code=400),
+    )
+    install_doc_drive_provider(monkeypatch, provider)
+
+    outcome = assert_outcome(
+        await execute("feishu_doc_search", {"query": "roadmap"}),
+        "failed",
+    )
+
+    assert outcome.error_code == "feishu_doc_search_permission_denied"
+    assert outcome.retryable is False
+    assert "99991672" in outcome.result_summary
+    assert "权限" in outcome.result_summary
+    assert "停止调用" in outcome.result_summary
+
+
+@pytest.mark.asyncio
 async def test_doc_search_requires_a_stable_docs_token_per_result(monkeypatch) -> None:
     provider = FakeDocDriveProvider()
     provider.http.add(

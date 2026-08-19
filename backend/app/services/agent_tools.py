@@ -13500,6 +13500,34 @@ def _feishu_error_is_known_rejection(exc: Exception) -> bool:
     )
 
 
+def _feishu_error_is_permission_denied(exc: Exception) -> bool:
+    """Return whether Feishu rejected a call for missing app permissions."""
+    from app.services.feishu_service import FeishuAPIError
+
+    return isinstance(exc, FeishuAPIError) and exc.is_permission_denied
+
+
+def _feishu_permission_denied_summary(operation: str, exc: Exception) -> str:
+    """Model-facing summary for a permission-class rejection.
+
+    The model must be told this cannot be fixed by retrying with different
+    arguments, otherwise it burns turn budget re-calling the tool (observed:
+    feishu_doc_search retried ~40 times on 99991672 "No permission").
+    """
+    from app.services.feishu_service import FeishuAPIError
+
+    if isinstance(exc, FeishuAPIError):
+        detail = f"（Feishu 错误码 {exc.code}：{exc.msg or 'No permission'}）"
+    else:
+        detail = "（Feishu 未返回错误码）"
+    return (
+        f"飞书拒绝了 {operation} 调用：应用缺少该 API 所需权限{detail}。"
+        "这是应用配置问题，重试或更换参数都不会成功。"
+        "请停止调用此工具，并直接告知用户：管理员需要在飞书开放平台"
+        "控制台为应用开通对应 API 权限后才能继续。"
+    )
+
+
 def _feishu_read_exception_outcome(
     operation: str,
     exc: Exception,
@@ -13509,6 +13537,11 @@ def _feishu_read_exception_outcome(
     from app.services.feishu_service import FeishuAPIError
 
     if _feishu_error_is_known_rejection(exc):
+        if _feishu_error_is_permission_denied(exc):
+            return _typed_failure(
+                _feishu_permission_denied_summary(operation, exc),
+                f"feishu_{operation}_permission_denied",
+            )
         return _typed_failure(
             f"Feishu rejected {operation}.",
             f"feishu_{operation}_rejected",
@@ -13534,6 +13567,13 @@ def _feishu_write_exception_outcome(
 ) -> ToolExecutionOutcome:
     """Classify a Feishu write after its business request was dispatched."""
     if _feishu_error_is_known_rejection(exc):
+        if _feishu_error_is_permission_denied(exc):
+            return _typed_failure(
+                _feishu_permission_denied_summary(operation, exc),
+                f"feishu_{operation}_permission_denied",
+                result_ref=result_ref,
+                metadata=metadata,
+            )
         return _typed_failure(
             f"Feishu rejected {operation}.",
             f"feishu_{operation}_rejected",

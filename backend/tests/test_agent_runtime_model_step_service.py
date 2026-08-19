@@ -22,6 +22,7 @@ from app.services.agent_runtime.model_step_service import RuntimeModelCallError
 from app.services.agent_runtime.model_step_service import _group_mention_mismatches
 from app.services.agent_runtime.model_step_service import _message_token_counter
 from app.services.agent_runtime.model_step_service import _prompt_messages
+from app.services.agent_runtime.model_step_service import _trailing_config_failure_loop
 from app.services.agent_runtime.model_step_service import _visible_mention_names
 from app.services.agent_runtime.state import (
     RunInputSnapshots,
@@ -3046,3 +3047,101 @@ async def test_compact_first_gate_guard_falls_back_to_truncation() -> None:
 
     assert result.intent == "finish"
     assert completion.await_count == 1
+
+
+def _tool_message(name: str, code: str, *, status: str = "failed") -> dict:
+    return {
+        "id": str(uuid.uuid4()),
+        "role": "tool",
+        "tool_call_id": str(uuid.uuid4()),
+        "name": name,
+        "content": "Feishu rejected.",
+        "execution_status": status,
+        "error_code": code,
+    }
+
+
+def test_trailing_config_failure_loop_detects_repeated_permission_denial() -> None:
+    messages = [
+        {"role": "assistant", "content": "retrying"},
+        _tool_message("feishu_doc_search", "feishu_doc_search_permission_denied"),
+        {"role": "assistant", "content": "retrying"},
+        _tool_message("feishu_doc_search", "feishu_doc_search_permission_denied"),
+        {"role": "assistant", "content": "retrying"},
+        _tool_message("feishu_doc_search", "feishu_doc_search_permission_denied"),
+    ]
+
+    loop = _trailing_config_failure_loop(messages)
+
+    assert loop == ("feishu_doc_search", "feishu_doc_search_permission_denied", 3)
+
+
+def test_trailing_config_failure_loop_ignores_non_config_and_mixed_tails() -> None:
+    # Non-config-class failure codes never trigger the breaker.
+    assert _trailing_config_failure_loop(
+        [_tool_message("feishu_doc_search", "feishu_doc_search_rejected")] * 3
+    ) is None
+    # A success or another tool interrupts the trailing run.
+    assert _trailing_config_failure_loop(
+        [
+            _tool_message("feishu_doc_search", "feishu_doc_search_permission_denied"),
+            _tool_message("feishu_doc_search", "feishu_doc_search_permission_denied"),
+            _tool_message("feishu_doc_search", "feishu_doc_search_permission_denied"),
+            _tool_message("feishu_doc_search", "feishu_doc_search_permission_denied", status="succeeded"),
+        ]
+    ) is None
+    assert _trailing_config_failure_loop(
+        [
+            _tool_message("feishu_doc_search", "feishu_doc_search_permission_denied"),
+            _tool_message("feishu_doc_search", "feishu_doc_search_permission_denied"),
+            _tool_message("feishu_calendar", "feishu_calendar_permission_denied"),
+            _tool_message("feishu_doc_search", "feishu_doc_search_permission_denied"),
+        ]
+    ) is None
+    # Below the threshold.
+    assert _trailing_config_failure_loop(
+        [_tool_message("feishu_doc_search", "feishu_doc_search_permission_denied")] * 2
+    ) is None
+
+
+@pytest.mark.asyncio
+async def test_config_failure_loop_fails_run_fast_without_model_call() -> None:
+    tenant_id = uuid.uuid4()
+    model = _model(tenant_id)
+    agent = _agent(tenant_id)
+    state = _state(tenant_id, model, agent)
+    state["messages"] = [
+        {
+            "id": f"tool-{i}",
+            "role": "tool",
+            "tool_call_id": f"call-{i}",
+            "name": "feishu_doc_search",
+            "content": "Feishu rejected doc_search.",
+            "execution_status": "failed",
+            "error_code": "feishu_doc_search_permission_denied",
+        }
+        if i % 2 == 0
+        else {"id": f"assist-{i}", "role": "assistant", "content": "retrying"}
+        for i in range(6)
+    ]
+    builder = _ContextBuilder(
+        _build(recent_thread_messages=tuple(state["messages"]))
+    )
+    completion = AsyncMock(
+        return_value=LLMCompletionStep(
+            content="Should not be called",
+            tool_calls=(),
+            reasoning_content=None,
+            retry_instruction=None,
+            usage=TokenUsage(total_tokens=10),
+        )
+    )
+
+    result = await _service(model, agent, builder, completion).complete_once(
+        state, _context(state)
+    )
+
+    assert result.intent == "error"
+    assert result.error["code"] == "tool_config_failure_loop"
+    assert "feishu_doc_search" in result.error["message"]
+    completion.assert_not_awaited()

@@ -307,6 +307,65 @@ def _error(code: str, message: str) -> ModelStepResult:
     )
 
 
+# Tool failure codes whose cause is configuration (permissions, credentials,
+# channel setup), not a transient provider condition: retrying cannot succeed.
+_CONFIG_FAILURE_CODE_MARKERS = (
+    "permission_denied",
+    "not_configured",
+    "credentials_unavailable",
+)
+_CONFIG_FAILURE_LOOP_THRESHOLD = 3
+_CONFIG_FAILURE_LOOP_WINDOW = 8
+
+
+def _trailing_config_failure_loop(
+    thread_messages: Sequence[JsonObject],
+    *,
+    threshold: int = _CONFIG_FAILURE_LOOP_THRESHOLD,
+    window: int = _CONFIG_FAILURE_LOOP_WINDOW,
+) -> tuple[str, str, int] | None:
+    """Detect a runaway tool loop caused by a config-class error.
+
+    When the last tool messages repeat the same config-class failure
+    (same tool, same error_code, all failed), the model is burning turn
+    budget on something only a human can fix. Returns (tool_name,
+    error_code, count) once the trailing run reaches ``threshold``;
+    otherwise None.
+    """
+    tool_messages = [
+        message
+        for message in thread_messages
+        if isinstance(message, dict) and message.get("role") == "tool"
+    ]
+    tail = tool_messages[-window:]
+    if len(tail) < threshold:
+        return None
+    last = tail[-1]
+    name = last.get("name")
+    code = last.get("error_code")
+    if (
+        not isinstance(code, str)
+        or not code
+        or not isinstance(name, str)
+        or not name
+        or last.get("execution_status") != "failed"
+        or not any(marker in code for marker in _CONFIG_FAILURE_CODE_MARKERS)
+    ):
+        return None
+    count = 0
+    for message in reversed(tail):
+        if (
+            message.get("name") != name
+            or message.get("error_code") != code
+            or message.get("execution_status") != "failed"
+        ):
+            break
+        count += 1
+    if count < threshold:
+        return None
+    return name, code, count
+
+
 def _estimate_tokens(value: object) -> int:
     return estimate_multimodal_tokens(value, chars_per_token=3)
 
@@ -1336,6 +1395,31 @@ class RuntimeModelStepService:
         static_prompt: str,
         dynamic_prompt: str,
     ) -> list[LLMMessage] | ModelStepResult:
+        # Config-failure circuit breaker: a tool whose recent calls all fail
+        # with the same configuration-class error (permission denied etc.)
+        # cannot succeed through model retries — stop the loop early with an
+        # actionable error instead of burning the whole turn budget.
+        try:
+            loop = _trailing_config_failure_loop(runtime_messages_as_json(state))
+        except (TypeError, ValueError):
+            loop = None  # malformed checkpoint: let the context builder report it
+        if loop is not None:
+            tool_name, error_code, count = loop
+            logger.warning(
+                "[RuntimeModelStep] config_failure_loop run_id={} tool={} "
+                "error_code={} count={}",
+                context.run_id,
+                tool_name,
+                error_code,
+                count,
+            )
+            return _error(
+                "tool_config_failure_loop",
+                f"工具 {tool_name} 因配置错误连续失败 {count} 次"
+                f"（{error_code}），已停止自动重试。这类错误需要人工修复"
+                "（例如在飞书开放平台控制台为应用开通相应 API 权限）"
+                "后才能继续使用该工具。",
+            )
         initial_build = await self._context_builder.build(
             state,
             context,

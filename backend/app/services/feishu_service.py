@@ -33,6 +33,18 @@ FEISHU_SEND_MSG_URL = f"{_FEISHU_BASE}/open-apis/im/v1/messages"
 class FeishuAPIError(RuntimeError):
     """Structured Feishu API error that preserves provider-returned details."""
 
+    # Feishu business codes that mean the app lacks a required API permission
+    # for the credential it presents (99991672 "No permission" is the common
+    # one). Retrying the same call with different arguments cannot succeed.
+    PERMISSION_DENIED_CODES = frozenset({99991672, 99991668})
+
+    @property
+    def is_permission_denied(self) -> bool:
+        """Whether the provider rejected the call for missing app permissions."""
+        if self.http_status in (401, 403):
+            return True
+        return self.code in self.PERMISSION_DENIED_CODES
+
     def __init__(
         self,
         *,
