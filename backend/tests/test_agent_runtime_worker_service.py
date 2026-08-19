@@ -158,6 +158,57 @@ async def test_daemon_continues_after_iteration_error_until_stopped() -> None:
     assert worker.calls == 2
 
 
+def test_command_daemon_idle_delay_backs_off_to_ceiling() -> None:
+    daemon = RuntimeCommandDaemon(
+        _Worker(asyncio.Event()),  # type: ignore[arg-type]
+        idle_delay_seconds=0.25,
+        retry_delay_seconds=0.1,
+        error_delay_seconds=1.0,
+        max_backoff_seconds=1.0,
+    )
+
+    delays = [daemon._delay_after(CommandWorkResult(status="idle")) for _ in range(5)]
+
+    assert delays == [0.25, 0.5, 1.0, 1.0, 1.0]
+
+
+def test_command_daemon_busy_result_resets_backoff() -> None:
+    daemon = RuntimeCommandDaemon(
+        _Worker(asyncio.Event()),  # type: ignore[arg-type]
+        idle_delay_seconds=0.25,
+        retry_delay_seconds=0.1,
+        error_delay_seconds=1.0,
+        max_backoff_seconds=1.0,
+    )
+
+    assert daemon._delay_after(CommandWorkResult(status="idle")) == 0.25
+    assert daemon._delay_after(CommandWorkResult(status="idle")) == 0.5
+    assert daemon._delay_after(CommandWorkResult(status="applied")) == 0.0
+    assert daemon._delay_after(CommandWorkResult(status="idle")) == 0.25
+
+
+def test_command_daemon_retry_backs_off_from_retry_base() -> None:
+    daemon = RuntimeCommandDaemon(
+        _Worker(asyncio.Event()),  # type: ignore[arg-type]
+        idle_delay_seconds=1.0,
+        retry_delay_seconds=0.1,
+        error_delay_seconds=1.0,
+        max_backoff_seconds=1.0,
+    )
+
+    delays = [daemon._delay_after(CommandWorkResult(status="retry")) for _ in range(6)]
+
+    assert delays == [0.1, 0.2, 0.4, 0.8, 1.0, 1.0]
+
+
+def test_command_daemon_rejects_nonpositive_backoff_ceiling() -> None:
+    with pytest.raises(ValueError):
+        RuntimeCommandDaemon(
+            _Worker(asyncio.Event()),  # type: ignore[arg-type]
+            max_backoff_seconds=0,
+        )
+
+
 @pytest.mark.asyncio
 async def test_channel_delivery_daemon_continues_after_retry() -> None:
     stop = asyncio.Event()
@@ -298,19 +349,10 @@ def test_component_builder_installs_current_agent_and_planning_graphs() -> None:
     assert reference_exists is not None
     assert isinstance(reference_exists.__self__, RuntimeToolReferenceReader)
     assert agent_executor._verifier._result_store is not None
-    assert (
-        agent_executor._verifier._result_store
-        is agent_executor._tool_service._tool_result_store
-    )
-    assert (
-        components.tool_result_reconciler._result_store
-        is agent_executor._tool_service._tool_result_store
-    )
+    assert agent_executor._verifier._result_store is agent_executor._tool_service._tool_result_store
+    assert components.tool_result_reconciler._result_store is agent_executor._tool_service._tool_result_store
     assert components.product_reconciler._checkpoint_reader is components.driver
-    assert (
-        components.product_reconciler._handler
-        is components.worker._post_checkpoint_handler
-    )
+    assert components.product_reconciler._handler is components.worker._post_checkpoint_handler
     assert components.channel_delivery_worker._claimant == "worker-test"
     assert components.async_tool_poll_scheduler._session_factory is not None
     assert components.worker._pre_command_handler is None

@@ -372,14 +372,22 @@ class RuntimeCommandDaemon:
         idle_delay_seconds: float = 0.25,
         retry_delay_seconds: float = 0.1,
         error_delay_seconds: float = 1.0,
+        # Consecutive quiet results (idle / retry) double the delay up to this
+        # ceiling; any busy outcome resets the backoff to zero. With N daemons
+        # phase-spread on SKIP LOCKED, worst-case pickup latency ≈ cap / N.
+        max_backoff_seconds: float = 4.0,
     ) -> None:
         delays = (idle_delay_seconds, retry_delay_seconds, error_delay_seconds)
         if any(delay <= 0 for delay in delays):
             raise ValueError("Runtime daemon delays must be positive")
+        if max_backoff_seconds <= 0:
+            raise ValueError("Runtime daemon backoff ceiling must be positive")
         self._worker = worker
         self._idle_delay_seconds = idle_delay_seconds
         self._retry_delay_seconds = retry_delay_seconds
         self._error_delay_seconds = error_delay_seconds
+        self._max_backoff_seconds = max_backoff_seconds
+        self._quiet_steps = 0
 
     @staticmethod
     async def _wait(stop: asyncio.Event, delay: float) -> None:
@@ -398,25 +406,27 @@ class RuntimeCommandDaemon:
                 raise
             except GraphRecursionError:
                 logger.warning(
-                    "Runtime Command Worker iteration hit recursion limit "
-                    "(%s steps) — run may be stuck in a loop",
+                    "Runtime Command Worker iteration hit recursion limit (%s steps) — run may be stuck in a loop",
                     get_settings().AGENT_RUNTIME_RECURSION_LIMIT,
                 )
                 delay = self._error_delay_seconds
+                self._quiet_steps = 0
             except Exception:
                 logger.exception("Runtime Command Worker iteration failed")
                 delay = self._error_delay_seconds
+                self._quiet_steps = 0
             else:
                 delay = self._delay_after(result)
             if delay:
                 await self._wait(stop, delay)
 
     def _delay_after(self, result: CommandWorkResult) -> float:
-        if result.status == "idle":
-            return self._idle_delay_seconds
-        if result.status == "retry":
-            return self._retry_delay_seconds
-        return 0.0
+        if result.status not in ("idle", "retry"):
+            self._quiet_steps = 0
+            return 0.0
+        self._quiet_steps += 1
+        base = self._idle_delay_seconds if result.status == "idle" else self._retry_delay_seconds
+        return min(base * (2 ** (self._quiet_steps - 1)), self._max_backoff_seconds)
 
 
 class ChannelDeliveryDaemon:
