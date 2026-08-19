@@ -202,5 +202,8 @@ repair 夹层连续语义（同参执行间夹 repair 仍算连续）、签名�
   - run `d80eeb5c`（11:14 后续 run）：hard 命中自己的 5（与线上被 L3 杀的事实一致）；
   - 尾部消息 reasoning 原文 "The user says 重新编译 again… run assembleDebug once
     more" 是 R1 根因（装配层每轮重放指令）的直接证据。
-- 生产部署状态：backend 容器当前由并行会话的部署 worktree `/tmp/clawith-deploy-17d3f66c`
-  构建（含 R1/R7/H-1/H-2/L2）；`2d33596e`、`26e8fe75` 尚未部署。
+- 生产部署状态（2026-08-19 20:43 更新）：循环防护全部提交已部署——backend 以
+  `5f65bb56` 重建镜像 `e2386c0e…`（worktree `/tmp/clawith-deploy-5f65bb56`，回滚标签
+  `clawith-agent-backend:pre-5f65bb56-b366c2fb`），含 R1/R7/H-1/H-2/L2/H-3/H-4 与
+  切片终点修正；部署验证全绿（/api/health=200、迁移 f066 成功、android 卷无漂移、
+  容器内新代码特征齐全）。
