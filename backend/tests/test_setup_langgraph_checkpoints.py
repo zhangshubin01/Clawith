@@ -157,7 +157,7 @@ def test_backend_entrypoint_bootstraps_checkpoint_before_app_start(tmp_path: Pat
     assert result.returncode == 0, result.stderr
     assert calls == [
         "alembic upgrade head",
-        "python -m app.scripts.setup_langgraph_checkpoints",
+        "python -X faulthandler -m app.scripts.setup_langgraph_checkpoints",
         "start",
     ]
 
@@ -168,7 +168,7 @@ def test_backend_entrypoint_stops_when_checkpoint_setup_fails(tmp_path: Path) ->
     assert result.returncode == 23
     assert calls == [
         "alembic upgrade head",
-        "python -m app.scripts.setup_langgraph_checkpoints",
+        "python -X faulthandler -m app.scripts.setup_langgraph_checkpoints",
     ]
     assert "LangGraph checkpoint setup FAILED" in result.stdout
 
