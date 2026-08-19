@@ -684,6 +684,7 @@ def _prompt_messages(
     static_prompt: str,
     dynamic_prompt: str,
     build: RuntimeContextBuild,
+    extra_instruction: str | None = None,
 ) -> list[LLMMessage]:
     """Assemble the model input with a cache-friendly, protocol-safe layout.
 
@@ -791,6 +792,10 @@ def _prompt_messages(
     )
     if trusted_runtime_instruction:
         dynamic_content = f"{dynamic_content}\n\n{trusted_runtime_instruction}"
+    if extra_instruction:
+        # Turn-scoped instruction (e.g. group confirmation) also lives in the
+        # dynamic block so the static system prefix stays byte-stable.
+        dynamic_content = f"{dynamic_content}\n\n{extra_instruction}"
     messages.append(LLMMessage(role="user", content=dynamic_content))
 
     # Final control message: extracted last user message, else the legacy
@@ -1471,6 +1476,7 @@ class RuntimeModelStepService:
             run_message_token_budget=budget.effective_runtime_budget,
             token_counter=_message_token_counter,
         )
+        confirmation_instruction: str | None = None
         if build.requires_confirmation:
             if not _is_group_agent_run(state):
                 return ModelStepResult(
@@ -1481,8 +1487,8 @@ class RuntimeModelStepService:
                         "reason": "A prior tool outcome is unknown and requires confirmation.",
                     },
                 )
-            static_prompt = (
-                f"{static_prompt}\n\n# Group Confirmation Required\n\n"
+            confirmation_instruction = (
+                "# Group Confirmation Required\n\n"
                 "A prior side-effecting operation has an unknown outcome. Do not "
                 "repeat it or continue the affected work. Ask the human to confirm "
                 "the outcome in the final public group reply as normal Assistant content. "
@@ -1501,6 +1507,11 @@ class RuntimeModelStepService:
             static_prompt=static_prompt,
             dynamic_prompt=dynamic_prompt,
             build=build,
+            extra_instruction=(
+                confirmation_instruction
+                if build.requires_confirmation and _is_group_agent_run(state)
+                else None
+            ),
         )
         if not model.supports_vision:
             return messages

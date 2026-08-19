@@ -2130,8 +2130,20 @@ async def test_group_confirmation_is_turned_into_a_public_finish_not_waiting_use
     assert result.intent == "finish"
     assert result.waiting_request is None
     assert calls
-    assert "unknown outcome" in str(calls[0][0][0].content)
-    assert "final public group reply" in str(calls[0][0][0].content)
+    # R2: the turn-scoped confirmation instruction lives in the dynamic block
+    # so the static system prefix stays cache-stable. ("final public group
+    # reply" also appears in the static group instruction - use the
+    # confirmation-unique phrase "unknown outcome" to discriminate.)
+    assert "unknown outcome" not in str(calls[0][0][0].content)
+    dynamic_blocks = [
+        message
+        for message in calls[0][0]
+        if message.role == "user"
+        and "Relevant Runtime Context" in str(message.content)
+    ]
+    assert len(dynamic_blocks) == 1
+    assert "unknown outcome" in str(dynamic_blocks[0].content)
+    assert "final public group reply" in str(dynamic_blocks[0].content)
 
 
 @pytest.mark.asyncio
