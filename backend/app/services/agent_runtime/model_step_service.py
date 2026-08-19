@@ -366,11 +366,38 @@ def _trailing_config_failure_loop(
     return name, code, count
 
 
-# 成功型死循环熔断：模型对同一工具+同一参数反复执行且每次都成功，
+# 工具调用死循环熔断：模型对同一工具+同一参数反复执行（无论成败），
 # 说明它在空转（例如反复编译同一个已能构建的项目），永远不会产出最终回复。
-# 连续达到阈值即终止运行——与 _trailing_config_failure_loop 对称（失败循环已有熔断）。
+# 连续达到阈值即终止运行——与 _trailing_config_failure_loop 互补
+# （配置类失败由它兜底；这里兜底「重复执行」本身，因为图状态里的
+# tool 消息并不携带 execution_status，无法按成败区分）。
 _SUCCESS_LOOP_THRESHOLD = 5
 _SUCCESS_LOOP_WINDOW = 16
+
+
+def _tool_call_signature(tool_call: JsonObject) -> tuple[str, str]:
+    """从 assistant.tool_calls 元素提取 (name, args_key)。
+
+    兼容两种形态：LangChain 顶层 {name, arguments} 与 OpenAI
+    {function: {name, arguments}}（arguments 是 JSON 字符串）。
+    """
+    fn = tool_call.get("function") if isinstance(tool_call.get("function"), dict) else {}
+    name = str(tool_call.get("name") or fn.get("name") or "")
+    raw_args = tool_call.get("arguments")
+    if raw_args is None:
+        raw_args = fn.get("arguments")
+    if isinstance(raw_args, str):
+        try:
+            args_obj = json.loads(raw_args)
+        except (TypeError, ValueError):
+            args_obj = raw_args
+    else:
+        args_obj = raw_args or {}
+    try:
+        args_key = json.dumps(args_obj, sort_keys=True, ensure_ascii=False)
+    except (TypeError, ValueError):
+        args_key = repr(args_obj)
+    return name, args_key
 
 
 def _trailing_identical_success_loop(
@@ -379,13 +406,13 @@ def _trailing_identical_success_loop(
     threshold: int = _SUCCESS_LOOP_THRESHOLD,
     window: int = _SUCCESS_LOOP_WINDOW,
 ) -> tuple[str, int] | None:
-    """Detect a runaway loop of identical SUCCESSFUL tool calls.
+    """Detect a runaway loop of identical tool calls (regardless of outcome).
 
     When the trailing tool exchanges repeat the same tool with the same
-    arguments and every result succeeded, the model is re-running the same
-    operation forever instead of finishing the turn (e.g. recompiling a
-    project that already builds). Returns (tool_name, count) once the
-    trailing run reaches ``threshold``; otherwise None.
+    arguments, the model is re-running the same operation forever instead
+    of finishing the turn (e.g. recompiling a project that already builds).
+    Returns (tool_name, count) once the trailing run reaches ``threshold``;
+    otherwise None.
     """
     # 1) assistant.tool_calls: tool_call_id -> (name, args_key)
     call_info: dict[str, tuple[str, str]] = {}
@@ -398,15 +425,12 @@ def _trailing_identical_success_loop(
             call_id = tool_call.get("id")
             if not isinstance(call_id, str) or not call_id:
                 continue
-            try:
-                args_key = json.dumps(
-                    tool_call.get("arguments") or {}, sort_keys=True, ensure_ascii=False
-                )
-            except (TypeError, ValueError):
-                args_key = repr(tool_call.get("arguments"))
-            call_info[call_id] = (str(tool_call.get("name") or ""), args_key)
+            name, args_key = _tool_call_signature(tool_call)
+            if not name:
+                continue
+            call_info[call_id] = (name, args_key)
 
-    # 2) 尾部工具消息：从后往前数连续一致的 (name, args_key) 且全部 succeeded
+    # 2) 尾部工具消息：从后往前数连续一致的 (name, args_key)
     tool_messages = [
         message
         for message in thread_messages
@@ -417,18 +441,11 @@ def _trailing_identical_success_loop(
         return None
     last = tail[-1]
     signature = call_info.get(str(last.get("tool_call_id") or ""))
-    if (
-        signature is None
-        or not signature[0]
-        or last.get("execution_status") != "succeeded"
-    ):
+    if signature is None:
         return None
     count = 0
     for message in reversed(tail):
-        if (
-            call_info.get(str(message.get("tool_call_id") or "")) != signature
-            or message.get("execution_status") != "succeeded"
-        ):
+        if call_info.get(str(message.get("tool_call_id") or "")) != signature:
             break
         count += 1
     if count < threshold:
@@ -1495,9 +1512,12 @@ class RuntimeModelStepService:
                 "（例如在飞书开放平台控制台为应用开通相应 API 权限）"
                 "后才能继续使用该工具。",
             )
-        # Success-loop circuit breaker: the same tool+arguments succeeding
-        # repeatedly means the model is spinning (e.g. recompiling a project
-        # that already builds). Terminate instead of burning the turn budget.
+        # Identical-tool-call loop breaker: the same tool+arguments being
+        # issued repeatedly means the model is spinning (e.g. recompiling a
+        # project that already builds). Terminate instead of burning the
+        # turn budget. Covers successful loops too — the state channel's
+        # tool messages carry no execution_status, so the check is on
+        # repetition itself, not on the outcome.
         try:
             success_loop = _trailing_identical_success_loop(runtime_messages_as_json(state))
         except (TypeError, ValueError):
@@ -1512,7 +1532,7 @@ class RuntimeModelStepService:
             )
             return _error(
                 "tool_success_loop",
-                f"工具 {tool_name} 已连续成功执行 {count} 次且没有其他进展，"
+                f"工具 {tool_name} 已连续执行 {count} 次（参数完全相同）且没有其他进展，"
                 "判定为重复执行死循环，已停止本轮运行。如需再次执行，请发送新的消息。",
             )
         initial_build = await self._context_builder.build(
