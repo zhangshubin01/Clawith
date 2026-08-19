@@ -64,7 +64,7 @@ async def _load_delivered_message(
                 ChatMessage.id == message_id,
                 ChatMessage.agent_id == agent_id,
                 ChatMessage.user_id == user_id,
-                ChatMessage.conversation_id == str(session_id),
+                ChatMessage.conversation_id == session_id,
             )
         )
         message = result.scalar_one_or_none()

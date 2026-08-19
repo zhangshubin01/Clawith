@@ -776,7 +776,7 @@ async def list_group_messages(
             "group_message_limit_invalid",
             "Message limit must be between 1 and 500",
         )
-    statement = select(ChatMessage).where(ChatMessage.conversation_id == str(session_id))
+    statement = select(ChatMessage).where(ChatMessage.conversation_id == session_id)
     if after is not None:
         statement = (
             statement.where(

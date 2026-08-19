@@ -239,7 +239,7 @@ class ChannelDeliveryWorker:
             message_result = await db.execute(
                 select(ChatMessage).where(
                     ChatMessage.id == delivery.message_id,
-                    ChatMessage.conversation_id == str(delivery.session_id),
+                    ChatMessage.conversation_id == delivery.session_id,
                 )
             )
             message = message_result.scalar_one_or_none()

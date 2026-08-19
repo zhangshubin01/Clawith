@@ -249,7 +249,7 @@ async def list_sessions(
         return []
 
     session_ids = [session.id for session in sessions]
-    conversation_ids = [str(session_id) for session_id in session_ids]
+    conversation_ids = session_ids
     count_result = await db.execute(
         select(ChatMessage.conversation_id, func.count(ChatMessage.id))
         .join(ChatSession, ChatMessage.conversation_id == ChatSession.id)
@@ -260,7 +260,7 @@ async def list_sessions(
         )
         .group_by(ChatMessage.conversation_id)
     )
-    message_counts = {row[0]: int(row[1] or 0) for row in count_result.all()}
+    message_counts = {str(row[0]): int(row[1] or 0) for row in count_result.all()}
 
     unread_result = await db.execute(
         select(ChatSession.id, func.count(ChatMessage.id))
@@ -817,7 +817,7 @@ async def get_session_messages(
         .where(
             *_active_agent_session_filters(tenant_id, agent_id),
             ChatSession.id == session_id,
-            ChatMessage.conversation_id == str(session_id),
+            ChatMessage.conversation_id == session_id,
         )
         .order_by(ChatMessage.created_at.desc(), ChatMessage.id.desc())
         .limit(limit)

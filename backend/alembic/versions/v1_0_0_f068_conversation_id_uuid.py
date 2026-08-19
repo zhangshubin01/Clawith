@@ -31,6 +31,23 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
+    # Inspector guard: 001_initial_schema builds chat_messages from the
+    # CURRENT model, so on fresh environments the column is already uuid and
+    # the ALTER would fail (or be a no-op). Skip when the type already matches.
+    import sqlalchemy as sa
+
+    bind = op.get_bind()
+    inspector = sa.inspect(bind)
+    column_type = next(
+        (
+            col["type"]
+            for col in inspector.get_columns("chat_messages")
+            if col["name"] == "conversation_id"
+        ),
+        None,
+    )
+    if column_type is not None and isinstance(column_type, sa.Uuid):
+        return
     op.execute(
         "ALTER TABLE chat_messages "
         "ALTER COLUMN conversation_id TYPE uuid USING conversation_id::uuid"
@@ -38,6 +55,20 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    import sqlalchemy as sa
+
+    bind = op.get_bind()
+    inspector = sa.inspect(bind)
+    column_type = next(
+        (
+            col["type"]
+            for col in inspector.get_columns("chat_messages")
+            if col["name"] == "conversation_id"
+        ),
+        None,
+    )
+    if column_type is not None and isinstance(column_type, sa.String):
+        return
     op.execute(
         "ALTER TABLE chat_messages "
         "ALTER COLUMN conversation_id TYPE varchar(200) USING conversation_id::text"

@@ -95,7 +95,7 @@ async def publish_stored_group_message(
         message_result = await db.execute(
             select(ChatMessage).where(
                 ChatMessage.id == message_id,
-                ChatMessage.conversation_id == str(session_id),
+                ChatMessage.conversation_id == session_id,
             )
         )
         message = message_result.scalar_one_or_none()

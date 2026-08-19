@@ -121,7 +121,7 @@ async def test_list_all_associated_sessions_is_tenant_scoped_and_direct_unread_o
     session = _session(agent, owner_id)
     db = RecordingDB(
         DummyResult([session]),
-        DummyResult([(str(session.id), 3)]),
+        DummyResult([(session.id, 3)]),
         DummyResult([]),
         DummyResult([(owner_id, "Alice")]),
     )
@@ -162,7 +162,7 @@ async def test_list_mine_remains_active_direct_sessions_only(monkeypatch):
     session = _session(agent, current_user.id)
     db = RecordingDB(
         DummyResult([session]),
-        DummyResult([(str(session.id), 1)]),
+        DummyResult([(session.id, 1)]),
         DummyResult([]),
     )
 
@@ -226,7 +226,7 @@ async def test_list_all_preserves_trigger_session_shape(monkeypatch):
     )
     db = RecordingDB(
         DummyResult([session]),
-        DummyResult([(str(session.id), 2)]),
+        DummyResult([(session.id, 2)]),
         DummyResult([]),
         DummyResult([(owner_id, "Trigger Owner")]),
     )
@@ -265,7 +265,7 @@ async def test_list_all_includes_a2a_session_from_peer_agent_side(monkeypatch):
     )
     db = RecordingDB(
         DummyResult([session]),
-        DummyResult([(str(session.id), 4)]),
+        DummyResult([(session.id, 4)]),
         DummyResult([]),
         DummyResult(
             [
@@ -312,7 +312,7 @@ async def test_list_all_preserves_legacy_group_display_fields(monkeypatch):
     )
     db = RecordingDB(
         DummyResult([session]),
-        DummyResult([(str(session.id), 5)]),
+        DummyResult([(session.id, 5)]),
         DummyResult([]),
     )
 

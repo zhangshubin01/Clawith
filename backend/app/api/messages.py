@@ -58,7 +58,7 @@ async def get_inbox(
         # Get latest messages from this session
         msgs_q = await query_dao.execute(db, 
             select(ChatMessage)
-            .where(ChatMessage.conversation_id == str(sess.id))
+            .where(ChatMessage.conversation_id == sess.id)
             .order_by(ChatMessage.created_at.desc())
             .limit(3)
         )

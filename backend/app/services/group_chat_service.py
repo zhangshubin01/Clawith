@@ -369,7 +369,7 @@ async def _session_message(
     result = await db.execute(
         select(ChatMessage).where(
             ChatMessage.id == message_id,
-            ChatMessage.conversation_id == str(session_id),
+            ChatMessage.conversation_id == session_id,
         )
     )
     message = result.scalar_one_or_none()
@@ -1214,7 +1214,7 @@ async def get_group_session_unread_count(
         )
 
     filters = [
-        ChatMessage.conversation_id == str(session_id),
+        ChatMessage.conversation_id == session_id,
         ChatMessage.role.in_(("user", "assistant", "system")),
         or_(
             ChatMessage.participant_id.is_(None),
