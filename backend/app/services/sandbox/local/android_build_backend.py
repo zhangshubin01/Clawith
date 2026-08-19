@@ -484,10 +484,12 @@ class AndroidBuildBackend(BaseSandboxBackend):
                             await _flush_batch()
 
                     flush_timer = asyncio.create_task(_flush_timer())
+                    normal_end = False
                     try:
                         while True:
                             chunk = await loop.run_in_executor(None, output_queue.get)
                             if chunk is None:
+                                normal_end = True
                                 break
                             # stdout 缓冲上限保护 — on_output 始终透传，不受上限影响
                             if len(stdout_buf) < self._MAX_STDOUT_CAPTURE:
@@ -501,7 +503,11 @@ class AndroidBuildBackend(BaseSandboxBackend):
                             await flush_timer
                         except asyncio.CancelledError:
                             pass
-                        await _flush_batch()
+                        # 取消/超时路径不冲刷残留批次：尾部内容已随结果
+                        # stdout 返回，且取消后回调 on_output 会与调用方的
+                        # 最终 flush 并发（重复/交错事件）。
+                        if normal_end:
+                            await _flush_batch()
 
                 drain_task = asyncio.create_task(_drain_queue())
 
@@ -513,6 +519,14 @@ class AndroidBuildBackend(BaseSandboxBackend):
                 except asyncio.TimeoutError:
                     drain_task.cancel()
                     stream_task.cancel()
+                    # 回收被取消的任务：drain 的 finally 在取消路径跳过
+                    # 残留批次冲刷（见 _drain_queue），不再有晚到的
+                    # on_output 回调；生产者的后台线程随容器 kill 结束。
+                    await asyncio.gather(
+                        drain_task,
+                        stream_task,
+                        return_exceptions=True,
+                    )
                     try:
                         container.kill()
                     except Exception:

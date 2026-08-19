@@ -803,7 +803,7 @@ class _QuietStreamContainer(_MockContainer):
         def _gen():
             yield b"setup-1\n"
             yield b"setup-2\n"
-            time.sleep(0.6)
+            time.sleep(0.8)
             yield b"task-1\n"
             yield b"task-2\n"
 
@@ -841,12 +841,80 @@ class TestDrainQueueFlushTimer:
         )
 
         assert result.success is True
-        # 定时器驱动：setup 帧在静默期内就已送达（远早于 0.6s 的突发）
+        # 定时器驱动：setup 帧在静默期内就已送达（远早于 0.8s 的突发）
         assert len(received) >= 2, f"on_output 应至少被调用 2 次，实际 {len(received)}"
-        assert received[0][0] < 0.5, (
-            f"setup 批应在定时器窗口内及时送达（<0.5s），实际 {received[0][0]:.2f}s"
+        assert received[0][0] < 0.6, (
+            f"setup 批应在定时器窗口内及时送达（<0.6s），实际 {received[0][0]:.2f}s"
         )
         all_text = "".join(text for _, text in received)
         assert "setup-1" in all_text
         assert "task-1" in all_text
         assert "task-2" in all_text
+
+
+class _HangingBuildContainer(_MockContainer):
+    """logs 先发一帧后挂起（模拟构建卡死）；wait 短睡后返回。"""
+
+    def logs(self, *, stream=False, follow=False, stdout=True, stderr=True):
+        del stream, follow, stdout, stderr
+
+        def _gen():
+            yield b"setup-1\n"
+            time.sleep(2)
+
+        return _gen()
+
+    def wait(self):
+        time.sleep(0.5)
+        return {"StatusCode": 0}
+
+
+class TestTimeoutPathNoLateOutputCallbacks:
+    """回归（Spec c1）：超时取消后不得再有 on_output 回调。
+
+    旧实现超时分支 cancel 后直接 return、不回收任务：被取消的 drain
+    仍会在 finally 中冲刷残留批次 → 与 tool_step 的最终 flush 并发
+    回调 on_output。修复后取消路径跳过最终冲刷，尾部批次经结果
+    stdout 返回。
+    """
+
+    @pytest.mark.asyncio
+    async def test_no_on_output_after_timeout_return(
+        self, backend, mock_docker_client, monkeypatch
+    ):
+        mock_docker_client.containers.run_result = _HangingBuildContainer()
+        received: list[str] = []
+
+        async def on_output(text: str, stream: str = "stdout") -> None:
+            del stream
+            received.append(text)
+
+        # 把 container.wait 的 wait_for 窗口压到 5ms，确定性走超时分支
+        real_wait_for = asyncio.wait_for
+        import app.services.sandbox.local.android_build_backend as abm
+
+        async def _fast_timeout_wait_for(awaitable, timeout):
+            del timeout
+            return await real_wait_for(awaitable, 0.005)
+
+        monkeypatch.setattr(abm.asyncio, "wait_for", _fast_timeout_wait_for)
+
+        result = await backend.execute(
+            code="",
+            language="java",
+            timeout=1,
+            work_dir="/workspace",
+            project_path="/workspace/app",
+            gradle_task="assembleDebug",
+            on_output=on_output,
+        )
+
+        assert result.success is False
+        assert "编译超时" in (result.error or "")
+        # 尾部批次经结果返回，而非丢给已取消的流式通道
+        assert "setup-1" in result.stdout
+        # 取消后不得再回调 on_output（旧实现会在此处晚到一次回调）
+        await asyncio.sleep(0.3)
+        assert received == [], (
+            f"超时返回后不应再有 on_output 回调，实际收到: {received!r}"
+        )

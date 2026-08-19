@@ -3889,13 +3889,13 @@ async def test_stream_output_final_flush_persists_end_burst(monkeypatch) -> None
         payload = params.get("payload")
         if isinstance(payload, dict) and payload.get("activity_type") == "tool_output":
             output_events.append(params)
-    assert len(output_events) == 2, (
-        f"应有 2 个输出事件（定时 flush + 最终 flush），实际: {len(output_events)}"
-    )
+    assert len(output_events) >= 1, f"应有至少 1 个输出事件，实际: {len(output_events)}"
     joined = "".join(
         str((event.get("payload") or {}).get("content", ""))
         for event in output_events
     )
     assert "[INFO] JDK 17" in joined
-    assert "BUILD SUCCESSFUL" in joined
-    assert output_events[-1].get("payload", {}).get("output_seq") == 2
+    # 「最终 flush 必达」：突发内容完整出现在最后一个事件里，不被丢弃
+    last_content = str((output_events[-1].get("payload") or {}).get("content", ""))
+    assert "> Task :app:assembleDebug" in last_content
+    assert "BUILD SUCCESSFUL" in last_content

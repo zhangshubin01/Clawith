@@ -1863,21 +1863,24 @@ class RuntimeToolStepService:
                         on_output_callback = None
                         if tool_name in _STREAM_OUTPUT_TOOL_NAMES:
                             _output_buf: list[str] = []
-                            _output_seq = [0]
-                            _last_flush = [time.monotonic()]
-                            _stream = ["stdout"]
+                            output_seq = 0
+                            last_flush_at = time.monotonic()
+                            # 缓冲区内最后一个 chunk 的流标签：stdout/stderr
+                            # 交叠时合并事件整体标为末个 chunk 的流。
+                            last_stream = "stdout"
 
                             async def _flush_pending_output() -> None:
                                 """把缓冲的输出合并落库（定时 flush 与最终 flush 共用）。"""
+                                nonlocal output_seq, last_flush_at
                                 if not _output_buf:
                                     return
-                                _output_seq[0] += 1
+                                output_seq += 1
                                 async with self._session_factory() as db:
                                     await db.execute(
                                         insert(AgentRunEvent)
                                         .values(
                                             id=uuid.uuid5(
-                                                run_id, f"activity:tool:{call_id}:output:{_output_seq[0]}"
+                                                run_id, f"activity:tool:{call_id}:output:{output_seq}"
                                             ),
                                             tenant_id=tenant_id,
                                             run_id=run_id,
@@ -1889,22 +1892,23 @@ class RuntimeToolStepService:
                                                 "call_id": call_id,
                                                 "name": tool_name,
                                                 "content": "".join(_output_buf),
-                                                "stream": _stream[0],
-                                                "output_seq": _output_seq[0],
+                                                "stream": last_stream,
+                                                "output_seq": output_seq,
                                             },
-                                            idempotency_key=f"activity:tool:{call_id}:output:{_output_seq[0]}",
+                                            idempotency_key=f"activity:tool:{call_id}:output:{output_seq}",
                                         )
                                         .on_conflict_do_nothing()
                                     )
                                     await db.commit()
                                 _output_buf.clear()
-                                _last_flush[0] = time.monotonic()
+                                last_flush_at = time.monotonic()
 
                             async def _tool_on_output(text: str, stream: str = "stdout") -> None:
+                                nonlocal last_stream
                                 _output_buf.append(text)
-                                _stream[0] = stream
+                                last_stream = stream
                                 now = time.monotonic()
-                                if len(_output_buf) >= 10 or now - _last_flush[0] >= 0.5:
+                                if len(_output_buf) >= 10 or now - last_flush_at >= 0.5:
                                     await _flush_pending_output()
 
                             on_output_callback = _tool_on_output
