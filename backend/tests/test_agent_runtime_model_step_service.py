@@ -290,6 +290,34 @@ def test_prompt_messages_compatibly_parse_legacy_image_checkpoint() -> None:
     ]
 
 
+def test_prompt_messages_marks_the_dynamic_block_as_the_cache_break() -> None:
+    build = _build(
+        current_run={"run_id": str(uuid.uuid4()), "goal": "Inspect"},
+        recent_session_messages_snapshot=(),
+        recent_thread_messages=(
+            {"id": "h1", "role": "assistant", "content": "Earlier turn"},
+        ),
+        initial_input={"message_id": "cur", "input_content": "Current input"},
+    )
+
+    messages = _prompt_messages(
+        static_prompt="Static",
+        dynamic_prompt="Dynamic",
+        build=build,
+    )
+
+    break_indexes = [index for index, message in enumerate(messages) if message.prefix_cache_break]
+    assert len(break_indexes) == 1
+    dynamic_index = break_indexes[0]
+    assert messages[dynamic_index].role == "user"
+    assert isinstance(messages[dynamic_index].content, str)
+    assert messages[dynamic_index].content.startswith("Dynamic")
+    # Dynamic block sits after history and right before the final control message.
+    assert dynamic_index == len(messages) - 2
+    assert messages[-1].role == "user"
+    assert messages[-1].content == "Current input"
+
+
 def test_message_budget_does_not_treat_large_base64_as_text_tokens() -> None:
     padded_png = base64.b64encode(base64.b64decode(_TINY_PNG_BASE64) + b"x" * (1024 * 1024)).decode("ascii")
     small = _message_token_counter(

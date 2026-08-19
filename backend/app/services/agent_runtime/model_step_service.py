@@ -909,7 +909,16 @@ def _prompt_messages(
         # Turn-scoped instruction (e.g. group confirmation) also lives in the
         # dynamic block so the static system prefix stays byte-stable.
         dynamic_content = f"{dynamic_content}\n\n{extra_instruction}"
-    messages.append(LLMMessage(role="user", content=dynamic_content))
+    messages.append(
+        LLMMessage(
+            role="user",
+            content=dynamic_content,
+            # Cache boundary marker: the stable prefix ends at the message
+            # before this one; provider cache hints must never include the
+            # per-turn dynamic suffix.
+            prefix_cache_break=True,
+        )
+    )
 
     # Final control message: extracted last user message, else the legacy
     # current-input fallbacks. Kept strictly after the dynamic block.

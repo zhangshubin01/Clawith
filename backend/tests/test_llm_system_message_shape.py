@@ -196,3 +196,97 @@ def test_openai_compatible_rejects_an_invalid_final_provider_shape(
             temperature=0.2,
             max_tokens=1024,
         )
+
+
+def _messages_with_cache_break() -> list[LLMMessage]:
+    """Durable-runtime layout: static system, history, dynamic block, tail control."""
+    return [
+        LLMMessage(role="system", content="Static Base Prompt"),
+        LLMMessage(role="user", content="Earlier user turn"),
+        LLMMessage(role="assistant", content="Earlier assistant turn"),
+        LLMMessage(role="user", content="Dynamic Runtime Context", prefix_cache_break=True),
+        LLMMessage(role="user", content="Current user turn"),
+    ]
+
+
+def _cache_marked_texts(message: dict[str, Any]) -> list[str]:
+    content = message.get("content")
+    if not isinstance(content, list):
+        return []
+    return [
+        part["text"]
+        for part in content
+        if isinstance(part, dict)
+        and part.get("type") == "text"
+        and part.get("cache_control") == {"type": "ephemeral"}
+    ]
+
+
+def _cache_control_client() -> OpenAICompatibleClient:
+    return OpenAICompatibleClient(api_key="test", model="qwen-local", supports_cache_control=True)
+
+
+def test_cache_control_boundary_lands_on_history_tail_when_break_is_marked() -> None:
+    payload = _cache_control_client()._build_payload(
+        _messages_with_cache_break(),
+        tools=None,
+        temperature=0.2,
+        max_tokens=1024,
+    )
+    messages = payload["messages"]
+    # Static system block and the history tail (message before the dynamic
+    # block) carry the cache boundary.
+    assert _cache_marked_texts(messages[0]) == ["Static Base Prompt"]
+    assert _cache_marked_texts(messages[1]) == []
+    assert _cache_marked_texts(messages[2]) == ["Earlier assistant turn"]
+    # The per-turn dynamic block and the final control message stay unmarked.
+    assert _cache_marked_texts(messages[3]) == []
+    assert _cache_marked_texts(messages[4]) == []
+
+
+def test_cache_control_without_break_still_marks_last_user_message() -> None:
+    messages = [
+        LLMMessage(role="system", content="Static Base Prompt"),
+        LLMMessage(role="user", content="Earlier user turn"),
+        LLMMessage(role="user", content="Current user turn"),
+    ]
+    payload = _cache_control_client()._build_payload(
+        messages,
+        tools=None,
+        temperature=0.2,
+        max_tokens=1024,
+    )
+    assert _cache_marked_texts(payload["messages"][0]) == ["Static Base Prompt"]
+    assert _cache_marked_texts(payload["messages"][1]) == []
+    assert _cache_marked_texts(payload["messages"][2]) == ["Current user turn"]
+
+
+def test_cache_control_break_with_empty_history_marks_only_the_system_block() -> None:
+    messages = [
+        LLMMessage(role="system", content="Static Base Prompt"),
+        LLMMessage(role="user", content="Dynamic Runtime Context", prefix_cache_break=True),
+        LLMMessage(role="user", content="Current user turn"),
+    ]
+    payload = _cache_control_client()._build_payload(
+        messages,
+        tools=None,
+        temperature=0.2,
+        max_tokens=1024,
+    )
+    assert _cache_marked_texts(payload["messages"][0]) == ["Static Base Prompt"]
+    assert _cache_marked_texts(payload["messages"][1]) == []
+    assert _cache_marked_texts(payload["messages"][2]) == []
+
+
+def test_cache_break_flag_is_ignored_without_cache_control_support() -> None:
+    client = OpenAICompatibleClient(api_key="test", model="deepseek", supports_cache_control=False)
+    payload = client._build_payload(
+        _messages_with_cache_break(),
+        tools=None,
+        temperature=0.2,
+        max_tokens=1024,
+    )
+    messages = payload["messages"]
+    assert all(_cache_marked_texts(message) == [] for message in messages)
+    assert messages[3]["content"] == "Dynamic Runtime Context"
+    assert messages[4]["content"] == "Current user turn"

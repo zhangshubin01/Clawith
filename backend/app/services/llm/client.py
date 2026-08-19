@@ -242,6 +242,10 @@ class LLMMessage:
     reasoning_content: str | None = None
     reasoning_signature: str | None = None
     dynamic_content: str | None = None
+    # Marks the first message of the per-turn unstable suffix (e.g. the
+    # dynamic block): provider cache boundaries must end at the message
+    # BEFORE this one, never after it.
+    prefix_cache_break: bool = False
 
     def to_openai_format(self) -> dict:
         """Convert to OpenAI format."""
@@ -660,12 +664,21 @@ class OpenAICompatibleClient(LLMClient):
         return payload
 
     def _messages_to_openai_payload(self, messages: list[LLMMessage]) -> list[dict[str, Any]]:
-        """Convert messages, optionally adding DashScope/OpenAI-compatible cache hints."""
+        """Convert messages, optionally adding DashScope/OpenAI-compatible cache hints.
+
+        The cache boundary ends at the last stable message. When a message
+        carries ``prefix_cache_break`` (the per-turn dynamic block), the
+        boundary is the message right before it — the history tail — so the
+        unstable dynamic suffix never enters the cached region. Without an
+        explicit break, the last user message stays the boundary (legacy
+        callers), and the static system text block is always marked.
+        """
         if not self.supports_cache_control:
             return [m.to_openai_format() for m in messages]
 
         payload: list[dict[str, Any]] = []
-        last_user_index = -1
+        boundary_index: int | None = None
+        seen_break = False
 
         for msg in messages:
             if msg.role == "system":
@@ -697,11 +710,20 @@ class OpenAICompatibleClient(LLMClient):
 
             formatted = msg.to_openai_format()
             payload.append(formatted)
-            if msg.role == "user":
-                last_user_index = len(payload) - 1
+            if seen_break:
+                continue
+            if msg.prefix_cache_break:
+                # Boundary = the stable history tail right before the break.
+                seen_break = True
+                boundary_index = len(payload) - 2
+            elif msg.role == "user":
+                boundary_index = len(payload) - 1
 
-        if last_user_index >= 0:
-            payload[last_user_index] = self._with_cache_control_on_message(payload[last_user_index])
+        if boundary_index is not None and boundary_index >= 0:
+            boundary_message = payload[boundary_index]
+            if boundary_message.get("role") != "system":
+                # A system boundary is already marked (static block above).
+                payload[boundary_index] = self._with_cache_control_on_message(boundary_message)
 
         return payload
 
