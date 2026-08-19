@@ -3448,3 +3448,113 @@ async def test_config_failure_loop_fails_run_fast_without_model_call() -> None:
     assert result.intent == "error"
     assert result.error["code"] == "tool_config_failure_loop"
     assert "feishu_doc_search" in result.error["message"]
+
+
+@pytest.mark.asyncio
+async def test_soft_loop_reminder_appended_absolutely_last() -> None:
+    """L2 软提醒端到端：3 连相同调用 → 提醒消息在请求尾部（绝对最后）。"""
+    tenant_id = uuid.uuid4()
+    model = _model(tenant_id)
+    agent = _agent(tenant_id)
+    state = _state(tenant_id, model, agent)
+    run_id = state["registry"].run_id
+    compile_cycles: list[dict] = []
+    for i in range(3):
+        compile_cycles.append(
+            {
+                "role": "assistant",
+                "content": "compiling",
+                "tool_calls": [
+                    {
+                        "id": f"call-{i}",
+                        "type": "function",
+                        "function": {
+                            "name": "android_compile",
+                            "arguments": json.dumps({"task": "assembleDebug"}),
+                        },
+                    }
+                ],
+            }
+        )
+        compile_cycles.append(
+            {
+                "role": "tool",
+                "tool_call_id": f"call-{i}",
+                "name": "android_compile",
+                "content": "BUILD SUCCESSFUL",
+            }
+        )
+    state["messages"] = [
+        {
+            "id": f"current-input-{run_id}",
+            "role": "user",
+            "content": "Please inspect the file",
+            "runtime_input": "current",
+            "runtime_run_id": run_id,
+        },
+        *compile_cycles,
+    ]
+
+    class _Exec:
+        def __init__(self, call_id: str) -> None:
+            self.tool_call_id = call_id
+            self.status = "succeeded"
+            self.tool_name = "android_compile"
+            self.sanitized_arguments = {}
+            self.result_metadata = {}
+            self.assistant_message_id = f"am-{call_id}"
+            self.result_summary = "BUILD SUCCESSFUL"
+            self.result_ref = None
+            self.request_ref = None
+
+    executions = [_Exec(f"call-{i}") for i in range(3)]
+
+    calls = 0
+
+    @asynccontextmanager
+    async def factory():
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            yield _DB(model, agent, executions)
+            return
+
+        class _NoFallbackDB:
+            async def execute(self, statement):
+                del statement
+                return _Result()
+
+        yield _NoFallbackDB()
+
+    completion = AsyncMock(
+        return_value=LLMCompletionStep(
+            content="Final reply",
+            tool_calls=(),
+            reasoning_content=None,
+            retry_instruction=None,
+            usage=TokenUsage(total_tokens=10),
+        )
+    )
+    service = RuntimeModelStepService(
+        session_factory=factory,
+        context_builder=_ContextBuilder(
+            _build(recent_thread_messages=tuple(state["messages"]))
+        ),
+        completion=completion,
+        tool_provider=_tools,
+        prompt_builder=_prompt,
+        model_retry_base_delay_seconds=0,
+        model_retry_jitter_ratio=0,
+    )
+
+    result = await service.complete_once(state, _context(state))
+
+    assert result.intent == "finish"
+    messages = completion.await_args.args[1]
+    # 提醒在消息序列绝对最后，且位于 final control message 之后
+    assert messages[-1].role == "user"
+    assert "连续 3 次" in messages[-1].content
+    assert "android_compile" in messages[-1].content
+    assert "停止重复调用" in messages[-1].content
+    assert messages[-2].role == "user"
+    assert messages[-2].content != messages[-1].content

@@ -443,15 +443,15 @@ def _tool_call_signature(tool_call: JsonObject) -> tuple[str, str]:
     return name, args_key
 
 
-def _trailing_identical_success_loop(
+def _trailing_identical_calls(
     thread_messages: Sequence[JsonObject],
     ledger: Mapping[str, JsonObject] | None,
     *,
     current_run_id: str | None = None,
     threshold: int = _SUCCESS_LOOP_THRESHOLD,
     window: int = _SUCCESS_LOOP_WINDOW,
-) -> tuple[str, int] | None:
-    """Detect a runaway loop of identical tool calls within the CURRENT run.
+) -> tuple[str, int, str] | None:
+    """Count trailing identical tool calls within the CURRENT run.
 
     Direct Chat places multiple Runs on one Thread, so thread history can
     end with another run's identical calls — those must not count. Only
@@ -460,8 +460,10 @@ def _trailing_identical_success_loop(
     second gate. Platform-generated async-poll proposals repeat the same
     poll_call_id every polling cycle and must not masquerade as a model
     loop, so they are excluded from the signature table. Returns
-    (tool_name, count) once the trailing in-run calls repeat the same tool
-    with the same arguments ``threshold`` times; otherwise None.
+    (tool_name, count, last_tool_call_id) once the trailing in-run calls
+    repeat the same tool with the same arguments at least ``threshold``
+    times; otherwise None. Shared by the hard breaker (threshold 5) and
+    the soft reminder (threshold 3).
     """
     if not isinstance(ledger, Mapping):
         ledger = {}
@@ -499,7 +501,8 @@ def _trailing_identical_success_loop(
     if len(tail) < threshold:
         return None
     last = tail[-1]
-    signature = call_info.get(str(last.get("tool_call_id") or ""))
+    last_call_id = str(last.get("tool_call_id") or "")
+    signature = call_info.get(last_call_id)
     if signature is None:
         return None
     count = 0
@@ -509,7 +512,81 @@ def _trailing_identical_success_loop(
         count += 1
     if count < threshold:
         return None
-    return signature[0], count
+    return signature[0], count, last_call_id
+
+
+def _trailing_identical_success_loop(
+    thread_messages: Sequence[JsonObject],
+    ledger: Mapping[str, JsonObject] | None,
+    *,
+    current_run_id: str | None = None,
+    threshold: int = _SUCCESS_LOOP_THRESHOLD,
+    window: int = _SUCCESS_LOOP_WINDOW,
+) -> tuple[str, int] | None:
+    """Hard breaker: a runaway loop of identical tool calls within the current run.
+
+    Returns (tool_name, count) once the trailing in-run calls repeat the same
+    tool with the same arguments ``threshold`` times; otherwise None.
+    """
+    signal = _trailing_identical_calls(
+        thread_messages,
+        ledger,
+        current_run_id=current_run_id,
+        threshold=threshold,
+        window=window,
+    )
+    if signal is None:
+        return None
+    tool_name, count, _ = signal
+    return tool_name, count
+
+
+# L2 soft reminder: fires at 3 identical trailing calls, before the hard
+# breaker's 5. Pure prompt guidance — no termination, no execution changes.
+_SOFT_LOOP_THRESHOLD = 3
+
+
+def _soft_loop_reminder(
+    thread_messages: Sequence[JsonObject],
+    ledger: Mapping[str, JsonObject] | None,
+    *,
+    current_run_id: str | None = None,
+    threshold: int = _SOFT_LOOP_THRESHOLD,
+) -> tuple[str, str, int] | None:
+    """Detect a 3-identical-call run and return (tool_name, status, count).
+
+    ``status`` is the execution-ledger status of the last trailing call
+    ("failed" versus anything else) so the reminder wording matches the
+    real outcome — the state channel cannot distinguish success/failure.
+    """
+    signal = _trailing_identical_calls(
+        thread_messages,
+        ledger,
+        current_run_id=current_run_id,
+        threshold=threshold,
+    )
+    if signal is None:
+        return None
+    tool_name, count, last_call_id = signal
+    entry = ledger.get(last_call_id) if isinstance(ledger, Mapping) else None
+    status = entry.get("status") if isinstance(entry, dict) else None
+    return tool_name, str(status) if isinstance(status, str) else "", count
+
+
+def _soft_loop_reminder_message(signal: tuple[str, str, int]) -> LLMMessage:
+    """Imperative, outcome-accurate reminder; no conditional escape clause."""
+    tool_name, status, count = signal
+    if status == "failed":
+        content = (
+            f"注意：你已连续 {count} 次以完全相同的参数调用工具 {tool_name} 且均执行失败。"
+            "停止重试，如实向用户报告失败原因与已有结果，等待进一步指示。"
+        )
+    else:
+        content = (
+            f"注意：你已连续 {count} 次以完全相同的参数调用工具 {tool_name} 且均已执行。"
+            "停止重复调用，直接基于已有结果输出最终回复。"
+        )
+    return LLMMessage(role="user", content=content)
 
 
 def _estimate_tokens(value: object) -> int:
@@ -1659,6 +1736,17 @@ class RuntimeModelStepService:
                 f"工具 {tool_name} 已连续执行 {count} 次（参数完全相同）且没有其他进展，"
                 "判定为重复执行死循环，已停止本轮运行。如需再次执行，请发送新的消息。",
             )
+        # L2 soft reminder: fires at 3 identical trailing calls (before the
+        # hard breaker's 5). Pure prompt guidance appended absolutely last —
+        # no termination, no execution-path changes.
+        try:
+            soft_loop = _soft_loop_reminder(
+                runtime_messages_as_json(state),
+                ledger,
+                current_run_id=context.run_id,
+            )
+        except (TypeError, ValueError):
+            soft_loop = None  # malformed checkpoint: let the context builder report it
         initial_build = await self._context_builder.build(
             state,
             context,
@@ -1748,6 +1836,12 @@ class RuntimeModelStepService:
                 else None
             ),
         )
+        if soft_loop is not None and confirmation_instruction is None:
+            # Absolutely-last position so the reminder is not overridden by
+            # the final control message's recency advantage. Skipped while a
+            # group confirmation is pending: that protocol must keep its
+            # highest-priority position.
+            messages.append(_soft_loop_reminder_message(soft_loop))
         if not model.supports_vision:
             return messages
         try:

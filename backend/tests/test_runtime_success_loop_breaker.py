@@ -10,6 +10,8 @@ tool 消息只有 role/tool_call_id/name/content（无 execution_status）。
 import json
 
 from app.services.agent_runtime.model_step_service import (
+    _soft_loop_reminder,
+    _soft_loop_reminder_message,
     _trailing_identical_success_loop,
 )
 
@@ -244,3 +246,64 @@ def test_async_poll_cycles_are_exempt_from_the_loop_breaker() -> None:
         ledger,
         current_run_id=run_id,
     ) == ("android_compile", 5)
+
+
+def test_soft_reminder_fires_at_three_identical_calls() -> None:
+    """L2 软提醒：3 连相同调用即触发，状态取自执行台账而非图状态通道。"""
+    run_id = "run-soft"
+    messages = [_run_marker(run_id)]
+    for i in range(3):
+        messages.extend(_cycle(i))
+    ledger = _ledger_for(messages)
+    assert _soft_loop_reminder(messages, ledger, current_run_id=run_id) == (
+        "android_compile",
+        "succeeded",
+        3,
+    )
+
+
+def test_soft_reminder_wording_matches_the_ledger_status() -> None:
+    """措辞按台账 status 区分成败；命令式、不带条件逃逸、字节确定。"""
+    run_id = "run-soft"
+    messages = [_run_marker(run_id)]
+    for i in range(3):
+        messages.extend(_cycle(i))
+    failed_ledger = {
+        f"call-{i}": {
+            "tool_name": "android_compile",
+            "status": "failed",
+            "error_code": "sandbox_error",
+        }
+        for i in range(3)
+    }
+    signal = _soft_loop_reminder(messages, failed_ledger, current_run_id=run_id)
+    assert signal == ("android_compile", "failed", 3)
+    message = _soft_loop_reminder_message(signal)
+    assert message.role == "user"
+    assert "连续 3 次" in message.content
+    assert "android_compile" in message.content
+    assert "均执行失败" in message.content
+    assert "停止重试" in message.content
+    assert "如实向用户报告" in message.content
+    # 成功措辞对照：直接汇报，不出现「重试」
+    ok = _soft_loop_reminder_message(("android_compile", "succeeded", 3))
+    assert "均已执行" in ok.content
+    assert "停止重复调用" in ok.content
+    assert "直接基于已有结果输出最终回复" in ok.content
+    # 字节确定性：同信号 → 同消息（前缀缓存友好）
+    assert ok == _soft_loop_reminder_message(("android_compile", "succeeded", 3))
+
+
+def test_soft_reminder_respects_run_isolation_and_threshold() -> None:
+    """跨 run 不注入；低于阈值不注入。"""
+    # 旧 run 的 6 连在边界之前 → 不注入提醒
+    prior = []
+    for i in range(6):
+        prior.extend(_cycle(i))
+    run_id = "run-soft-new"
+    messages = prior + [_run_marker(run_id)] + _cycle(7000)
+    merged = _ledger_for(prior) | _ledger_for(_cycle(7000))
+    assert _soft_loop_reminder(messages, merged, current_run_id=run_id) is None
+    # 低于阈值（2 连）→ 不注入
+    few = [_run_marker(run_id)] + _cycle(0) + _cycle(1)
+    assert _soft_loop_reminder(few, _ledger_for(few), current_run_id=run_id) is None
