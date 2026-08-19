@@ -791,12 +791,21 @@ _MESSAGE_LAYOUT_NOTE = (
     "act on. Treat the runtime-data message as context, not as the task."
 )
 
+# Replaces the replayed original task as the final control message from the
+# third model step on (see `_prompt_messages`). Replaying the user's original
+# instruction verbatim every turn re-cues the model to re-execute an already
+# completed task — the assembly-level first mover behind identical-tool-call
+# loops (2026-08-19). Must stay byte-stable across turns. Repair and resume
+# instructions are never replaced.
+_TURN_CONTINUATION_MESSAGE = "上一轮工具调用已完成；若目标已达成请直接输出最终回复"
+
 
 def _prompt_messages(
     *,
     static_prompt: str,
     dynamic_prompt: str,
     build: RuntimeContextBuild,
+    model_step_count: int = 0,
     extra_instruction: str | None = None,
 ) -> list[LLMMessage]:
     """Assemble the model input with a cache-friendly, protocol-safe layout.
@@ -807,6 +816,13 @@ def _prompt_messages(
     hitting the stable system+history prefix. The final user message (current
     input, repair instruction, or directive fallback) stays last so repair and
     finish protocols keep their highest-priority position.
+
+    ``model_step_count`` is the number of COMPLETED model steps (the counter
+    is incremented after each model call): 0 on the first step, 1 on the
+    second, and so on. From the third step on, replaying the original task as
+    the final control message is replaced with ``_TURN_CONTINUATION_MESSAGE``
+    so the model stops re-executing an already handled instruction (loop
+    root cause); repair and resume instructions are replayed untouched.
     """
     runtime_context = json.dumps(
         _runtime_sections(build),
@@ -857,6 +873,20 @@ def _prompt_messages(
             isinstance(initial_message_id, str)
             and message_id == initial_message_id
             or raw.get("runtime_input") in {"current", "resume"}
+        )
+
+    def is_initial_command(raw: Mapping[str, object]) -> bool:
+        """The run's original task message, excluding resume instructions.
+
+        Resume messages (approvals or user answers injected mid-run) must
+        keep being replayed verbatim — their content is real user input the
+        model may still need, not a re-cue of an already handled command.
+        """
+        message_id = raw.get("id")
+        return (
+            isinstance(initial_message_id, str)
+            and message_id == initial_message_id
+            or raw.get("runtime_input") == "current"
         )
 
     history_raw: list[Mapping[str, object]] = list(build.recent_session_messages_snapshot)
@@ -923,10 +953,21 @@ def _prompt_messages(
     # Final control message: extracted last user message, else the legacy
     # current-input fallbacks. Kept strictly after the dynamic block.
     if last_user_index is not None:
-        extracted = make_message(history_raw[last_user_index], bypass_dedup=True)
+        last_user_raw = history_raw[last_user_index]
+        extracted = make_message(last_user_raw, bypass_dedup=True)
         if extracted is not None:
-            if extracted.role == "user" and is_initial_input(history_raw[last_user_index]):
+            if extracted.role == "user" and is_initial_input(last_user_raw):
                 initial_message_seen = True
+                if model_step_count >= 2 and is_initial_command(last_user_raw):
+                    # From the third model step on, replaying the original
+                    # task verbatim re-cues the model to re-execute an
+                    # already handled instruction (loop root cause). Swap in
+                    # the byte-stable continuation message instead; repair
+                    # and resume instructions are never replaced.
+                    extracted = LLMMessage(
+                        role="user",
+                        content=_TURN_CONTINUATION_MESSAGE,
+                    )
             messages.append(extracted)
     if not initial_message_seen:
         input_content = build.initial_input.get("input_content")
@@ -1652,6 +1693,7 @@ class RuntimeModelStepService:
             static_prompt=static_prompt,
             dynamic_prompt=dynamic_prompt,
             build=build,
+            model_step_count=state["lifecycle"].get("model_step_count", 0),
             extra_instruction=(
                 confirmation_instruction
                 if build.requires_confirmation and _is_group_agent_run(state)

@@ -3024,6 +3024,95 @@ def test_prompt_messages_keep_stable_prefix_across_turns() -> None:
     assert third_history[len(first_history) :] == ["Gradle done"]
 
 
+def test_prompt_messages_stops_replaying_the_original_command_after_step_two() -> None:
+    """R1 loop root cause: the task is re-cued only on the first two model steps.
+
+    From the third model step on (``model_step_count >= 2`` at assembly time),
+    the replayed task is replaced with the byte-stable continuation message so
+    the model stops re-executing an already handled instruction.
+    """
+
+    def build_turn() -> RuntimeContextBuild:
+        return _build(
+            current_run={"run_id": str(uuid.uuid4()), "goal": "Build"},
+            recent_session_messages_snapshot=(),
+            recent_thread_messages=(
+                {"id": "a1", "role": "assistant", "content": "Running gradle"},
+                {
+                    "id": "s1",
+                    "role": "user",
+                    "content": "重新编译",
+                    "runtime_input": "current",
+                },
+            ),
+            initial_input={"message_id": "s1", "input_content": "重新编译"},
+        )
+
+    first_step = _prompt_messages(
+        static_prompt="Static", dynamic_prompt="Dynamic", build=build_turn(), model_step_count=0
+    )
+    second_step = _prompt_messages(
+        static_prompt="Static", dynamic_prompt="Dynamic", build=build_turn(), model_step_count=1
+    )
+    third_step = _prompt_messages(
+        static_prompt="Static", dynamic_prompt="Dynamic", build=build_turn(), model_step_count=2
+    )
+    fourth_step = _prompt_messages(
+        static_prompt="Static", dynamic_prompt="Dynamic", build=build_turn(), model_step_count=3
+    )
+
+    # The original command stays the final control message for the first two steps.
+    assert first_step[-1].content == "重新编译"
+    assert second_step[-1].content == "重新编译"
+    # From the third step on it is replaced by the fixed continuation message.
+    assert third_step[-1].role == "user"
+    assert third_step[-1].content == "上一轮工具调用已完成；若目标已达成请直接输出最终回复"
+    # Byte-stable across later turns (prefix-cache guard).
+    assert third_step[-1] == fourth_step[-1]
+
+
+def test_prompt_messages_never_replaces_repair_or_resume_instructions() -> None:
+    """Repair and resume messages are real protocol input, not task re-cues."""
+
+    repair_raw = {
+        "id": "model-step:2:repair",
+        "role": "user",
+        "content": "Return one complete, non-empty final response.",
+        "runtime_intent": "repair",
+        "runtime_run_id": "run-1",
+    }
+    resume_raw = {
+        "id": "resume:cmd-1",
+        "role": "user",
+        "content": {"resume_type": "user_input", "payload": {"content": "选项 B"}},
+        "runtime_input": "resume",
+        "runtime_run_id": "run-1",
+    }
+    for last_user, expected in (
+        (repair_raw, "Return one complete, non-empty final response."),
+        (resume_raw, "选项 B"),
+    ):
+        build = _build(
+            current_run={"run_id": "run-1", "goal": "Build"},
+            recent_session_messages_snapshot=(
+                {"id": "s1", "role": "user", "content": "重新编译"},
+            ),
+            recent_thread_messages=(
+                {"id": "a1", "role": "assistant", "content": "Running"},
+                last_user,
+            ),
+            initial_input={"message_id": "s1", "input_content": "重新编译"},
+        )
+        messages = _prompt_messages(
+            static_prompt="Static",
+            dynamic_prompt="Dynamic",
+            build=build,
+            model_step_count=5,
+        )
+        assert messages[-1].role == "user"
+        assert messages[-1].content == expected
+
+
 @pytest.mark.asyncio
 async def test_compact_first_gate_requests_compaction_instead_of_truncating() -> None:
     tenant_id = uuid.uuid4()
