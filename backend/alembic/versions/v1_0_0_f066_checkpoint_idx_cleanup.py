@@ -27,6 +27,7 @@ Downgrade:
 """
 from typing import Sequence, Union
 
+import sqlalchemy as sa
 from alembic import op
 
 # revision identifiers, used by Alembic.
@@ -59,7 +60,15 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    # The checkpoint tables only exist after the LangGraph bootstrap step
+    # (setup_langgraph_checkpoints), so on fresh environments they may be
+    # absent when this downgrade runs — skip the index rebuild then.
+    bind = op.get_bind()
+    inspector = sa.inspect(bind)
+    existing_tables = set(inspector.get_table_names(schema="langgraph_checkpoint"))
     for schema, index_name, table, column in _REDUNDANT_THREAD_INDEXES:
+        if table not in existing_tables:
+            continue
         op.execute(
             f'CREATE INDEX IF NOT EXISTS "{index_name}" ON "{schema}"."{table}" ("{column}")'
         )

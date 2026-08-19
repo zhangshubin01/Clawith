@@ -130,7 +130,7 @@ def upgrade() -> None:
         UPDATE chat_messages
         SET tenant_id = chat_sessions.tenant_id
         FROM chat_sessions
-        WHERE chat_messages.conversation_id = chat_sessions.id::text AND chat_messages.tenant_id IS NULL;
+        WHERE chat_messages.conversation_id::text = chat_sessions.id::text AND chat_messages.tenant_id IS NULL;
         """
     )
 

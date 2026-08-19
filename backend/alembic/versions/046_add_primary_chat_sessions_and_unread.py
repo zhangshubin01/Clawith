@@ -68,7 +68,7 @@ def upgrade() -> None:
                 ) AS rn
             FROM chat_sessions cs
             LEFT JOIN message_stats ms
-                ON ms.conversation_id = cs.id::text
+                ON ms.conversation_id::text = cs.id::text
             WHERE cs.source_channel = 'web'
               AND COALESCE(cs.is_group, false) = false
         )

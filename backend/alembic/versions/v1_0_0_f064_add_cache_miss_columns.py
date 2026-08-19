@@ -26,22 +26,35 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
-    op.add_column(
-        "agents",
-        sa.Column("cache_miss_tokens_today", sa.Integer(), nullable=False, server_default="0"),
-    )
-    op.add_column(
-        "agents",
-        sa.Column("cache_miss_tokens_month", sa.Integer(), nullable=False, server_default="0"),
-    )
-    op.add_column(
-        "agents",
-        sa.Column("cache_miss_tokens_total", sa.Integer(), nullable=False, server_default="0"),
-    )
-    op.add_column(
-        "daily_token_usage",
-        sa.Column("cache_miss_tokens", sa.Integer(), nullable=False, server_default="0"),
-    )
+    # Idempotent guards: fresh deployments get these columns from
+    # 001_initial_schema (Base.metadata.create_all with the current model), so
+    # bare add_column calls made `alembic upgrade head` fail there with
+    # DuplicateColumnError. Legacy databases lack the columns and the guarded
+    # adds below apply exactly as before.
+    bind = op.get_bind()
+    inspector = sa.inspect(bind)
+    agent_columns = {col["name"] for col in inspector.get_columns("agents")}
+    if "cache_miss_tokens_today" not in agent_columns:
+        op.add_column(
+            "agents",
+            sa.Column("cache_miss_tokens_today", sa.Integer(), nullable=False, server_default="0"),
+        )
+    if "cache_miss_tokens_month" not in agent_columns:
+        op.add_column(
+            "agents",
+            sa.Column("cache_miss_tokens_month", sa.Integer(), nullable=False, server_default="0"),
+        )
+    if "cache_miss_tokens_total" not in agent_columns:
+        op.add_column(
+            "agents",
+            sa.Column("cache_miss_tokens_total", sa.Integer(), nullable=False, server_default="0"),
+        )
+    daily_columns = {col["name"] for col in inspector.get_columns("daily_token_usage")}
+    if "cache_miss_tokens" not in daily_columns:
+        op.add_column(
+            "daily_token_usage",
+            sa.Column("cache_miss_tokens", sa.Integer(), nullable=False, server_default="0"),
+        )
 
 
 def downgrade() -> None:

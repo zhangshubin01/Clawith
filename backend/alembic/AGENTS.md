@@ -67,6 +67,15 @@ uv run alembic merge heads -m "merge_feature_branches"
 ## 3. Idempotency & Safety Guards
 
 - **Idempotence**: Guard new column/table additions against cases where the table already exists.
+- **Column/constraint additions MUST carry inspector existence guards**: `001_initial_schema` creates every table from the CURRENT model (`Base.metadata.create_all`), so on fresh environments any `add_column`/`create_index`/`create_unique_constraint` whose object already exists in the model fails `upgrade head` (DuplicateColumnError / duplicate index). Pattern (see f060/f061/f064):
+  ```python
+  bind = op.get_bind()
+  inspector = sa.inspect(bind)
+  columns = {c["name"] for c in inspector.get_columns("table")}
+  if "col" not in columns:
+      op.add_column(...)
+  ```
+  The same guard applies to `ALTER COLUMN TYPE` migrations whose model type may already match, and to SQL inside migrations that compares a model-typed column with another table's value — cast to `::text` on both sides so legacy (varchar) and fresh (uuid) databases both work.
 - **Rollback Symmetry**: Every `upgrade()` migration MUST have a corresponding, functional `downgrade()` implementation for rollback capability.
 - **No Unindexed Large Table Locks**: Avoid adding unindexed foreign keys or columns blocking concurrent runtime queries on large product tables.
 

@@ -32,15 +32,31 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
+    # Idempotent guards: on fresh deployments 001_initial_schema creates all
+    # tables from the CURRENT model (Base.metadata.create_all), so
+    # enterprise_info already carries tenant_id + the composite unique
+    # constraint by the time this migration runs — the old bare add_column /
+    # drop_constraint calls made `alembic upgrade head` fail on any new
+    # environment (DuplicateColumnError / constraint does not exist).
+    # On legacy databases the columns/constraints are missing and the guarded
+    # operations below apply exactly as before.
+    bind = op.get_bind()
+    inspector = sa.inspect(bind)
+
     # 1. Add tenant_id column with default uuid generator or nullable first if populated
-    op.add_column("enterprise_info", sa.Column("tenant_id", postgresql.UUID(as_uuid=True), nullable=True))
-    op.create_index(op.f("ix_enterprise_info_tenant_id"), "enterprise_info", ["tenant_id"], unique=False)
+    columns = {col["name"] for col in inspector.get_columns("enterprise_info")}
+    if "tenant_id" not in columns:
+        op.add_column("enterprise_info", sa.Column("tenant_id", postgresql.UUID(as_uuid=True), nullable=True))
+        op.create_index(op.f("ix_enterprise_info_tenant_id"), "enterprise_info", ["tenant_id"], unique=False)
 
     # 2. Drop legacy single info_type unique constraint
-    op.drop_constraint("enterprise_info_info_type_key", "enterprise_info", type_="unique")
+    unique_constraints = {uc["name"] for uc in inspector.get_unique_constraints("enterprise_info")}
+    if "enterprise_info_info_type_key" in unique_constraints:
+        op.drop_constraint("enterprise_info_info_type_key", "enterprise_info", type_="unique")
 
     # 3. Create new composite unique constraint (tenant_id, info_type)
-    op.create_unique_constraint("uq_enterprise_info_tenant_type", "enterprise_info", ["tenant_id", "info_type"])
+    if "uq_enterprise_info_tenant_type" not in unique_constraints:
+        op.create_unique_constraint("uq_enterprise_info_tenant_type", "enterprise_info", ["tenant_id", "info_type"])
 
 
 def downgrade() -> None:
