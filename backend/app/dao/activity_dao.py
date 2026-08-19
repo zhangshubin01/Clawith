@@ -80,7 +80,7 @@ class ActivityDAO(BaseDAO[AgentActivityLog]):
                     .group_by(ChatMessage.conversation_id)
                 )
                 session_stats = {
-                    conv_id: (cnt, last_at)
+                    str(conv_id): (cnt, last_at)
                     for conv_id, cnt, last_at in session_stats_result.all()
                 }
                 session_last_ranked = (
@@ -102,7 +102,9 @@ class ActivityDAO(BaseDAO[AgentActivityLog]):
                         session_last_ranked.c.rn == 1
                     )
                 )
-                session_last_contents = dict(session_last_result.all())
+                session_last_contents = {
+                    str(conv_id): content for conv_id, content in session_last_result.all()
+                }
 
             for session_id, sess_agent_id, peer_agent_id, partner_name in agent_session_rows:
                 partner_id = peer_agent_id if sess_agent_id == agent_id else sess_agent_id

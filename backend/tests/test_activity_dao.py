@@ -167,6 +167,30 @@ async def test_agent_conversation_summary_output_contract(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
+async def test_uuid_typed_conversation_ids_still_match(monkeypatch) -> None:
+    """Regression: after f068 the conversation_id column is uuid, so the
+    batched stats/last-message rows carry Python UUID objects. The dict keys
+    must be normalized to str or every agent session shows 0 messages."""
+    agent = _agent_id()
+    peer = _agent_id()
+    session_id = uuid.uuid4()
+    last_at = _now()
+    fake = _make_session(
+        session_rows=[SessionRow(session_id, agent, peer, "伙伴")],
+        stats=[(session_id, 27, last_at)],
+        last_rows=[(session_id, "第 27 条")],
+    )
+    _inject(monkeypatch, fake)
+
+    summaries = await ActivityDAO().list_conversation_summaries(agent_id=agent)
+
+    entry = next(c for c in summaries if c["partner_type"] == "agent")
+    assert entry["message_count"] == 27
+    assert entry["last_message"] == "第 27 条"
+    assert entry["last_at"] == last_at.isoformat()
+
+
+@pytest.mark.asyncio
 async def test_agent_session_without_messages_uses_defaults(monkeypatch) -> None:
     agent = _agent_id()
     session_id = uuid.uuid4()
