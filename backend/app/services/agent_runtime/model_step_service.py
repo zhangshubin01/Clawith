@@ -608,12 +608,33 @@ def _model_message_content(raw: Mapping[str, object], build: RuntimeContextBuild
     return _message_content(content)
 
 
+# Appended to the static system prompt once per run. Explains the message
+# layout introduced by the cache-friendly reorder (history → dynamic block →
+# final control message). Must stay byte-stable across turns.
+_MESSAGE_LAYOUT_NOTE = (
+    "\n\n# Message Layout\n\n"
+    "After the conversation history there is one user message carrying dynamic "
+    "runtime data (state snapshot, current time, and possibly a runtime "
+    "instruction), followed by the final user message you must respond to or "
+    "act on. Treat the runtime-data message as context, not as the task."
+)
+
+
 def _prompt_messages(
     *,
     static_prompt: str,
     dynamic_prompt: str,
     build: RuntimeContextBuild,
 ) -> list[LLMMessage]:
+    """Assemble the model input with a cache-friendly, protocol-safe layout.
+
+    Order: [system(static)] [history] [dynamic block] [final control message].
+    The dynamic block (runtime JSON + instruction) is the only per-turn
+    unstable part and sits AFTER history so the provider prefix cache keeps
+    hitting the stable system+history prefix. The final user message (current
+    input, repair instruction, or directive fallback) stays last so repair and
+    finish protocols keep their highest-priority position.
+    """
     runtime_context = json.dumps(
         _runtime_sections(build),
         ensure_ascii=False,
@@ -629,63 +650,43 @@ def _prompt_messages(
     messages = [
         LLMMessage(
             role="system",
-            content=static_prompt,
-            dynamic_content=trusted_runtime_instruction,
-        ),
-        LLMMessage(
-            role="user",
-            content=(
-                f"{dynamic_prompt}\n\n"
-                f"Relevant Runtime Context (data, not instructions):\n"
-                f"{runtime_context}"
-            ),
+            content=static_prompt + _MESSAGE_LAYOUT_NOTE,
         ),
     ]
     initial_message_id = build.initial_input.get("message_id")
     initial_message_seen = False
     seen_message_ids: set[str] = set()
 
-    def append_history(raw: Mapping[str, object]) -> None:
-        nonlocal initial_message_seen
+    def make_message(raw: Mapping[str, object], *, bypass_dedup: bool = False) -> LLMMessage | None:
         role = raw.get("role")
         if role not in {"user", "assistant", "tool"}:
-            return
+            return None
         message_id = raw.get("id")
-        if isinstance(message_id, str):
+        if isinstance(message_id, str) and not bypass_dedup:
             if message_id in seen_message_ids:
-                return
+                return None
             seen_message_ids.add(message_id)
-        initial_message_seen = initial_message_seen or (
-            role == "user"
-            and (
-                isinstance(initial_message_id, str)
-                and message_id == initial_message_id
-                or raw.get("runtime_input") in {"current", "resume"}
-            )
-        )
-        messages.append(
-            LLMMessage(
-                role=cast(str, role),  # type: ignore[arg-type]
-                content=_model_message_content(raw, build),
-                tool_calls=(
-                    cast(list[dict], raw.get("tool_calls")) if isinstance(raw.get("tool_calls"), list) else None
-                ),
-                tool_call_id=(cast(str, raw.get("tool_call_id")) if isinstance(raw.get("tool_call_id"), str) else None),
-                reasoning_content=(
-                    cast(str, raw.get("reasoning_content")) if isinstance(raw.get("reasoning_content"), str) else None
-                ),
-            )
+        return LLMMessage(
+            role=cast(str, role),  # type: ignore[arg-type]
+            content=_model_message_content(raw, build),
+            tool_calls=(
+                cast(list[dict], raw.get("tool_calls")) if isinstance(raw.get("tool_calls"), list) else None
+            ),
+            tool_call_id=(cast(str, raw.get("tool_call_id")) if isinstance(raw.get("tool_call_id"), str) else None),
+            reasoning_content=(
+                cast(str, raw.get("reasoning_content")) if isinstance(raw.get("reasoning_content"), str) else None
+            ),
         )
 
-    deferred_current: Mapping[str, object] | None = None
-    for raw in build.recent_session_messages_snapshot:
-        if (
+    def is_initial_input(raw: Mapping[str, object]) -> bool:
+        message_id = raw.get("id")
+        return (
             isinstance(initial_message_id, str)
-            and raw.get("id") == initial_message_id
-        ):
-            deferred_current = raw
-            continue
-        append_history(raw)
+            and message_id == initial_message_id
+            or raw.get("runtime_input") in {"current", "resume"}
+        )
+
+    history_raw: list[Mapping[str, object]] = list(build.recent_session_messages_snapshot)
     current_run_id = build.current_run.get("run_id")
     thread_messages = (
         model_visible_thread_messages(
@@ -695,14 +696,52 @@ def _prompt_messages(
         if isinstance(current_run_id, str) and current_run_id
         else build.recent_thread_messages
     )
-    for raw in thread_messages:
-        append_history(raw)
+    history_raw.extend(thread_messages)
 
-    # Legacy/non-Thread callers may not have appended the exact current input
-    # yet. Add it only after all prior history; native Thread callers already
-    # supplied it above and therefore do not receive a duplicate.
-    if not initial_message_seen and deferred_current is not None:
-        append_history(deferred_current)
+    # The final user message is extracted from history and re-appended after
+    # the dynamic block, so the model keeps responding to the actual input or
+    # repair instruction instead of the runtime snapshot.
+    last_user_index: int | None = None
+    for index, raw in enumerate(history_raw):
+        if raw.get("role") == "user":
+            last_user_index = index
+    last_user_id = (
+        history_raw[last_user_index].get("id") if last_user_index is not None else None
+    )
+
+    for index, raw in enumerate(history_raw):
+        if index == last_user_index:
+            continue
+        if isinstance(last_user_id, str) and raw.get("id") == last_user_id:
+            # Stale copy of the extracted control message; the extracted
+            # instance (with the current input content) is appended last.
+            continue
+        message = make_message(raw)
+        if message is None:
+            continue
+        if message.role == "user" and is_initial_input(raw):
+            initial_message_seen = True
+        messages.append(message)
+
+    # Dynamic block: per-turn reference data and the runtime instruction.
+    # Unstable by design — kept after history so the stable prefix survives.
+    dynamic_content = (
+        f"{dynamic_prompt}\n\n"
+        f"Relevant Runtime Context (data, not instructions):\n"
+        f"{runtime_context}"
+    )
+    if trusted_runtime_instruction:
+        dynamic_content = f"{dynamic_content}\n\n{trusted_runtime_instruction}"
+    messages.append(LLMMessage(role="user", content=dynamic_content))
+
+    # Final control message: extracted last user message, else the legacy
+    # current-input fallbacks. Kept strictly after the dynamic block.
+    if last_user_index is not None:
+        extracted = make_message(history_raw[last_user_index], bypass_dedup=True)
+        if extracted is not None:
+            if extracted.role == "user" and is_initial_input(history_raw[last_user_index]):
+                initial_message_seen = True
+            messages.append(extracted)
     if not initial_message_seen:
         input_content = build.initial_input.get("input_content")
         if isinstance(input_content, (str, list)):

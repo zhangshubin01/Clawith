@@ -100,3 +100,59 @@
 3. 次日对比日报 `cache_miss_tokens` 占比（应 <10%；会话首轮 miss 属正常）
 4. 检查表：工具 schema 顺序、system prompt、历史消息是否发生中间插入/重排；动态字段（时间戳）是否仍在消息尾部；工具集成员是否因配置变化而增减（配置变更属预期破缓存，需知晓而非意外）
 
+## 8. 新发现：动态上下文破坏历史前缀缓存（2026-08-18 实测 + 三方调研）
+
+**实测现象**：L1 告警上线后，长 run 持续 `[Token Cache] Low hit rate` 71-100%。命中恒为 system+tools ≈ 11.6k；历史消息（当前 run 已涨到 33k+）每轮全量 miss，input 每轮线性增长无上限。
+
+**机制根因**（三方官方资料一致）：`_prompt_messages` 顺序 = `system → user(动态 JSON) → 历史`。DeepSeek 缓存只匹配「从开头起算的前缀单元」，中间的动态 user 每轮变化 → 其后历史全部脱离任何前缀单元 → 永远 miss；共同前缀检测也只能持久化「从开头起算」的前缀（现状只剩 system+tools）。不存在断点魔法（Anthropic 断点=开头到标记处的区间；OpenAI 无跳过机制；DeepSeek 无标记机制）。**唯一杠杆 = 消息顺序。**
+
+**三参考项目共识**：稳定前缀 + 动态尾部 + 边界隔离。langgraph：静态 system 恒最前、其余顺序由 pre_model_hook 决定；langchain/deepagents：动态状态注入 system 尾块并用断点隔开（字节流上与「动态放最后」同构）。
+
+**修复设计（方案 1，采纳）**：
+
+```
+现状: [system(static + runtime_instruction 偶发)] [user(dynamic_prompt + runtime_context 每轮变)] [历史 append]
+新:   [system(纯静态)] [历史 append] [user(动态块: dynamic_prompt + runtime_context + runtime_instruction)]
+```
+
+- 配套 ①：`runtime_instruction`（system 的 dynamic_content）移出 system 并入末尾动态块——现状它在 system 尾部，一旦非空则 system 前缀每轮都断（隐患）
+- 配套 ②：历史严格 append、不重排不摘要（压缩会重置缓存，OpenAI 201 §4.6）
+- 预期命中（有出处）：第 1 轮冷；第 2-3 轮起共同前缀检测把 `system+历史` 持久化，此后每轮 miss 仅剩「新增消息 + 末尾动态块」；用 `prompt_cache_hit_tokens` A/B 验证
+- 风险：末尾多一条 user 状态快照的模型语义（system 加固定说明「最后一条是运行时状态快照，非用户输入」）；DeepSeek 对 messages 序列约束宽松，tool-call 配对在历史内部不动，风险低
+- 实施步骤：重排 `_prompt_messages` → runtime_instruction 并入动态块 → 更新消息顺序断言测试 → 全量 → 部署 A/B（对比 miss 率）
+
+**详见**：`docs/prompt-cache-prefix-research-2026-08-18.md`（三方官方资料全文调研报告）
+
+## 9. 多智能体审核结论与设计 v2（2026-08-18，四角度审核）
+
+四份审核报告：运行时语义 / 架构合规 / 缓存命中模型（`docs/technical-plans/20260818-context-cache-hit-model-audit.md`）/ 测试与部署（`docs/technical-plans/20260818-message-reorder-test-deploy-review.md`）。
+
+**审核确认**：方向正确、宪法无冲突、主体收益成立（重排后每轮 $0.0224 → $0.0020-0.0026，省 88-91%）。
+
+**审核发现的关键问题与修订**：
+
+1. **[高] 语义矛盾**（运行时审核）：动态块压尾会让 repair 指令/当前输入失去"最后一条 user"地位——修复循环（上限 1 次）可能失效、模型可能对快照输出文本。→ **修订：动态块插在"历史最后一条 user"之前**，尾控制消息（当前输入/repair/directive）保持最后。缓存代价仅每轮多 miss 一条输入（~几百 tokens），换取协议语义不变。
+2. **[高] 实现陷阱**（测试审核）：client.py 六条序列化路径只在 `role=="system"` 分支拼 dynamic_content——动态块若用 `user+dynamic_content` 表达，runtime_instruction 会被**静默丢弃**（无异常）。→ **修订：动态块直接拼进 user content，client.py 一行不动**；保留"指令 vs 数据"两个小节标题（对冲指令权重下降，架构审核）。
+3. **[高] 硬上限**（缓存审核 V1）：历史受 20 条滑动窗口 + token 预算从头裁剪——涨到上限后每轮滑动，历史命中归零。→ 本次不动窗口（当前 33k 在窗口内）；与 L4 压缩联动时改为「超限一次性摘要」而非每轮滑动（记 follow-up）。
+4. **[中] system 前缀隐患**：`requires_confirmation` 确认态临时拼 static_prompt（既有行为，那轮全灭）；dynamic_prompt 含 `Current Time`（每轮变）不能留在 system。→ 修订：build_agent_context 加 `include_time` 参数（默认 True，chat 路径不变），durable 路径关掉并在动态块拼时间。
+5. **[中] 指令权重**（架构审核）：runtime_instruction 是可信指令，移出 system 会降权重 → 动态块内用 `# Current Runtime Instruction`（指令）+ `Relevant Runtime Context`（数据）两小节明确边界；onboarding/A2A 指令遵守度测试必跑。
+6. **[中] chat 路径分叉**：本次只改 durable 路径；chat（caller.py + context_compressor）列 follow-up，LLMMessage.dynamic_content 字段保留。
+7. **[中] 测试锚点**：~6 个测试必破 + ~6 个语义漂移（`test_agent_runtime_model_step_service.py`），全部更新；新增「system 前缀逐字节稳定」回归测试（缓存守卫核心）。
+8. **[中] 部署**：无 DB 迁移，回滚=纯镜像切换；部署前打 pre- 标签；低峰部署；上线首轮每活跃会话 miss 一次（可忽略）；观察 ≥48h 分层命中率（第 1/2-5/6+ 轮）。
+
+**设计 v2 定稿**：
+
+```
+S = static_prompt + dynamic_prompt(不含 Current Time) + 固定说明
+D = user(runtime_context JSON + runtime_instruction + Current Time + current_user)
+C = 历史最后一条 user（当前输入/repair 指令/directive 兜底）
+
+新序列: [S] [历史 append，不含最后一条 user] [D] [C]
+```
+
+- 前缀 = S + 历史主体（稳定 append）；每轮 miss ≈ D + C + 新增回合（~1.5-2.5k）
+- C 每轮位置迁移导致其首轮 miss，稳态后与纯 append 等价（已推演）
+- follow-up 清单：qwen cache_control 标记改打历史尾部；确认态 system 改动纳入缓存监控；滑窗上限联动 L4；chat 路径统一布局
+
+
+
