@@ -318,10 +318,39 @@ _CONFIG_FAILURE_LOOP_THRESHOLD = 3
 _CONFIG_FAILURE_LOOP_WINDOW = 8
 
 
+def _current_run_messages(
+    thread_messages: Sequence[JsonObject],
+    current_run_id: str | None,
+) -> Sequence[JsonObject]:
+    """Slice the thread down to the current run's own messages.
+
+    Tool-result messages carry no ``runtime_run_id``, so run ownership is
+    inferred from the run-start boundary: every message from the current
+    run's ``runtime_input == "current"`` marker onward was appended by this
+    run. Without a marker (legacy callers) the whole thread is returned;
+    with a run id but no marker the slice is empty (never fire).
+    """
+    if current_run_id is None:
+        return thread_messages
+    current_start = next(
+        (
+            index
+            for index, message in enumerate(thread_messages)
+            if message.get("runtime_input") == "current"
+            and message.get("runtime_run_id") == current_run_id
+        ),
+        None,
+    )
+    if current_start is None:
+        return ()
+    return thread_messages[current_start:]
+
+
 def _trailing_config_failure_loop(
     thread_messages: Sequence[JsonObject],
     ledger: Mapping[str, JsonObject] | None,
     *,
+    current_run_id: str | None = None,
     threshold: int = _CONFIG_FAILURE_LOOP_THRESHOLD,
     window: int = _CONFIG_FAILURE_LOOP_WINDOW,
 ) -> tuple[str, str, int] | None:
@@ -332,15 +361,17 @@ def _trailing_config_failure_loop(
     execution ledger — agent_tool_executions rows keyed by tool_call_id,
     with status + error_code. When the last tool calls repeat the same
     tool with the same config-class error_code and all failed, the model
-    is burning turn budget on something only a human can fix. Returns
-    (tool_name, error_code, count) once the trailing run reaches
+    is burning turn budget on something only a human can fix. Only the
+    CURRENT run's messages count: Direct Chat shares one Thread across
+    runs, and a prior run's failed-loop tail must never kill the new run.
+    Returns (tool_name, error_code, count) once the trailing run reaches
     ``threshold``; otherwise None.
     """
     if not isinstance(ledger, Mapping):
         ledger = {}
     tool_messages = [
         message
-        for message in thread_messages
+        for message in _current_run_messages(thread_messages, current_run_id)
         if isinstance(message, dict) and message.get("role") == "tool"
     ]
     tail = tool_messages[-window:]
@@ -416,25 +447,34 @@ def _trailing_identical_success_loop(
     thread_messages: Sequence[JsonObject],
     ledger: Mapping[str, JsonObject] | None,
     *,
+    current_run_id: str | None = None,
     threshold: int = _SUCCESS_LOOP_THRESHOLD,
     window: int = _SUCCESS_LOOP_WINDOW,
 ) -> tuple[str, int] | None:
     """Detect a runaway loop of identical tool calls within the CURRENT run.
 
     Direct Chat places multiple Runs on one Thread, so thread history can
-    end with another run's identical calls — those must not count. The
-    execution ledger holds exactly the current run's tool_call_ids (plus
-    prior incomplete proposals); only tool messages whose tool_call_id is
-    in the ledger are considered. Returns (tool_name, count) once the
-    trailing in-run calls repeat the same tool with the same arguments
-    ``threshold`` times; otherwise None.
+    end with another run's identical calls — those must not count. Only
+    messages from the current run's start boundary onward are considered
+    (``current_run_id``); the execution ledger membership check stays as a
+    second gate. Platform-generated async-poll proposals repeat the same
+    poll_call_id every polling cycle and must not masquerade as a model
+    loop, so they are excluded from the signature table. Returns
+    (tool_name, count) once the trailing in-run calls repeat the same tool
+    with the same arguments ``threshold`` times; otherwise None.
     """
     if not isinstance(ledger, Mapping):
         ledger = {}
+    run_messages = _current_run_messages(thread_messages, current_run_id)
     # 1) assistant.tool_calls: tool_call_id -> (name, args_key)
     call_info: dict[str, tuple[str, str]] = {}
-    for message in thread_messages:
+    for message in run_messages:
         if not isinstance(message, dict) or message.get("role") != "assistant":
+            continue
+        if message.get("runtime_intent") == "async_poll":
+            # Platform polling loop, not a model decision: same call_id and
+            # arguments every cycle by design. Without a signature the poll
+            # messages can never form a detected loop.
             continue
         for tool_call in message.get("tool_calls") or []:
             if not isinstance(tool_call, dict):
@@ -450,7 +490,7 @@ def _trailing_identical_success_loop(
     # 2) 尾部工具消息：只统计本 run 台账内、连续一致的 (name, args_key)
     tool_messages = [
         message
-        for message in thread_messages
+        for message in run_messages
         if isinstance(message, dict)
         and message.get("role") == "tool"
         and str(message.get("tool_call_id") or "") in ledger
@@ -1568,7 +1608,11 @@ class RuntimeModelStepService:
         # cannot succeed through model retries — stop the loop early with an
         # actionable error instead of burning the whole turn budget.
         try:
-            loop = _trailing_config_failure_loop(runtime_messages_as_json(state), ledger)
+            loop = _trailing_config_failure_loop(
+                runtime_messages_as_json(state),
+                ledger,
+                current_run_id=context.run_id,
+            )
         except (TypeError, ValueError):
             loop = None  # malformed checkpoint: let the context builder report it
         if loop is not None:
@@ -1595,7 +1639,11 @@ class RuntimeModelStepService:
         # tool messages carry no execution_status, so the check is on
         # repetition itself, not on the outcome.
         try:
-            success_loop = _trailing_identical_success_loop(runtime_messages_as_json(state), ledger)
+            success_loop = _trailing_identical_success_loop(
+                runtime_messages_as_json(state),
+                ledger,
+                current_run_id=context.run_id,
+            )
         except (TypeError, ValueError):
             success_loop = None  # malformed checkpoint: let the context builder report it
         if success_loop is not None:

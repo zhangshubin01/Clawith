@@ -7,14 +7,14 @@ tool 消息只有 role/tool_call_id/name/content（无 execution_status）。
 上其他 run 的历史调用不得计入。
 """
 
+import json
+
 from app.services.agent_runtime.model_step_service import (
     _trailing_identical_success_loop,
 )
 
 
 def _assistant_with_call(call_id: str, name: str, arguments: dict) -> dict:
-    import json
-
     return {
         "role": "assistant",
         "content": "收到，执行：",
@@ -141,3 +141,106 @@ def test_malformed_messages_are_ignored() -> None:
     result = _trailing_identical_success_loop(messages, _ledger_for(messages))
     assert result is not None
     assert result[0] == "android_compile"
+
+
+def _run_marker(run_id: str) -> dict:
+    return {
+        "id": f"current-input-{run_id}",
+        "role": "user",
+        "content": "compile",
+        "runtime_input": "current",
+        "runtime_run_id": run_id,
+    }
+
+
+def test_prior_run_loop_does_not_kill_the_new_run_even_with_merged_ledger() -> None:
+    """H-1 隔离：旧 run 死在循环中途（16 连相同调用），其执行行已并入台账。
+
+    prior-incomplete 非空时 _load 会把旧 run 全部执行行并入台账——若检测器
+    只按台账认领消息，新 run 首步就会被旧 run 的尾部循环秒杀（7c70b3f1
+    同类误伤路径）。按 run 起点边界切片后不得触发。
+    """
+    prior_messages = []
+    for i in range(16):
+        prior_messages.extend(_cycle(i))
+    new_run_id = "run-9000"
+    messages = prior_messages + [_run_marker(new_run_id)] + _cycle(9000)
+    merged_ledger = _ledger_for(prior_messages) | _ledger_for(_cycle(9000))
+    assert (
+        _trailing_identical_success_loop(
+            messages,
+            merged_ledger,
+            current_run_id=new_run_id,
+        )
+        is None
+    )
+    # 正例对照：新 run 自己再累计到 5 连相同调用 → 正常触发。
+    for i in range(1, 5):
+        messages.extend(_cycle(9000 + i))
+    merged_ledger.update(
+        _ledger_for([m for i in range(1, 5) for m in _cycle(9000 + i)])
+    )
+    assert _trailing_identical_success_loop(
+        messages,
+        merged_ledger,
+        current_run_id=new_run_id,
+    ) == ("android_compile", 5)
+
+
+def test_async_poll_cycles_are_exempt_from_the_loop_breaker() -> None:
+    """H-2 轮询豁免：平台轮询周期每周期追加同 poll_call_id 同参数的
+    tool 消息 + runtime_intent=async_poll 的 assistant 提案，不得被当成
+    模型循环误杀（已复现 ('android_build_poll', 6) 误杀）。"""
+    run_id = "run-poll"
+
+    def poll_cycle() -> list[dict]:
+        return [
+            _tool_result("poll-call-1", name="android_build_poll"),
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "poll-call-1",
+                        "type": "function",
+                        "function": {
+                            "name": "android_build_poll",
+                            "arguments": json.dumps(
+                                {"operation_key": "op-1"}, ensure_ascii=False
+                            ),
+                        },
+                    }
+                ],
+                "runtime_intent": "async_poll",
+                "runtime_run_id": run_id,
+            },
+        ]
+
+    messages = [_run_marker(run_id)]
+    for _ in range(6):
+        messages.extend(poll_cycle())
+    ledger = {
+        "poll-call-1": {"tool_name": "android_build_poll", "status": "succeeded"},
+    }
+    assert (
+        _trailing_identical_success_loop(
+            messages,
+            ledger,
+            current_run_id=run_id,
+        )
+        is None
+    )
+    # 正例对照：轮询结束后模型自己又真循环 5 次 → 仍能触发。
+    for i in range(5):
+        messages.extend(_cycle(8000 + i))
+    ledger.update(
+        {
+            f"call-{8000 + i}": {"tool_name": "android_compile", "status": "succeeded"}
+            for i in range(5)
+        }
+    )
+    assert _trailing_identical_success_loop(
+        messages,
+        ledger,
+        current_run_id=run_id,
+    ) == ("android_compile", 5)

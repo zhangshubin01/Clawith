@@ -3307,6 +3307,65 @@ def test_trailing_config_failure_loop_ignores_non_config_and_mixed_tails() -> No
     ) is None
 
 
+def test_trailing_config_failure_loop_ignores_prior_run_failures() -> None:
+    """H-1 隔离：旧 run 的失败串（台账已并入）不得秒杀新 run 的第一步。
+
+    复现路径：prior-incomplete 非空时 _load 把旧 run 全部执行行并入台账，
+    若检测器按「tool_call_id 在台账内」认领消息，旧 run 的尾部失败串会被
+    新 run 继承并立即熔断。
+    """
+    prior = [
+        _tool_message("feishu_doc_search", "feishu_doc_search_permission_denied")
+        for _ in range(8)
+    ]
+    new_run_id = "run-new"
+    marker = {
+        "id": f"current-input-{new_run_id}",
+        "role": "user",
+        "content": "search docs",
+        "runtime_input": "current",
+        "runtime_run_id": new_run_id,
+    }
+    fresh = _tool_message("feishu_doc_search", "feishu_doc_search_permission_denied")
+    messages = [*prior, marker, fresh]
+    ledger = dict(
+        _ledger_entry(
+            m,
+            tool_name="feishu_doc_search",
+            error_code="feishu_doc_search_permission_denied",
+        )
+        for m in [*prior, fresh]
+    )
+    # 旧 run 的 8 连失败在边界之前，只有新 run 自己的 1 条 → 不触发。
+    assert (
+        _trailing_config_failure_loop(
+            messages,
+            ledger,
+            current_run_id=new_run_id,
+        )
+        is None
+    )
+    # 正例对照：新 run 自己再失败 2 次（累计 3 连）→ 正常触发。
+    more = [
+        _tool_message("feishu_doc_search", "feishu_doc_search_permission_denied")
+        for _ in range(2)
+    ]
+    messages.extend(more)
+    ledger.update(
+        _ledger_entry(
+            m,
+            tool_name="feishu_doc_search",
+            error_code="feishu_doc_search_permission_denied",
+        )
+        for m in more
+    )
+    assert _trailing_config_failure_loop(
+        messages,
+        ledger,
+        current_run_id=new_run_id,
+    ) == ("feishu_doc_search", "feishu_doc_search_permission_denied", 3)
+
+
 @pytest.mark.asyncio
 async def test_config_failure_loop_fails_run_fast_without_model_call() -> None:
     tenant_id = uuid.uuid4()
@@ -3314,8 +3373,17 @@ async def test_config_failure_loop_fails_run_fast_without_model_call() -> None:
     agent = _agent(tenant_id)
     state = _state(tenant_id, model, agent)
     # 图状态通道的真实消息形态：tool 消息没有 execution_status/error_code，
-    # 结果字段全部来自执行台账（agent_tool_executions）。
+    # 结果字段全部来自执行台账（agent_tool_executions）。消息头部带当前 run
+    # 的起点标记（runtime_input=current + runtime_run_id），与真实 checkpoint
+    # 一致——熔断器按该边界切片，只统计当前 run 的消息。
     state["messages"] = [
+        {
+            "id": f"current-input-{state['registry'].run_id}",
+            "role": "user",
+            "content": "Please inspect the file",
+            "runtime_input": "current",
+            "runtime_run_id": state["registry"].run_id,
+        },
         {"role": "assistant", "content": "retrying"},
         {"role": "tool", "tool_call_id": "call-0", "name": "feishu_doc_search", "content": "Feishu rejected."},
         {"role": "assistant", "content": "retrying"},
