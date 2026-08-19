@@ -101,11 +101,12 @@ def _state(
     run_messages: list[dict] | None = None,
     status: str = "running",
     next_route: str = "model",
+    run_id: str | None = None,
 ) -> RuntimeGraphState:
     return {
         "registry": RunRegistrySnapshot(
             tenant_id=str(uuid.uuid4()),
-            run_id=str(uuid.uuid4()),
+            run_id=run_id or str(uuid.uuid4()),
             goal="Finish the task",
             run_kind="foreground",
             source_type="chat",
@@ -282,6 +283,62 @@ async def test_semantic_thread_window_keeps_parallel_tool_exchange_whole():
     ]
     assert built.blocked is False
     assert built.omitted_tool_exchanges == ()
+
+
+@pytest.mark.asyncio
+async def test_multi_run_thread_bounds_window_at_current_run_and_summarizes_prior():
+    run_id = str(uuid.uuid4())
+    prior_run_id = str(uuid.uuid4())
+    prior_marker = {
+        "id": f"prior-input-{prior_run_id}",
+        "role": "user",
+        "content": "重新编译项目",
+        "runtime_input": "current",
+        "runtime_run_id": prior_run_id,
+    }
+    prior_compile = _assistant("prior-compile", ["call-compile"])
+    prior_compile["runtime_run_id"] = prior_run_id
+    prior_result = _tool_result("prior-result", "call-compile")
+    prior_result["result_ref"] = "artifact://app-debug-20260819-1457.apk"
+    current_marker = {
+        "id": f"current-input-{run_id}",
+        "role": "user",
+        "content": "优化这个Android项目",
+        "runtime_input": "current",
+        "runtime_run_id": run_id,
+    }
+    run_messages = [
+        prior_marker,
+        prior_compile,
+        prior_result,
+        current_marker,
+        _normal("recent-0"),
+    ]
+    snapshots = RunInputSnapshots(
+        session_context=SessionContextSnapshot.empty().to_json(),
+        session_context_version=0,
+        recent_session_messages=(),
+        related_run_summaries=(),
+        initial_input={"content": "start"},
+    )
+    builder = context_builder.ContextBuilder(
+        _SessionContextService(SessionContextPack(SessionContextSnapshot.empty(), ()))
+    )
+
+    state = _state(snapshots=snapshots, run_messages=run_messages, run_id=run_id)
+    built = await builder.build(state, _context(state))
+
+    message_ids = [message["id"] for message in built.recent_thread_messages]
+    # The prior run's directive, tool call, and result never enter the window.
+    assert f"prior-input-{prior_run_id}" not in message_ids
+    assert "prior-compile" not in message_ids
+    assert "prior-result" not in message_ids
+    # The window starts with the prior-run summary, then the current run.
+    assert message_ids[0] == f"prior-run-summary:{run_id}"
+    assert message_ids[1:] == [f"current-input-{run_id}", "recent-0"]
+    summary = built.recent_thread_messages[0]
+    assert "重新编译项目" in summary["content"]
+    assert "app-debug-20260819-1457.apk" in summary["content"]
 
 
 @pytest.mark.asyncio

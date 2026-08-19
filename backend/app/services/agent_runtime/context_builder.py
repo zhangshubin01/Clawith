@@ -44,6 +44,7 @@ from app.services.agent_runtime.tool_exchange import (
     ToolExchangeCompactionSummary,
     build_recent_tool_safe_window,
 )
+from app.services.agent_runtime.thread_visibility import bound_current_run_window
 
 if TYPE_CHECKING:
     from app.services.agent_runtime.group_context_builder import GroupContextBuilder
@@ -537,8 +538,17 @@ class ContextBuilder:
                 "invalid_thread_messages",
                 "checkpoint messages must use the LangGraph messages channel",
             ) from exc
-        selection = build_recent_tool_safe_window(
+        prior_run_summary, current_run_messages = bound_current_run_window(
             thread_messages,
+            current_run_id=context.run_id,
+        )
+        window_messages = (
+            (prior_run_summary, *current_run_messages)
+            if prior_run_summary is not None
+            else current_run_messages
+        )
+        selection = build_recent_tool_safe_window(
+            window_messages,
             tool_execution_ledger,
             target_messages=None,
             token_budget=run_message_token_budget,
