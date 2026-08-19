@@ -142,33 +142,22 @@ class ActivityDAO(BaseDAO[AgentActivityLog]):
                         }
                     )
 
-            session_stats = (
-                select(
-                    ChatMessage.conversation_id.label("conv_id"),
-                    func.count(ChatMessage.id).label("cnt"),
-                    func.max(ChatMessage.created_at).label("last_at"),
-                )
-                .group_by(ChatMessage.conversation_id)
-                .subquery()
-            )
-            session_last_ranked = (
-                select(
-                    ChatMessage.conversation_id.label("conv_id"),
-                    ChatMessage.content.label("content"),
-                    func.row_number()
-                    .over(partition_by=ChatMessage.conversation_id, order_by=ChatMessage.created_at.desc())
-                    .label("rn"),
-                ).subquery()
-            )
-            agent_session_result = await db.execute(
+            # Agent-to-agent sessions: two-step batched lookup. The previous
+            # implementation joined two *unfiltered* subqueries over all
+            # chat_messages (GROUP BY conversation_id + a window sort), which
+            # cost O(all messages) on every activity page load and degraded
+            # linearly as chat_messages grew (observed 0.77-2.59s). Sessions
+            # are few, so fetch them first, then hit the messages via the
+            # conversation_id index with an IN list — no cast, no full scan.
+            # Isolation: chat_messages carries no tenant_id; the IN list is
+            # derived from sessions already scoped to this agent (agent_id or
+            # peer_agent_id match), so the message reads cannot cross agents.
+            agent_sessions_result = await db.execute(
                 select(
                     ChatSession.id,
                     ChatSession.agent_id,
                     ChatSession.peer_agent_id,
                     Agent.name,
-                    session_stats.c.cnt,
-                    session_stats.c.last_at,
-                    session_last_ranked.c.content,
                 )
                 .outerjoin(
                     Agent,
@@ -178,28 +167,60 @@ class ActivityDAO(BaseDAO[AgentActivityLog]):
                         ChatSession.agent_id,
                     ),
                 )
-                .outerjoin(session_stats, session_stats.c.conv_id == func.cast(ChatSession.id, ChatMessage.conversation_id.type))
-                .outerjoin(
-                    session_last_ranked,
-                    and_(
-                        session_last_ranked.c.conv_id == func.cast(ChatSession.id, ChatMessage.conversation_id.type),
-                        session_last_ranked.c.rn == 1,
-                    ),
-                )
                 .where(
                     ChatSession.source_channel == "agent",
                     or_(ChatSession.agent_id == agent_id, ChatSession.peer_agent_id == agent_id),
                 )
             )
-            for session_id, sess_agent_id, peer_agent_id, partner_name, cnt, last_at, last_content in agent_session_result.all():
+            agent_session_rows = agent_sessions_result.all()
+            session_stats: dict[str, tuple[int, Any]] = {}
+            session_last_contents: dict[str, str] = {}
+            if agent_session_rows:
+                session_ids = [str(row.id) for row in agent_session_rows]
+                session_stats_result = await db.execute(
+                    select(
+                        ChatMessage.conversation_id.label("conv_id"),
+                        func.count(ChatMessage.id).label("cnt"),
+                        func.max(ChatMessage.created_at).label("last_at"),
+                    )
+                    .where(ChatMessage.conversation_id.in_(session_ids))
+                    .group_by(ChatMessage.conversation_id)
+                )
+                session_stats = {
+                    conv_id: (cnt, last_at)
+                    for conv_id, cnt, last_at in session_stats_result.all()
+                }
+                session_last_ranked = (
+                    select(
+                        ChatMessage.conversation_id.label("conv_id"),
+                        ChatMessage.content.label("content"),
+                        func.row_number()
+                        .over(
+                            partition_by=ChatMessage.conversation_id,
+                            order_by=ChatMessage.created_at.desc(),
+                        )
+                        .label("rn"),
+                    )
+                    .where(ChatMessage.conversation_id.in_(session_ids))
+                    .subquery()
+                )
+                session_last_result = await db.execute(
+                    select(session_last_ranked.c.conv_id, session_last_ranked.c.content).where(
+                        session_last_ranked.c.rn == 1
+                    )
+                )
+                session_last_contents = dict(session_last_result.all())
+
+            for session_id, sess_agent_id, peer_agent_id, partner_name in agent_session_rows:
                 partner_id = peer_agent_id if sess_agent_id == agent_id else sess_agent_id
+                cnt, last_at = session_stats.get(str(session_id), (0, None))
                 conversations.append(
                     {
                         "conv_id": str(session_id),
                         "partner_type": "agent",
                         "partner_id": str(partner_id),
                         "partner_name": f"🤖 {partner_name or '未知数字员工'}",
-                        "last_message": (last_content or "")[:80],
+                        "last_message": (session_last_contents.get(str(session_id), "") or "")[:80],
                         "message_count": cnt or 0,
                         "last_at": last_at.isoformat() if last_at else None,
                     }
