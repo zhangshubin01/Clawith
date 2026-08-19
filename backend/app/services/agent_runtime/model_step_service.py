@@ -414,18 +414,23 @@ def _tool_call_signature(tool_call: JsonObject) -> tuple[str, str]:
 
 def _trailing_identical_success_loop(
     thread_messages: Sequence[JsonObject],
+    ledger: Mapping[str, JsonObject] | None,
     *,
     threshold: int = _SUCCESS_LOOP_THRESHOLD,
     window: int = _SUCCESS_LOOP_WINDOW,
 ) -> tuple[str, int] | None:
-    """Detect a runaway loop of identical tool calls (regardless of outcome).
+    """Detect a runaway loop of identical tool calls within the CURRENT run.
 
-    When the trailing tool exchanges repeat the same tool with the same
-    arguments, the model is re-running the same operation forever instead
-    of finishing the turn (e.g. recompiling a project that already builds).
-    Returns (tool_name, count) once the trailing run reaches ``threshold``;
-    otherwise None.
+    Direct Chat places multiple Runs on one Thread, so thread history can
+    end with another run's identical calls — those must not count. The
+    execution ledger holds exactly the current run's tool_call_ids (plus
+    prior incomplete proposals); only tool messages whose tool_call_id is
+    in the ledger are considered. Returns (tool_name, count) once the
+    trailing in-run calls repeat the same tool with the same arguments
+    ``threshold`` times; otherwise None.
     """
+    if not isinstance(ledger, Mapping):
+        ledger = {}
     # 1) assistant.tool_calls: tool_call_id -> (name, args_key)
     call_info: dict[str, tuple[str, str]] = {}
     for message in thread_messages:
@@ -442,11 +447,13 @@ def _trailing_identical_success_loop(
                 continue
             call_info[call_id] = (name, args_key)
 
-    # 2) 尾部工具消息：从后往前数连续一致的 (name, args_key)
+    # 2) 尾部工具消息：只统计本 run 台账内、连续一致的 (name, args_key)
     tool_messages = [
         message
         for message in thread_messages
-        if isinstance(message, dict) and message.get("role") == "tool"
+        if isinstance(message, dict)
+        and message.get("role") == "tool"
+        and str(message.get("tool_call_id") or "") in ledger
     ]
     tail = tool_messages[-window:]
     if len(tail) < threshold:
@@ -1538,7 +1545,7 @@ class RuntimeModelStepService:
         # tool messages carry no execution_status, so the check is on
         # repetition itself, not on the outcome.
         try:
-            success_loop = _trailing_identical_success_loop(runtime_messages_as_json(state))
+            success_loop = _trailing_identical_success_loop(runtime_messages_as_json(state), ledger)
         except (TypeError, ValueError):
             success_loop = None  # malformed checkpoint: let the context builder report it
         if success_loop is not None:
