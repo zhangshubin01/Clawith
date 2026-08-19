@@ -211,6 +211,41 @@ def test_safe_env_whitelist_does_not_leak_host_secrets(monkeypatch, tmp_path: Pa
     assert "PATH" in env
 
 
+def test_safe_env_forwards_pip_index_from_config(tmp_path: Path) -> None:
+    backend = SubprocessBackend(
+        SandboxConfig(pip_index_url="http://pypi.tuna.tsinghua.edu.cn/simple")
+    )
+    env = backend._build_safe_env(tmp_path)
+
+    assert env["PIP_INDEX_URL"] == "http://pypi.tuna.tsinghua.edu.cn/simple"
+    assert env["PIP_TRUSTED_HOST"] == "pypi.tuna.tsinghua.edu.cn"
+
+
+def test_safe_env_forwards_pip_index_from_runtime_env_fallback(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("CLAWITH_PIP_INDEX_URL", "https://mirrors.example.com/simple")
+    backend = SubprocessBackend(SandboxConfig())
+    env = backend._build_safe_env(tmp_path)
+
+    assert env["PIP_INDEX_URL"] == "https://mirrors.example.com/simple"
+    assert env["PIP_TRUSTED_HOST"] == "mirrors.example.com"
+
+
+def test_safe_env_omits_pip_index_when_unset(tmp_path: Path) -> None:
+    backend = SubprocessBackend(SandboxConfig())
+    env = backend._build_safe_env(tmp_path)
+
+    assert "PIP_INDEX_URL" not in env
+    assert "PIP_TRUSTED_HOST" not in env
+
+
+def test_sandbox_config_from_dict_carries_pip_index_url() -> None:
+    config = SandboxConfig.from_dict(
+        {"pip_index_url": "http://pypi.tuna.tsinghua.edu.cn/simple"}
+    )
+
+    assert config.pip_index_url == "http://pypi.tuna.tsinghua.edu.cn/simple"
+
+
 class _EofStream:
     async def read(self, _n: int) -> bytes:
         return b""

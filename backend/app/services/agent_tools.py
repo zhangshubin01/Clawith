@@ -187,7 +187,7 @@ def _observability_text(value: object) -> str:
 # Cache tool configurations to avoid frequent DB queries
 # Key: (agent_id, tool_name), Value: (config, expiry_time)
 _tool_config_cache: dict[tuple, tuple[dict, datetime]] = {}
-_TOOL_CONFIG_CACHE_TTL_SECONDS = 60
+_TOOL_CONFIG_CACHE_TTL_SECONDS = 300
 
 # Sensitive field keys that should be encrypted/decrypted
 SENSITIVE_FIELD_KEYS = {"api_key", "private_key", "auth_code", "password", "secret", "atlassian_api_key"}
@@ -294,7 +294,7 @@ async def _get_tool_config(agent_id: Optional[uuid.UUID], tool_name: str) -> Opt
                 # Decrypt with schema awareness whether merged is empty or not —
                 # a present agent_tool row is authoritative even with no overrides.
                 merged = _decrypt_sensitive_fields(merged, config_schema)
-                logger.info(f"[ToolConfig] DB merged config for {tool_name}, agent_id={agent_id}")
+                logger.debug(f"[ToolConfig] DB merged config for {tool_name}, agent_id={agent_id}")
                 _set_cached_tool_config(agent_id, tool_name, merged)
                 return merged
 
@@ -314,7 +314,7 @@ async def _get_tool_config(agent_id: Optional[uuid.UUID], tool_name: str) -> Opt
             # tool row exists but has no config — still return it so callers
             # get a definitive answer instead of falling through to None).
             decrypted = _decrypt_sensitive_fields(merged, tool.config_schema)
-            logger.info(f"[ToolConfig] DB global config for {tool_name}")
+            logger.debug(f"[ToolConfig] DB global config for {tool_name}")
             _set_cached_tool_config(agent_id, tool_name, decrypted)
             return decrypted
 

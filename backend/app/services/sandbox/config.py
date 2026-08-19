@@ -43,6 +43,9 @@ class SandboxConfig(BaseModel):
     http_proxy: Optional[str] = None
     https_proxy: Optional[str] = None
     no_proxy: Optional[str] = None
+    # PyPI mirror used for pip installs inside the sandbox (e.g. a Tsinghua
+    # mirror); empty = default PyPI. Overrides the runtime env fallback.
+    pip_index_url: str = ""
 
     # Language mapping for API sandboxes
     # Maps our internal language names to API-specific language IDs
@@ -78,7 +81,7 @@ class SandboxConfig(BaseModel):
                 else:
                     value = default
             if key == "allow_network":
-                logger.info(f"[SandboxConfig] allow_network: raw={config.get(key)!r}, resolved={value!r}")
+                logger.debug(f"[SandboxConfig] allow_network: raw={config.get(key)!r}, resolved={value!r}")
 
             # 解密敏感字段
             if encrypt and value:
@@ -127,5 +130,6 @@ class SandboxConfig(BaseModel):
             http_proxy=get_value("http_proxy", None),
             https_proxy=get_value("https_proxy", None),
             no_proxy=get_value("no_proxy", None),
+            pip_index_url=get_value("pip_index_url", ""),
         )
         return result

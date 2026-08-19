@@ -6,6 +6,7 @@ import shutil
 import signal
 import time
 from pathlib import Path
+from urllib.parse import urlparse
 
 from loguru import logger
 
@@ -82,6 +83,19 @@ class SubprocessBackend(BaseSandboxBackend):
         if no_proxy:
             env["no_proxy"] = no_proxy
             env["NO_PROXY"] = no_proxy
+        # PyPI mirror for sandbox pip installs: per-agent config first, then a
+        # runtime env fallback (CLAWITH_PIP_INDEX_URL / PIP_INDEX_URL). http
+        # mirrors also need PIP_TRUSTED_HOST, derived from the index host.
+        pip_index_url = (
+            self.config.pip_index_url
+            or os.environ.get("CLAWITH_PIP_INDEX_URL")
+            or os.environ.get("PIP_INDEX_URL")
+        )
+        if pip_index_url:
+            env["PIP_INDEX_URL"] = pip_index_url
+            host = urlparse(pip_index_url).hostname
+            if host:
+                env["PIP_TRUSTED_HOST"] = host
         return env
 
     def _bind_if_exists(self, host_path: str, guest_path: str | None = None, *, read_only: bool = True) -> list[str]:

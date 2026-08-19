@@ -49,7 +49,7 @@ def _detect_host_agent_data_root() -> str:
         dest = (m.get("Destination") or "").rstrip("/")
         if dest == "/data/agents":
             host_path = m["Source"]
-            logger.info(f"[AndroidBuild] detected host path: {host_path}")
+            logger.debug(f"[AndroidBuild] detected host path: {host_path}")
             return host_path
 
     logger.error("[AndroidBuild] /data/agents mount not found in container info")
