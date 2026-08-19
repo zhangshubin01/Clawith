@@ -119,6 +119,10 @@ class RuntimeLifecycle(TypedDict):
     error: NotRequired[JsonObject | None]
     planning: NotRequired[JsonObject | None]
     planning_attempt_count: NotRequired[int]
+    # Set when the model step routes to Thread Compact (compact-first gate).
+    # Cleared once compaction actually ran; while set, the model step falls
+    # back to budget truncation instead of requesting compact again.
+    compact_guard: NotRequired[bool]
 
 
 class RuntimeGraphState(TypedDict):

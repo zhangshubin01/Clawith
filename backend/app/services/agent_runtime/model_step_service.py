@@ -1361,7 +1361,25 @@ class RuntimeModelStepService:
             tool_schema_tokens=_estimate_tokens(tools),
             reserved_runtime_tokens=256,
             safety_margin_tokens=256,
+            compact_threshold_ratio=0.80,
         )
+        # Compact-first gate: when the uncut history already reached the
+        # compaction watermark, route to Thread Compact instead of letting the
+        # budget truncation below rewrite the cache-stable prefix every turn.
+        # The guard (set by the executor, cleared after real compaction) is the
+        # escape hatch for histories compaction cannot shrink under budget.
+        if not state["lifecycle"].get("compact_guard"):
+            history_tokens = _estimate_tokens(
+                {
+                    "thread_running_summary": initial_build.thread_running_summary,
+                    "thread_messages": model_visible_thread_messages(
+                        initial_build.recent_thread_messages,
+                        current_run_id=context.run_id,
+                    ),
+                }
+            )
+            if history_tokens >= budget.compact_threshold:
+                return ModelStepResult(intent="compact")
         build = await self._context_builder.build(
             state,
             context,

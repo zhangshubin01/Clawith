@@ -32,7 +32,7 @@ from app.services.llm.multimodal_content import parse_multimodal_content
 _TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled"})
 _WAITING_STATUSES = frozenset({"waiting_user", "waiting_external", "waiting_agent"})
 
-ModelIntent = Literal["tool_calls", "wait", "finish", "text", "error"]
+ModelIntent = Literal["tool_calls", "wait", "finish", "text", "error", "compact"]
 VerificationOutcome = Literal["pass", "repair", "fail"]
 
 
@@ -565,6 +565,10 @@ class DeterministicRuntimeNodeExecutor:
                     ],
                 }
             )
+            # Compaction ran: clear the compact-first gate. When it did NOT run
+            # (still below watermark), keep the guard so the model step falls
+            # back to budget truncation instead of looping on compact requests.
+            lifecycle.pop("compact_guard", None)
         lifecycle["next_route"] = "model"
         update["lifecycle"] = cast(RuntimeLifecycle, lifecycle)
         return update
@@ -635,6 +639,19 @@ class DeterministicRuntimeNodeExecutor:
                     "next_route": "wait",
                     "waiting_request": request,
                     "pending_tool_calls": [],
+                }
+            )
+        elif result.intent == "compact":
+            # Compact-first gate: history reached the compaction watermark, so
+            # run Thread Compact BEFORE budget truncation would rewrite the
+            # cache-stable prefix. The guard prevents an infinite loop when
+            # compaction cannot bring the history back under budget.
+            lifecycle.update(
+                {
+                    "status": "running",
+                    "next_route": "compact",
+                    "pending_tool_calls": [],
+                    "compact_guard": True,
                 }
             )
         elif result.intent == "finish":

@@ -2981,3 +2981,68 @@ def test_prompt_messages_keep_stable_prefix_across_turns() -> None:
     third_history = [m.content for m in third[1:-2]]
     assert third_history[: len(first_history)] == first_history
     assert third_history[len(first_history) :] == ["Gradle done"]
+
+
+@pytest.mark.asyncio
+async def test_compact_first_gate_requests_compaction_instead_of_truncating() -> None:
+    tenant_id = uuid.uuid4()
+    model = _model(tenant_id)
+    model.max_input_tokens = 4000
+    agent = _agent(tenant_id)
+    state = _state(tenant_id, model, agent)
+    state["messages"] = [
+        {"id": f"bulk-{i}", "role": "assistant", "content": "tool output " * 40}
+        for i in range(40)
+    ]
+    builder = _ContextBuilder(
+        _build(recent_thread_messages=tuple(state["messages"]))
+    )
+    completion = AsyncMock(
+        return_value=LLMCompletionStep(
+            content="Should not be called",
+            tool_calls=(),
+            reasoning_content=None,
+            retry_instruction=None,
+            usage=TokenUsage(total_tokens=10),
+        )
+    )
+
+    result = await _service(model, agent, builder, completion).complete_once(
+        state, _context(state)
+    )
+
+    assert result.intent == "compact"
+    completion.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_compact_first_gate_guard_falls_back_to_truncation() -> None:
+    tenant_id = uuid.uuid4()
+    model = _model(tenant_id)
+    model.max_input_tokens = 4000
+    agent = _agent(tenant_id)
+    state = _state(tenant_id, model, agent)
+    state["messages"] = [
+        {"id": f"bulk-{i}", "role": "assistant", "content": "tool output " * 40}
+        for i in range(40)
+    ]
+    state["lifecycle"]["compact_guard"] = True
+    builder = _ContextBuilder(
+        _build(recent_thread_messages=tuple(state["messages"]))
+    )
+    completion = AsyncMock(
+        return_value=LLMCompletionStep(
+            content="Proceeded with truncation.",
+            tool_calls=(),
+            reasoning_content=None,
+            retry_instruction=None,
+            usage=TokenUsage(total_tokens=10),
+        )
+    )
+
+    result = await _service(model, agent, builder, completion).complete_once(
+        state, _context(state)
+    )
+
+    assert result.intent == "finish"
+    assert completion.await_count == 1

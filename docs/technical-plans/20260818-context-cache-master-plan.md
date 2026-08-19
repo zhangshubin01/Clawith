@@ -31,11 +31,14 @@ Durable runtime 每轮重发 `system + 动态上下文 + 全量历史`，动态�
 
 - **现象**：长任务后期 input 67k、miss 59k、命中仅 8k（08-19 02:11 实测）
 - **机制**（已定位）：`context_builder.build` 每次模型调用前用 `select_recent_blocks(token_budget=effective_runtime_budget)` **从头裁剪**历史。历史超预算后，裁剪边界每轮随新增消息前移 → 前缀每轮变 → 命中归零。且裁剪发生在 model step，**先于** `_schedule_compact` 的 80% 水位检查（compact 在 tool 执行后），裁剪后 input 回落到预算内 → 水位永不触达 → **compact 摘要机制被滑窗永久短路**
-- **修复方向**（待定稿）：
-  - 方案 1：裁剪边界 run 内锚定（首次裁剪位置持久化到 checkpoint，后续轮不向前移动；超限改为强制触发 compact 摘要）
-  - 方案 2：把 compact 触发前移到 model step 前（在裁剪之前按未裁剪 token 数评估水位）
-  - 推荐：方案 1+2 组合——compact 先行（80% 水位在裁剪前评估），裁剪仅作 compact 失败兜底且边界锚定
-- **状态**：机制链已定位（node_executor.py `_schedule_compact` 752/775/921 vs model_step_service.py `_prepare_messages` 1366 的二次 build 裁剪），设计待定稿
+- **修复设计（已定稿）**：compact 前置 + 裁剪兜底防循环
+  1. `ModelIntent` 加 `"compact"`（node_executor.py:35）
+  2. model step 在二次 build（裁剪）**之前**用第一次 build（无裁剪）估算历史 token；`history_tokens >= budget.compact_threshold` 且 guard 未置位 → 返回 `intent="compact"`（不发模型调用）
+  3. node_executor：`intent == "compact"` → `next_route="compact"` + `lifecycle.compact_guard=True`；compact 节点若实际摘要（compacted=True）清 guard，否则保留 guard
+  4. guard 置位时 model step 跳过 compact 请求、走原裁剪兜底（防「摘要后仍超预算」死循环，如单条巨型工具结果）
+  5. `RuntimeLifecycle` 加 `compact_guard: NotRequired[bool]`；复用 `reaches_compact_high_watermark`（run_compactor.py:114）
+  6. compact 请求不消耗 model_step_count（路由绕过 model step 计数）
+- **状态**：设计定稿，实施中
 
 ### R2 [中] 确认态污染 system 前缀
 

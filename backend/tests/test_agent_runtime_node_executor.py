@@ -834,9 +834,7 @@ async def test_waiting_agent_resume_finishes_tail_before_returning_to_model() ->
         "tool",
         "user",
     ]
-    assert [
-        message["tool_call_id"] for message in messages if message["role"] == "tool"
-    ] == ["call-agent", "call-tail"]
+    assert [message["tool_call_id"] for message in messages if message["role"] == "tool"] == ["call-agent", "call-tail"]
     assert "delegated result" in str(messages[-1]["content"])
 
 
@@ -887,9 +885,7 @@ async def test_wait_interrupt_resumes_the_same_run_and_then_finishes() -> None:
     assert lifecycle["waiting_request"] is None
     assert "last_applied_command_ids" not in lifecycle
     messages = runtime_messages_as_json(cast(RuntimeGraphState, resumed))
-    assert messages[-1]["id"] == str(
-        uuid.uuid5(run_id, "resume:command-resume")
-    )
+    assert messages[-1]["id"] == str(uuid.uuid5(run_id, "resume:command-resume"))
     assert messages[-1]["role"] == "user"
     assert messages[-1]["content"] == "EXACT RESUME INPUT"
     assert messages[-1]["runtime_input"] == "resume"
@@ -949,9 +945,7 @@ async def test_user_resume_with_pending_tool_returns_to_tool_before_model() -> N
     assert update["lifecycle"]["next_route"] == "tool"
     assert update["lifecycle"]["pending_tool_calls"] == [pending_call]
     assert "messages" not in update
-    assert update["lifecycle"]["deferred_resume_messages"][0]["content"] == (
-        "The write did not take effect."
-    )
+    assert update["lifecycle"]["deferred_resume_messages"][0]["content"] == ("The write did not take effect.")
 
     tool_state = cast(
         RuntimeGraphState,
@@ -1205,10 +1199,7 @@ async def test_empty_output_is_repaired_once_then_fails_explicitly() -> None:
         "repair",
         "repair_draft",
     ]
-    assert sum(
-        "complete, non-empty final response" in str(message.get("content", ""))
-        for message in messages
-    ) == 1
+    assert sum("complete, non-empty final response" in str(message.get("content", "")) for message in messages) == 1
 
 
 @pytest.mark.asyncio
@@ -1408,9 +1399,24 @@ async def test_verification_repairs_are_bounded() -> None:
     assert lifecycle["reason"] == "verification_repair_limit_reached"
     assert lifecycle["verification_attempt_count"] == 2
     messages = runtime_messages_as_json(cast(RuntimeGraphState, result))
-    assert messages[-1]["id"] == str(
-        uuid.uuid5(run_id, "verification:1:repair")
-    )
+    assert messages[-1]["id"] == str(uuid.uuid5(run_id, "verification:1:repair"))
     assert messages[-1]["role"] == "user"
     assert messages[-1]["content"] == "add evidence"
     assert verifier.calls == ["first", "second"]
+
+
+@pytest.mark.asyncio
+async def test_compact_intent_routes_to_compact_and_sets_guard() -> None:
+    run_id = uuid.uuid4()
+    model = ModelService(ModelStepResult(intent="compact"))
+    executor = _executor(model)
+    state = _state(run_id)
+
+    update = await executor._model(
+        state, _context(run_id, executor, "command-1")
+    )
+
+    lifecycle = update["lifecycle"]
+    assert lifecycle["next_route"] == "compact"
+    assert lifecycle["compact_guard"] is True
+    assert lifecycle["pending_tool_calls"] == []
