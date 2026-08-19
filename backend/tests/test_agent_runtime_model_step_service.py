@@ -55,8 +55,8 @@ class _Result:
 
 
 class _DB:
-    def __init__(self, model: LLMModel, agent: Agent) -> None:
-        self.results = iter((_Result([model]), _Result([agent]), _Result()))
+    def __init__(self, model: LLMModel, agent: Agent, executions: list = None) -> None:
+        self.results = iter((_Result([model]), _Result([agent]), _Result(list(executions or []))))
 
     async def execute(self, statement):
         del statement
@@ -3062,15 +3062,32 @@ async def test_compact_first_gate_guard_falls_back_to_truncation() -> None:
 
 
 def _tool_message(name: str, code: str, *, status: str = "failed") -> dict:
+    """图状态通道里的 tool 消息形态：只有 role/tool_call_id/name/content，
+    没有 execution_status / error_code（与真实 checkpoint 一致）。"""
     return {
-        "id": str(uuid.uuid4()),
         "role": "tool",
         "tool_call_id": str(uuid.uuid4()),
         "name": name,
         "content": "Feishu rejected.",
-        "execution_status": status,
-        "error_code": code,
     }
+
+
+def _ledger_entry(
+    message: dict,
+    *,
+    tool_name: str,
+    error_code: str,
+    status: str = "failed",
+) -> tuple[str, dict]:
+    """执行台账（agent_tool_executions 行）携带结果字段，按 tool_call_id 索引。"""
+    return (
+        message["tool_call_id"],
+        {
+            "tool_name": tool_name,
+            "error_code": error_code,
+            "status": status,
+        },
+    )
 
 
 def test_trailing_config_failure_loop_detects_repeated_permission_denial() -> None:
@@ -3082,37 +3099,94 @@ def test_trailing_config_failure_loop_detects_repeated_permission_denial() -> No
         {"role": "assistant", "content": "retrying"},
         _tool_message("feishu_doc_search", "feishu_doc_search_permission_denied"),
     ]
+    tool_messages = [m for m in messages if m.get("role") == "tool"]
+    ledger = dict(
+        _ledger_entry(
+            m,
+            tool_name="feishu_doc_search",
+            error_code="feishu_doc_search_permission_denied",
+        )
+        for m in tool_messages
+    )
 
-    loop = _trailing_config_failure_loop(messages)
+    loop = _trailing_config_failure_loop(messages, ledger)
 
     assert loop == ("feishu_doc_search", "feishu_doc_search_permission_denied", 3)
 
 
 def test_trailing_config_failure_loop_ignores_non_config_and_mixed_tails() -> None:
-    # Non-config-class failure codes never trigger the breaker.
+    # 非配置类错误码不触发熔断。
+    messages = [
+        _tool_message("feishu_doc_search", "feishu_doc_search_rejected"),
+        _tool_message("feishu_doc_search", "feishu_doc_search_rejected"),
+        _tool_message("feishu_doc_search", "feishu_doc_search_rejected"),
+    ]
+    ledger = dict(
+        _ledger_entry(
+            m,
+            tool_name="feishu_doc_search",
+            error_code="feishu_doc_search_rejected",
+        )
+        for m in messages
+    )
+    assert _trailing_config_failure_loop(messages, ledger) is None
+    # 尾部出现成功执行 → 打断连续失败串。
+    messages = [
+        _tool_message("feishu_doc_search", "feishu_doc_search_permission_denied"),
+        _tool_message("feishu_doc_search", "feishu_doc_search_permission_denied"),
+        _tool_message("feishu_doc_search", "feishu_doc_search_permission_denied"),
+        _tool_message("feishu_doc_search", "feishu_doc_search_permission_denied"),
+    ]
+    ledger = dict(
+        _ledger_entry(
+            m,
+            tool_name="feishu_doc_search",
+            error_code="feishu_doc_search_permission_denied",
+        )
+        for m in messages[:3]
+    )
+    ledger[messages[3]["tool_call_id"]] = {
+        "tool_name": "feishu_doc_search",
+        "error_code": "feishu_doc_search_permission_denied",
+        "status": "succeeded",
+    }
+    assert _trailing_config_failure_loop(messages, ledger) is None
+    # 不同工具穿插 → 不构成连续串。
+    messages = [
+        _tool_message("feishu_doc_search", "feishu_doc_search_permission_denied"),
+        _tool_message("feishu_doc_search", "feishu_doc_search_permission_denied"),
+        _tool_message("feishu_calendar", "feishu_calendar_permission_denied"),
+        _tool_message("feishu_doc_search", "feishu_doc_search_permission_denied"),
+    ]
+    names = ["feishu_doc_search", "feishu_doc_search", "feishu_calendar", "feishu_doc_search"]
+    codes = [
+        "feishu_doc_search_permission_denied",
+        "feishu_doc_search_permission_denied",
+        "feishu_calendar_permission_denied",
+        "feishu_doc_search_permission_denied",
+    ]
+    ledger = dict(
+        _ledger_entry(m, tool_name=n, error_code=c) for m, n, c in zip(messages, names, codes)
+    )
+    assert _trailing_config_failure_loop(messages, ledger) is None
+    # 低于阈值。
+    messages = [
+        _tool_message("feishu_doc_search", "feishu_doc_search_permission_denied"),
+        _tool_message("feishu_doc_search", "feishu_doc_search_permission_denied"),
+    ]
+    ledger = dict(
+        _ledger_entry(
+            m,
+            tool_name="feishu_doc_search",
+            error_code="feishu_doc_search_permission_denied",
+        )
+        for m in messages
+    )
+    assert _trailing_config_failure_loop(messages, ledger) is None
+    # 台账缺失（尚未入库）→ 不误判。
     assert _trailing_config_failure_loop(
-        [_tool_message("feishu_doc_search", "feishu_doc_search_rejected")] * 3
-    ) is None
-    # A success or another tool interrupts the trailing run.
-    assert _trailing_config_failure_loop(
-        [
-            _tool_message("feishu_doc_search", "feishu_doc_search_permission_denied"),
-            _tool_message("feishu_doc_search", "feishu_doc_search_permission_denied"),
-            _tool_message("feishu_doc_search", "feishu_doc_search_permission_denied"),
-            _tool_message("feishu_doc_search", "feishu_doc_search_permission_denied", status="succeeded"),
-        ]
-    ) is None
-    assert _trailing_config_failure_loop(
-        [
-            _tool_message("feishu_doc_search", "feishu_doc_search_permission_denied"),
-            _tool_message("feishu_doc_search", "feishu_doc_search_permission_denied"),
-            _tool_message("feishu_calendar", "feishu_calendar_permission_denied"),
-            _tool_message("feishu_doc_search", "feishu_doc_search_permission_denied"),
-        ]
-    ) is None
-    # Below the threshold.
-    assert _trailing_config_failure_loop(
-        [_tool_message("feishu_doc_search", "feishu_doc_search_permission_denied")] * 2
+        [_tool_message("feishu_doc_search", "feishu_doc_search_permission_denied")] * 3,
+        {},
     ) is None
 
 
@@ -3122,38 +3196,70 @@ async def test_config_failure_loop_fails_run_fast_without_model_call() -> None:
     model = _model(tenant_id)
     agent = _agent(tenant_id)
     state = _state(tenant_id, model, agent)
+    # 图状态通道的真实消息形态：tool 消息没有 execution_status/error_code，
+    # 结果字段全部来自执行台账（agent_tool_executions）。
     state["messages"] = [
-        {
-            "id": f"tool-{i}",
-            "role": "tool",
-            "tool_call_id": f"call-{i}",
-            "name": "feishu_doc_search",
-            "content": "Feishu rejected doc_search.",
-            "execution_status": "failed",
-            "error_code": "feishu_doc_search_permission_denied",
-        }
-        if i % 2 == 0
-        else {"id": f"assist-{i}", "role": "assistant", "content": "retrying"}
-        for i in range(6)
+        {"role": "assistant", "content": "retrying"},
+        {"role": "tool", "tool_call_id": "call-0", "name": "feishu_doc_search", "content": "Feishu rejected."},
+        {"role": "assistant", "content": "retrying"},
+        {"role": "tool", "tool_call_id": "call-1", "name": "feishu_doc_search", "content": "Feishu rejected."},
+        {"role": "assistant", "content": "retrying"},
+        {"role": "tool", "tool_call_id": "call-2", "name": "feishu_doc_search", "content": "Feishu rejected."},
     ]
-    builder = _ContextBuilder(
-        _build(recent_thread_messages=tuple(state["messages"]))
-    )
-    completion = AsyncMock(
-        return_value=LLMCompletionStep(
-            content="Should not be called",
-            tool_calls=(),
-            reasoning_content=None,
-            retry_instruction=None,
-            usage=TokenUsage(total_tokens=10),
-        )
+
+    class _Exec:
+        def __init__(self, call_id: str) -> None:
+            self.tool_call_id = call_id
+            self.status = "failed"
+            self.tool_name = "feishu_doc_search"
+            self.sanitized_arguments = {}
+            self.result_metadata = {"error_code": "feishu_doc_search_permission_denied"}
+            self.assistant_message_id = f"am-{call_id}"
+            self.result_summary = "Feishu rejected."
+            self.result_ref = None
+            self.request_ref = None
+
+    executions = [_Exec("call-0"), _Exec("call-1"), _Exec("call-2")]
+
+    calls = 0
+
+    @asynccontextmanager
+    async def factory():
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            yield _DB(model, agent, executions)
+            return
+
+        class _NoFallbackDB:
+            async def execute(self, statement):
+                del statement
+                return _Result()
+
+        yield _NoFallbackDB()
+
+    service = RuntimeModelStepService(
+        session_factory=factory,
+        context_builder=_ContextBuilder(
+            _build(recent_thread_messages=tuple(state["messages"]))
+        ),
+        completion=AsyncMock(
+            return_value=LLMCompletionStep(
+                content="Should not be called",
+                tool_calls=(),
+                reasoning_content=None,
+                retry_instruction=None,
+                usage=TokenUsage(total_tokens=10),
+            )
+        ),
+        tool_provider=_tools,
+        prompt_builder=_prompt,
+        model_retry_base_delay_seconds=0,
+        model_retry_jitter_ratio=0,
     )
 
-    result = await _service(model, agent, builder, completion).complete_once(
-        state, _context(state)
-    )
+    result = await service.complete_once(state, _context(state))
 
     assert result.intent == "error"
     assert result.error["code"] == "tool_config_failure_loop"
     assert "feishu_doc_search" in result.error["message"]
-    completion.assert_not_awaited()

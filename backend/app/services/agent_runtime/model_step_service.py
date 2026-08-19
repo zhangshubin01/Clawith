@@ -320,18 +320,24 @@ _CONFIG_FAILURE_LOOP_WINDOW = 8
 
 def _trailing_config_failure_loop(
     thread_messages: Sequence[JsonObject],
+    ledger: Mapping[str, JsonObject] | None,
     *,
     threshold: int = _CONFIG_FAILURE_LOOP_THRESHOLD,
     window: int = _CONFIG_FAILURE_LOOP_WINDOW,
 ) -> tuple[str, str, int] | None:
     """Detect a runaway tool loop caused by a config-class error.
 
-    When the last tool messages repeat the same config-class failure
-    (same tool, same error_code, all failed), the model is burning turn
-    budget on something only a human can fix. Returns (tool_name,
-    error_code, count) once the trailing run reaches ``threshold``;
-    otherwise None.
+    The graph state channel's tool messages carry no outcome fields
+    (verified against a live checkpoint), so outcomes come from the
+    execution ledger — agent_tool_executions rows keyed by tool_call_id,
+    with status + error_code. When the last tool calls repeat the same
+    tool with the same config-class error_code and all failed, the model
+    is burning turn budget on something only a human can fix. Returns
+    (tool_name, error_code, count) once the trailing run reaches
+    ``threshold``; otherwise None.
     """
+    if not isinstance(ledger, Mapping):
+        ledger = {}
     tool_messages = [
         message
         for message in thread_messages
@@ -341,23 +347,29 @@ def _trailing_config_failure_loop(
     if len(tail) < threshold:
         return None
     last = tail[-1]
-    name = last.get("name")
-    code = last.get("error_code")
+    entry = ledger.get(str(last.get("tool_call_id") or ""))
+    if not isinstance(entry, dict):
+        return None
+    name = entry.get("tool_name")
+    code = entry.get("error_code")
     if (
-        not isinstance(code, str)
-        or not code
-        or not isinstance(name, str)
+        not isinstance(name, str)
         or not name
-        or last.get("execution_status") != "failed"
+        or not isinstance(code, str)
+        or not code
+        or entry.get("status") != "failed"
         or not any(marker in code for marker in _CONFIG_FAILURE_CODE_MARKERS)
     ):
         return None
     count = 0
     for message in reversed(tail):
+        e = ledger.get(str(message.get("tool_call_id") or ""))
+        if not isinstance(e, dict):
+            break
         if (
-            message.get("name") != name
-            or message.get("error_code") != code
-            or message.get("execution_status") != "failed"
+            e.get("tool_name") != name
+            or e.get("error_code") != code
+            or e.get("status") != "failed"
         ):
             break
         count += 1
@@ -589,6 +601,12 @@ def _ledger(executions: Sequence[AgentToolExecution]) -> dict[str, JsonObject]:
     result: dict[str, JsonObject] = {}
     for execution in executions:
         effect, retry_policy = _ledger_metadata(execution)
+        metadata = execution.result_metadata
+        error_code = (
+            metadata.get("error_code")
+            if isinstance(metadata, dict)
+            else None
+        )
         result[execution.tool_call_id] = {
             "status": execution.status,
             "tool_name": execution.tool_name,
@@ -599,6 +617,7 @@ def _ledger(executions: Sequence[AgentToolExecution]) -> dict[str, JsonObject]:
             "result_summary": execution.result_summary,
             "result_ref": execution.result_ref,
             "request_ref": execution.request_ref,
+            "error_code": str(error_code) if error_code else None,
         }
     return result
 
@@ -1492,7 +1511,7 @@ class RuntimeModelStepService:
         # cannot succeed through model retries — stop the loop early with an
         # actionable error instead of burning the whole turn budget.
         try:
-            loop = _trailing_config_failure_loop(runtime_messages_as_json(state))
+            loop = _trailing_config_failure_loop(runtime_messages_as_json(state), ledger)
         except (TypeError, ValueError):
             loop = None  # malformed checkpoint: let the context builder report it
         if loop is not None:
