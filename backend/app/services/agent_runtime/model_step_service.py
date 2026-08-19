@@ -353,10 +353,11 @@ def _current_run_messages(
     """Slice the thread down to the current run's own messages.
 
     Tool-result messages carry no ``runtime_run_id``, so run ownership is
-    inferred from the run-start boundary: every message from the current
-    run's ``runtime_input == "current"`` marker onward was appended by this
-    run. Without a marker (legacy callers) the whole thread is returned;
-    with a run id but no marker the slice is empty (never fire).
+    inferred from the run-start boundaries: the current run owns the
+    messages from its own ``runtime_input == "current"`` marker up to the
+    NEXT run's marker (a resumed older run must not inherit a newer run's
+    trailing calls). Without a marker (legacy callers) the whole thread is
+    returned; with a run id but no marker the slice is empty (never fire).
     """
     if current_run_id is None:
         return thread_messages
@@ -371,7 +372,16 @@ def _current_run_messages(
     )
     if current_start is None:
         return ()
-    return thread_messages[current_start:]
+    current_end = next(
+        (
+            index
+            for index in range(current_start + 1, len(thread_messages))
+            if thread_messages[index].get("runtime_input") == "current"
+            and thread_messages[index].get("runtime_run_id") != current_run_id
+        ),
+        len(thread_messages),
+    )
+    return thread_messages[current_start:current_end]
 
 
 def _trailing_config_failure_loop(
