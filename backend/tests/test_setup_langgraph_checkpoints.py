@@ -10,6 +10,42 @@ from app.config import Settings
 from app.scripts import setup_langgraph_checkpoints
 
 
+class _RecordingCursor:
+    """Fake psycopg cursor recording executed statements in order."""
+
+    def __init__(self, executed: list) -> None:
+        self.executed = executed
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *args):
+        return None
+
+    async def execute(self, statement, parameters=None):
+        self.executed.append(statement)
+
+
+class _RecordingConnection:
+    """Fake psycopg connection whose cursor records into ``executed``."""
+
+    def __init__(self, executed: list) -> None:
+        self.executed = executed
+
+    def cursor(self):
+        return _RecordingCursor(self.executed)
+
+    async def close(self):
+        self.executed.append("closed")
+
+
+def _fake_connect(executed: list):
+    async def fake_connect(*args, **kwargs):
+        return _RecordingConnection(executed)
+
+    return fake_connect
+
+
 @pytest.mark.asyncio
 async def test_setup_uses_the_pinned_saver_migration_ledger(monkeypatch) -> None:
     saver = type("Saver", (), {"setup": AsyncMock()})()
@@ -64,30 +100,10 @@ async def test_drop_redundant_thread_indexes_emits_three_idempotent_drops(
 ) -> None:
     executed = []
 
-    class Cursor:
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *args):
-            return None
-
-        async def execute(self, statement, parameters=None):
-            executed.append(statement)
-
-    class Connection:
-        def cursor(self):
-            return Cursor()
-
-        async def close(self):
-            executed.append("closed")
-
-    async def fake_connect(*args, **kwargs):
-        return Connection()
-
     monkeypatch.setattr(
         setup_langgraph_checkpoints.AsyncConnection,
         "connect",
-        fake_connect,
+        _fake_connect(executed),
     )
 
     await setup_langgraph_checkpoints.drop_redundant_thread_indexes(
@@ -108,30 +124,10 @@ async def test_ensure_checkpoint_metadata_index_emits_idempotent_gin_create(
 ) -> None:
     executed = []
 
-    class Cursor:
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *args):
-            return None
-
-        async def execute(self, statement, parameters=None):
-            executed.append(statement)
-
-    class Connection:
-        def cursor(self):
-            return Cursor()
-
-        async def close(self):
-            executed.append("closed")
-
-    async def fake_connect(*args, **kwargs):
-        return Connection()
-
     monkeypatch.setattr(
         setup_langgraph_checkpoints.AsyncConnection,
         "connect",
-        fake_connect,
+        _fake_connect(executed),
     )
 
     await setup_langgraph_checkpoints.ensure_checkpoint_metadata_index(
@@ -144,6 +140,42 @@ async def test_ensure_checkpoint_metadata_index_emits_idempotent_gin_create(
         "ON langgraph_checkpoint.checkpoints USING gin (metadata jsonb_path_ops)",
         "closed",
     ]
+
+
+def test_bootstrap_index_cleanup_matches_f066_migration() -> None:
+    """The startup mirror must drop exactly what the f066 migration drops.
+
+    Guards the dual maintenance point: the bootstrap runs after every
+    ``AsyncPostgresSaver.setup()`` (which recreates the indexes) while the
+    migration covers environments that skip the bootstrap — the two lists
+    must never drift apart.
+    """
+    import importlib.util
+
+    migration_path = (
+        Path(__file__).resolve().parents[1]
+        / "alembic"
+        / "versions"
+        / "v1_0_0_f066_checkpoint_idx_cleanup.py"
+    )
+    spec = importlib.util.spec_from_file_location(
+        "f066_checkpoint_idx_cleanup",
+        migration_path,
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    migration_targets = {
+        f"{schema}.{index_name}"
+        for schema, index_name, _table, _column in module._REDUNDANT_THREAD_INDEXES
+    }
+    bootstrap_targets = {
+        statement.split()[4]
+        for statement in setup_langgraph_checkpoints._DROP_REDUNDANT_THREAD_INDEXES
+    }
+
+    assert bootstrap_targets == migration_targets
 
 
 @pytest.mark.asyncio

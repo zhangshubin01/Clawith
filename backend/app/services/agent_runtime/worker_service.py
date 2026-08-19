@@ -416,21 +416,27 @@ class RuntimeCommandDaemon:
                     get_settings().AGENT_RUNTIME_RECURSION_LIMIT,
                 )
                 delay = self._error_delay_seconds
-                self._quiet_steps = 0
+                self._advance_backoff(None)
             except Exception:
                 logger.exception("Runtime Command Worker iteration failed")
                 delay = self._error_delay_seconds
-                self._quiet_steps = 0
+                self._advance_backoff(None)
             else:
                 delay = self._delay_after(result)
             if delay:
                 await self._wait(stop, delay)
 
-    def _delay_after(self, result: CommandWorkResult) -> float:
-        if result.status not in ("idle", "retry"):
+    def _advance_backoff(self, result: CommandWorkResult | None) -> None:
+        """Grow the quiet streak on idle/retry; any other outcome resets it."""
+        if result is not None and result.status in ("idle", "retry"):
+            self._quiet_steps += 1
+        else:
             self._quiet_steps = 0
+
+    def _delay_after(self, result: CommandWorkResult) -> float:
+        self._advance_backoff(result)
+        if result.status not in ("idle", "retry"):
             return 0.0
-        self._quiet_steps += 1
         base = self._idle_delay_seconds if result.status == "idle" else self._retry_delay_seconds
         return min(base * (2 ** (self._quiet_steps - 1)), self._max_backoff_seconds)
 

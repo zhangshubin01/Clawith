@@ -78,6 +78,23 @@ async def checkpoint_setup_lock(
         await connection.close()
 
 
+async def _execute_checkpoint_ddl(
+    statements: tuple[str, ...] | list[str],
+    settings: Settings | None = None,
+) -> None:
+    """Run idempotent checkpoint-schema DDL over one autocommit connection."""
+    connection = await AsyncConnection.connect(
+        checkpoint_database_url(settings),
+        autocommit=True,
+    )
+    try:
+        async with connection.cursor() as cursor:
+            for statement in statements:
+                await cursor.execute(statement)
+    finally:
+        await connection.close()
+
+
 async def drop_redundant_thread_indexes(settings: Settings | None = None) -> None:
     """Drop LangGraph thread_id indexes that are fully covered by each PK.
 
@@ -86,16 +103,7 @@ async def drop_redundant_thread_indexes(settings: Settings | None = None) -> Non
     Alembic migration f066 applies the same drop for environments that do not
     run this bootstrap step again.
     """
-    connection = await AsyncConnection.connect(
-        checkpoint_database_url(settings),
-        autocommit=True,
-    )
-    try:
-        async with connection.cursor() as cursor:
-            for statement in _DROP_REDUNDANT_THREAD_INDEXES:
-                await cursor.execute(statement)
-    finally:
-        await connection.close()
+    await _execute_checkpoint_ddl(_DROP_REDUNDANT_THREAD_INDEXES, settings)
 
 
 async def ensure_checkpoint_metadata_index(settings: Settings | None = None) -> None:
@@ -107,15 +115,7 @@ async def ensure_checkpoint_metadata_index(settings: Settings | None = None) -> 
     Idempotent via IF NOT EXISTS; CONCURRENTLY keeps checkpoint writes flowing
     during the first build on populated deployments.
     """
-    connection = await AsyncConnection.connect(
-        checkpoint_database_url(settings),
-        autocommit=True,
-    )
-    try:
-        async with connection.cursor() as cursor:
-            await cursor.execute(_METADATA_GIN_INDEX_DDL)
-    finally:
-        await connection.close()
+    await _execute_checkpoint_ddl([_METADATA_GIN_INDEX_DDL], settings)
 
 
 async def setup_checkpoint_tables(settings: Settings | None = None) -> None:
