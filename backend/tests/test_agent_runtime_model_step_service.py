@@ -3423,6 +3423,7 @@ async def test_config_failure_loop_fails_run_fast_without_model_call() -> None:
 
         yield _NoFallbackDB()
 
+    activity_logger = AsyncMock()
     service = RuntimeModelStepService(
         session_factory=factory,
         context_builder=_ContextBuilder(
@@ -3441,6 +3442,7 @@ async def test_config_failure_loop_fails_run_fast_without_model_call() -> None:
         prompt_builder=_prompt,
         model_retry_base_delay_seconds=0,
         model_retry_jitter_ratio=0,
+        activity_logger=activity_logger,
     )
 
     result = await service.complete_once(state, _context(state))
@@ -3448,6 +3450,16 @@ async def test_config_failure_loop_fails_run_fast_without_model_call() -> None:
     assert result.intent == "error"
     assert result.error["code"] == "tool_config_failure_loop"
     assert "feishu_doc_search" in result.error["message"]
+    # H-4：熔断事件写入 agent activity log（注入的审计器被调用）
+    activity_logger.assert_awaited_once()
+    assert (
+        activity_logger.await_args.kwargs["action_type"]
+        == "runtime_tool_config_failure_loop"
+    )
+    assert (
+        activity_logger.await_args.kwargs["detail"]["error_code"]
+        == "feishu_doc_search_permission_denied"
+    )
 
 
 @pytest.mark.asyncio
@@ -3558,3 +3570,132 @@ async def test_soft_loop_reminder_appended_absolutely_last() -> None:
     assert "停止重复调用" in messages[-1].content
     assert messages[-2].role == "user"
     assert messages[-2].content != messages[-1].content
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status", "result_summary", "expected_fragment"),
+    [
+        ("succeeded", "BUILD SUCCESSFUL", "最近一次执行结果：BUILD SUCCESSFUL。"),
+        ("failed", "BUILD FAILED", "最近一次执行失败：BUILD FAILED。"),
+    ],
+)
+async def test_success_loop_error_carries_recent_outcome_and_audits(
+    status: str,
+    result_summary: str,
+    expected_fragment: str,
+) -> None:
+    """H-3/H-4：L3 文案携带台账里的最近真实结果、引导说明变更内容，
+    并写入 agent activity log。"""
+    tenant_id = uuid.uuid4()
+    model = _model(tenant_id)
+    agent = _agent(tenant_id)
+    state = _state(tenant_id, model, agent)
+    run_id = state["registry"].run_id
+    compile_cycles: list[dict] = []
+    for i in range(5):
+        compile_cycles.append(
+            {
+                "role": "assistant",
+                "content": "compiling",
+                "tool_calls": [
+                    {
+                        "id": f"call-{i}",
+                        "type": "function",
+                        "function": {
+                            "name": "android_compile",
+                            "arguments": json.dumps({"task": "assembleDebug"}),
+                        },
+                    }
+                ],
+            }
+        )
+        compile_cycles.append(
+            {
+                "role": "tool",
+                "tool_call_id": f"call-{i}",
+                "name": "android_compile",
+                "content": result_summary,
+            }
+        )
+    state["messages"] = [
+        {
+            "id": f"current-input-{run_id}",
+            "role": "user",
+            "content": "Please inspect the file",
+            "runtime_input": "current",
+            "runtime_run_id": run_id,
+        },
+        *compile_cycles,
+    ]
+
+    class _Exec:
+        def __init__(self, call_id: str) -> None:
+            self.tool_call_id = call_id
+            self.status = status
+            self.tool_name = "android_compile"
+            self.sanitized_arguments = {}
+            self.result_metadata = {}
+            self.assistant_message_id = f"am-{call_id}"
+            self.result_summary = result_summary
+            self.result_ref = None
+            self.request_ref = None
+
+    executions = [_Exec(f"call-{i}") for i in range(5)]
+
+    calls = 0
+
+    @asynccontextmanager
+    async def factory():
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            yield _DB(model, agent, executions)
+            return
+
+        class _NoFallbackDB:
+            async def execute(self, statement):
+                del statement
+                return _Result()
+
+        yield _NoFallbackDB()
+
+    activity_logger = AsyncMock()
+    service = RuntimeModelStepService(
+        session_factory=factory,
+        context_builder=_ContextBuilder(
+            _build(recent_thread_messages=tuple(state["messages"]))
+        ),
+        completion=AsyncMock(
+            return_value=LLMCompletionStep(
+                content="Should not be called",
+                tool_calls=(),
+                reasoning_content=None,
+                retry_instruction=None,
+                usage=TokenUsage(total_tokens=10),
+            )
+        ),
+        tool_provider=_tools,
+        prompt_builder=_prompt,
+        model_retry_base_delay_seconds=0,
+        model_retry_jitter_ratio=0,
+        activity_logger=activity_logger,
+    )
+
+    result = await service.complete_once(state, _context(state))
+
+    assert result.intent == "error"
+    assert result.error["code"] == "tool_success_loop"
+    message = result.error["message"]
+    assert "android_compile" in message
+    assert expected_fragment in message
+    assert "说明这次与之前有何不同" in message
+    activity_logger.assert_awaited_once()
+    assert (
+        activity_logger.await_args.kwargs["action_type"]
+        == "runtime_tool_success_loop"
+    )
+    assert activity_logger.await_args.kwargs["detail"] == {
+        "tool_name": "android_compile",
+        "count": 5,
+    }

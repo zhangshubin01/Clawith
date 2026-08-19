@@ -23,6 +23,7 @@ from app.models.llm import LLMModel
 from app.models.group import GroupMember
 from app.models.participant import Participant
 from app.services.agent_context import build_agent_context
+from app.services.activity_logger import log_activity
 from app.services.agent_runtime.command_worker import RuntimeSessionFactory
 from app.services.agent_runtime.context_builder import (
     ContextBuildError,
@@ -304,6 +305,33 @@ def _error(code: str, message: str) -> ModelStepResult:
     return ModelStepResult(
         intent="error",
         error={"code": code, "message": message},
+    )
+
+
+async def _audit_breaker_event(
+    context: RuntimeContext,
+    activity_logger: Callable[..., Awaitable[None]],
+    *,
+    action_type: str,
+    summary: str,
+    detail: JsonObject,
+) -> None:
+    """Record a circuit-breaker event in the agent activity log (H-4).
+
+    ``activity_logger`` never raises by contract (fire-and-forget);
+    system runs without a valid agent id are skipped.
+    """
+    try:
+        agent_id = uuid.UUID(context.agent_id or "")
+        run_id = uuid.UUID(context.run_id)
+    except ValueError:
+        return
+    await activity_logger(
+        agent_id=agent_id,
+        action_type=action_type,
+        summary=summary,
+        detail=detail,
+        related_id=run_id,
     )
 
 
@@ -1426,12 +1454,14 @@ class RuntimeModelStepService:
         model_retry_max_delay_seconds: float = _DEFAULT_MODEL_RETRY_MAX_DELAY_SECONDS,
         model_retry_jitter_ratio: float = _DEFAULT_MODEL_RETRY_JITTER_RATIO,
         retry_sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        activity_logger: Callable[..., Awaitable[None]] = log_activity,
     ) -> None:
         self._session_factory = session_factory
         self._context_builder = context_builder
         self._completion = completion
         self._tool_provider = tool_provider
         self._prompt_builder = prompt_builder
+        self._activity_logger = activity_logger
         self._tool_result_store = tool_result_store or ToolResultStore(
             session_factory=session_factory
         )
@@ -1702,6 +1732,20 @@ class RuntimeModelStepService:
                 error_code,
                 count,
             )
+            await _audit_breaker_event(
+                context,
+                self._activity_logger,
+                action_type="runtime_tool_config_failure_loop",
+                summary=(
+                    f"工具 {tool_name} 配置错误连续失败 {count} 次"
+                    f"（{error_code}），运行已终止"
+                ),
+                detail={
+                    "tool_name": tool_name,
+                    "error_code": error_code,
+                    "count": count,
+                },
+            )
             return _error(
                 "tool_config_failure_loop",
                 f"工具 {tool_name} 因配置错误连续失败 {count} 次"
@@ -1716,25 +1760,49 @@ class RuntimeModelStepService:
         # tool messages carry no execution_status, so the check is on
         # repetition itself, not on the outcome.
         try:
-            success_loop = _trailing_identical_success_loop(
+            success_signal = _trailing_identical_calls(
                 runtime_messages_as_json(state),
                 ledger,
                 current_run_id=context.run_id,
+                threshold=_SUCCESS_LOOP_THRESHOLD,
             )
         except (TypeError, ValueError):
-            success_loop = None  # malformed checkpoint: let the context builder report it
-        if success_loop is not None:
-            tool_name, count = success_loop
+            success_signal = None  # malformed checkpoint: let the context builder report it
+        if success_signal is not None:
+            tool_name, count, last_call_id = success_signal
+            # H-3: carry the most recent REAL outcome (the ledger holds
+            # status/result_summary; the state channel does not) so the user
+            # message is grounded, and steer resends toward describing a
+            # substantive change instead of undifferentiated re-issuing.
+            outcome_line = ""
+            entry = ledger.get(last_call_id) if isinstance(ledger, Mapping) else None
+            if isinstance(entry, dict):
+                result_summary = entry.get("result_summary")
+                if isinstance(result_summary, str) and result_summary.strip():
+                    outcome_line = (
+                        f"最近一次执行失败：{result_summary.strip()}。"
+                        if entry.get("status") == "failed"
+                        else f"最近一次执行结果：{result_summary.strip()}。"
+                    )
             logger.warning(
                 "[RuntimeModelStep] success_loop run_id={} tool={} count={}",
                 context.run_id,
                 tool_name,
                 count,
             )
+            await _audit_breaker_event(
+                context,
+                self._activity_logger,
+                action_type="runtime_tool_success_loop",
+                summary=f"工具 {tool_name} 连续重复执行 {count} 次，运行已终止",
+                detail={"tool_name": tool_name, "count": count},
+            )
             return _error(
                 "tool_success_loop",
                 f"工具 {tool_name} 已连续执行 {count} 次（参数完全相同）且没有其他进展，"
-                "判定为重复执行死循环，已停止本轮运行。如需再次执行，请发送新的消息。",
+                f"判定为重复执行死循环，已停止本轮运行。{outcome_line}"
+                "如需再次执行，请发送新的消息，并说明这次与之前有何不同、"
+                "需要变更什么。",
             )
         # L2 soft reminder: fires at 3 identical trailing calls (before the
         # hard breaker's 5). Pure prompt guidance appended absolutely last —
