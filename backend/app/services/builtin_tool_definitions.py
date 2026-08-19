@@ -1092,7 +1092,7 @@ _BUILTIN_TOOL_SOURCE = [
             "properties": {
                 "project_path": {
                     "type": "string",
-                    "description": "Android 项目在 workspace 中的相对路径",
+                    "description": "Android 项目相对 agent 工作区根目录的路径，与 read_file/list_files 展示的路径一致（例如 workspace/my-app）。绝对路径会被拒绝。",
                 },
                 "task": {
                     "type": "string",
@@ -3906,6 +3906,54 @@ def _canonical_definition(seed: Mapping[str, Any]) -> dict[str, Any]:
         "readiness": _readiness(seed),
         "sensitive_paths": _SENSITIVE_PATHS.get(str(seed["name"]), ()),
     }
+
+
+# L1 路径契约注入：这些参数按 agent 工作区根目录解析（与 read_file/list_files 同基准）。
+# search_files.pattern 是内容正则、url 是网络地址，均不在此列；android_compile.project_path
+# 的描述已在工具定义处单独修正，故不重复注入。
+_PATH_CONVENTION_PARAMS: dict[str, tuple[str, ...]] = {
+    "list_files": ("path",),
+    "read_file": ("path",),
+    "write_file": ("path",),
+    "delete_file": ("path",),
+    "move_file": ("source_path", "destination_path"),
+    "edit_file": ("path",),
+    "search_files": ("path",),
+    "find_files": ("pattern", "path"),
+    "read_document": ("path",),
+    "convert_csv_to_xlsx": ("source_path",),
+    "convert_html_to_pdf": ("source_path",),
+    "convert_html_to_pptx": ("source_path",),
+    "convert_markdown_to_docx": ("source_path",),
+    "convert_markdown_to_pdf": ("source_path",),
+    "send_channel_file": ("file_path",),
+    "send_file_to_agent": ("file_path",),
+    "upload_image": ("file_path",),
+    "publish_page": ("path",),
+}
+
+
+def _inject_path_convention(tools: list[dict]) -> None:
+    """把统一路径契约（相对 agent 工作区根）注入到路径类参数描述尾部。"""
+    from app.services.workspace_paths import PATH_CONVENTION_TEXT
+
+    for tool in tools:
+        params = _PATH_CONVENTION_PARAMS.get(tool.get("name"))
+        if not params:
+            continue
+        schema = tool.get("parameters_schema") or {}
+        properties = schema.get("properties") or {}
+        for param_name in params:
+            param = properties.get(param_name)
+            if not param:
+                continue
+            desc = str(param.get("description") or "").rstrip()
+            if PATH_CONVENTION_TEXT in desc:
+                continue
+            param["description"] = f"{desc} {PATH_CONVENTION_TEXT}" if desc else PATH_CONVENTION_TEXT
+
+
+_inject_path_convention(_BUILTIN_TOOL_SOURCE)
 
 
 BUILTIN_TOOL_DEFINITIONS = tuple(

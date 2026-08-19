@@ -1626,6 +1626,37 @@ def _agent_workspace_root(agent_id: uuid.UUID) -> Path:
     return WORKSPACE_ROOT / str(agent_id)
 
 
+def _path_failure_details(agent_id: uuid.UUID, rel_path: str, *, label: str = "path") -> str:
+    """L2: 路径未命中时附加结构化诊断（解析路径/最深祖先/候选建议）。
+
+    模型此前拿到的是零信息错误（如 "gradlew not found"），只能脑补并空转；
+    这里让一次失败自带答案。任何异常都静默降级为无附加信息。
+    """
+    if not rel_path:
+        return ""
+    try:
+        from app.services.workspace_paths import describe_path_failure
+
+        return "\n" + describe_path_failure(_agent_workspace_root(agent_id), rel_path, label=label)
+    except Exception:
+        return ""
+
+
+def _glob_static_prefix(pattern: str) -> str:
+    """取 glob 的静态前缀：首个通配符之前截断到最后一个 '/'。
+
+    'indonesia-loan-app/gradle/**' → 'indonesia-loan-app/gradle'
+    '**/gradlew' → ''（无静态前缀）
+    """
+    cut = len(pattern)
+    for ch in "*?[{":
+        idx = pattern.find(ch)
+        if idx != -1:
+            cut = min(cut, idx)
+    prefix = pattern[:cut]
+    return prefix.rsplit("/", 1)[0] if "/" in prefix else ""
+
+
 def _non_empty_paths(*paths: str | None) -> list[str] | None:
     selected = [path for path in paths if path]
     return selected or None
@@ -2106,7 +2137,7 @@ async def _read_file_outcome(
         storage_key, normalized, _ = _tool_storage_key(agent_id, path, tenant_id)
         if not normalized or not await storage.is_file(storage_key):
             return _typed_failure(
-                f"File not found: {path}",
+                f"File not found: {path}" + _path_failure_details(agent_id, path),
                 "workspace_file_not_found",
             )
         content = await storage.read_text(
@@ -2244,7 +2275,7 @@ async def _list_files_outcome(
             )
         if not exists and not is_dir and normalized:
             return _typed_failure(
-                f"Directory not found: {path or '/'}",
+                f"Directory not found: {path or '/'}" + _path_failure_details(agent_id, path),
                 "workspace_directory_not_found",
             )
         summary = await _storage_list_dir(agent_id, path, tenant_id=tenant_id)
@@ -2289,7 +2320,7 @@ async def _search_files_outcome(
         base_key, normalized, _ = _tool_storage_key(agent_id, rel_path, tenant_id)
         if normalized and not await storage.is_dir(base_key):
             return _typed_failure(
-                f"Directory not found: {path}",
+                f"Directory not found: {path}" + _path_failure_details(agent_id, path),
                 "workspace_directory_not_found",
             )
         summary = await _storage_search_files(
@@ -2328,7 +2359,7 @@ async def _find_files_outcome(
         base_key, normalized, _ = _tool_storage_key(agent_id, rel_path, tenant_id)
         if normalized and not await storage.is_dir(base_key):
             return _typed_failure(
-                f"Directory not found: {path}",
+                f"Directory not found: {path}" + _path_failure_details(agent_id, path),
                 "workspace_directory_not_found",
             )
         summary = await _storage_find_files(
@@ -2817,8 +2848,58 @@ async def _android_compile_outcome(
     except WorkspacePathError:
         return _typed_failure("Invalid project path", "path_traversal_denied")
 
-    if not (full_path / "gradlew").exists() and not (full_path / "gradlew.bat").exists():
-        return _typed_failure("gradlew not found", "android_project_not_found")
+    # L3: 预检 + workspace/ 自动回退 + 区分「目录不存在 / 有目录没 gradlew」。
+    # 模型此前常把 project_path 写成 workspace/ 内的相对路径（缺前缀），
+    # 却只拿到一句零信息的 "gradlew not found"（见 technical-plans 20260819）。
+    resolved_path = full_path
+    preflight_note = ""
+    has_gradlew = (resolved_path / "gradlew").exists() or (resolved_path / "gradlew.bat").exists()
+
+    if not has_gradlew:
+        normalized = project_path.strip().lstrip("/")
+        fallback: Path | None = None
+        if normalized and normalized != "workspace" and not normalized.startswith("workspace/"):
+            try:
+                candidate = resolve_path_within_root(ws, f"workspace/{normalized}", label="project_path")
+            except WorkspacePathError:
+                candidate = None
+            if candidate is not None and (
+                (candidate / "gradlew").exists() or (candidate / "gradlew.bat").exists()
+            ):
+                fallback = candidate
+        if fallback is not None:
+            resolved_path = fallback
+            has_gradlew = True
+            preflight_note = (
+                f"[路径回退] project_path '{project_path}' 未命中，"
+                f"已自动按 'workspace/{normalized}' 解析（与 read_file/list_files 展示的路径一致）。"
+            )
+
+    if not has_gradlew:
+        if resolved_path.is_dir():
+            try:
+                entries = sorted(p.name for p in resolved_path.iterdir())[:10]
+            except OSError:
+                entries = []
+            entries_line = f"目录内容: {', '.join(entries)}" if entries else "目录为空。"
+            return _typed_failure(
+                f"gradlew not found: 目录 '{project_path}' 存在，但缺少 Gradle wrapper 脚本"
+                f"（gradlew 或 gradlew.bat）。标准 Android 项目需包含 gradlew 与 "
+                f"gradle/wrapper/gradle-wrapper.jar。\n{entries_line}",
+                "android_project_not_found",
+            )
+        return _typed_failure(
+            f"Android project not found: '{project_path}'"
+            + _path_failure_details(agent_id, project_path, label="project_path"),
+            "android_project_not_found",
+        )
+
+    wrapper_hint = ""
+    if not (resolved_path / "gradle" / "wrapper" / "gradle-wrapper.jar").exists():
+        wrapper_hint = (
+            "\n[wrapper 提示] gradle/wrapper/gradle-wrapper.jar 缺失；"
+            "若 gradlew 依赖 wrapper jar，构建会在容器内失败，请先补齐该文件。"
+        )
 
     # 沙箱路由：合并四层配置（builtin → DB → env）
     from app.config import get_sandbox_config
@@ -2837,8 +2918,8 @@ async def _android_compile_outcome(
             code="",
             language="bash",
             timeout=timeout,
-            work_dir=str(full_path),
-            project_path=str(full_path),
+            work_dir=str(resolved_path),
+            project_path=str(resolved_path),
             gradle_task=task,
             java_version=java_version,
             on_output=on_output,
@@ -2850,14 +2931,14 @@ async def _android_compile_outcome(
     # 结果处理
     if result.success and result.exit_code == 0:
         apk_files: list[str] = []
-        for scan_dir in [full_path / "app/build/outputs/apk",
-                          full_path / "app/build/outputs/bundle"]:
+        for scan_dir in [resolved_path / "app/build/outputs/apk",
+                          resolved_path / "app/build/outputs/bundle"]:
             if not scan_dir.is_dir():
                 continue
             try:
                 for pattern in ("*.apk", "*.aab"):
                     for f in scan_dir.rglob(pattern):
-                        apk_files.append(str(f.relative_to(full_path)))
+                        apk_files.append(str(f.relative_to(resolved_path)))
             except (OSError, PermissionError):
                 logger.warning("[AndroidBuild] scan error: {}", scan_dir)
 
@@ -2865,18 +2946,23 @@ async def _android_compile_outcome(
         if not apk_files:
             for pattern in ("*.apk", "*.aab"):
                 try:
-                    for f in full_path.rglob(f"**/build/outputs/**/{pattern}"):
-                        apk_files.append(str(f.relative_to(full_path)))
+                    for f in resolved_path.rglob(f"**/build/outputs/**/{pattern}"):
+                        apk_files.append(str(f.relative_to(resolved_path)))
                 except (OSError, PermissionError):
                     pass
 
         if apk_files:
             return _typed_success(
-                f"Android build succeeded: {task}\n\n"
-                f"产物 ({len(apk_files)} 个):\n"
+                f"Android build succeeded: {task}\n"
+                + (f"{preflight_note}\n" if preflight_note else "")
+                + f"\n产物 ({len(apk_files)} 个):\n"
                 + "\n".join(f"  - {f}" for f in apk_files)
             )
-        return _typed_success(f"Android build succeeded: {task}\n(no APK/AAB found)")
+        return _typed_success(
+            f"Android build succeeded: {task}\n"
+            + (f"{preflight_note}\n" if preflight_note else "")
+            + "(no APK/AAB found)"
+        )
 
     # 合并 stdout + stderr，结构化提取 + 智能截断
     output = (result.stdout or "") + (result.stderr or "")
@@ -2892,6 +2978,10 @@ async def _android_compile_outcome(
         duration_ms=result.duration_ms,
         gradle_task=task,
     )
+    if preflight_note:
+        formatted = preflight_note + "\n\n" + formatted
+    if wrapper_hint:
+        formatted = formatted + wrapper_hint
     return _typed_failure(
         formatted,
         "sandbox_execution_failed",
@@ -6920,7 +7010,11 @@ async def _storage_search_files(
         if len(results) >= 50:
             break
     if not results:
-        return f"No matches found for pattern '{pattern}' in {files_searched} file(s)"
+        msg = f"No matches found for pattern '{pattern}' in {files_searched} file(s)"
+        prefix = _glob_static_prefix(pattern)
+        if prefix and not (_agent_workspace_root(agent_id) / prefix).exists():
+            msg += _path_failure_details(agent_id, prefix, label="pattern base")
+        return msg
     truncated = total_matches > len(results)
     truncation_note = f" (showing first {len(results)} of {total_matches}+ — refine pattern or path for more)" if truncated else ""
     return f"🔍 Found {total_matches}+ match(es) in {files_searched} file(s) for pattern '{pattern}'{truncation_note}:\n" + "\n".join(results)
@@ -6944,7 +7038,11 @@ async def _storage_find_files(
         if fnmatch.fnmatch(rel_display, pattern) or fnmatch.fnmatch(Path(rel_display).name, pattern):
             matches.append((entry, rel_display))
     if not matches:
-        return f"No files matching pattern: {pattern}"
+        msg = f"No files matching pattern: {pattern}"
+        prefix = _glob_static_prefix(pattern)
+        if prefix and not (_agent_workspace_root(agent_id) / prefix).exists():
+            msg += _path_failure_details(agent_id, prefix, label="pattern base")
+        return msg
     results = []
     dir_count = 0
     file_count = 0

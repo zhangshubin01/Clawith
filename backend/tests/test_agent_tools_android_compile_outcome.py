@@ -19,8 +19,10 @@ class FakeAndroidBuildBackend:
     def __init__(self, *, result=None, error: Exception | None = None) -> None:
         self.result = result
         self.error = error
+        self.calls: list[dict] = []
 
     async def execute(self, **kwargs):
+        self.calls.append(kwargs)
         if self.error is not None:
             raise self.error
         return self.result
@@ -284,11 +286,12 @@ async def test_gradlew_not_found_returns_early_error(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
-    """项目目录存在但没有 gradlew → 'gradlew not found'."""
+    """项目目录存在但没有 gradlew → 独立文案 + 目录内容列表（L3 边界区分）."""
     agent_id = uuid.uuid4()
     ws_root = tmp_path / "workspace" / str(agent_id)
     ws_root.mkdir(parents=True)
     (ws_root / "my_project").mkdir(parents=True)
+    (ws_root / "my_project" / "settings.gradle.kts").write_text("// no wrapper\n")
 
     monkeypatch.setattr(agent_tools, "_agent_workspace_root", lambda _aid: ws_root)
 
@@ -305,6 +308,140 @@ async def test_gradlew_not_found_returns_early_error(
     assert outcome.error_code == "android_project_not_found"
     assert outcome.result_summary is not None
     assert "gradlew not found" in outcome.result_summary
+    assert "缺少 Gradle wrapper 脚本" in outcome.result_summary
+    assert "settings.gradle.kts" in outcome.result_summary
+
+
+@pytest.mark.asyncio
+async def test_project_dir_missing_returns_path_diagnostics(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """项目目录不存在 → 不再是裸 'gradlew not found'，附结构化路径诊断."""
+    agent_id = uuid.uuid4()
+    ws_root = tmp_path / "workspace" / str(agent_id)
+    ws_root.mkdir(parents=True)
+    (ws_root / "workspace").mkdir(parents=True)
+    (ws_root / "workspace" / "other-app").mkdir(parents=True)
+
+    monkeypatch.setattr(agent_tools, "_agent_workspace_root", lambda _aid: ws_root)
+
+    outcome = await agent_tools._android_compile_outcome(
+        agent_id, {"project_path": "ghost"}
+    )
+
+    assert outcome.status == "failed"
+    assert outcome.error_code == "android_project_not_found"
+    assert outcome.result_summary is not None
+    assert "Android project not found: 'ghost'" in outcome.result_summary
+    assert "Resolved against agent workspace root" in outcome.result_summary
+    assert "Entries under it:" in outcome.result_summary
+    assert "workspace" in outcome.result_summary
+
+
+@pytest.mark.asyncio
+async def test_unprefixed_path_falls_back_to_workspace_prefix(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """模型少传 workspace/ 前缀 → 自动回退命中 workspace/<p> 并注明（L3 核心场景）."""
+    agent_id = uuid.uuid4()
+    ws_root = tmp_path / "workspace" / str(agent_id)
+    ws_root.mkdir(parents=True)
+    project_dir = ws_root / "workspace" / "indonesia-loan-app"
+    project_dir.mkdir(parents=True)
+    (project_dir / "gradlew").write_text("#!/bin/bash\necho fake\n")
+    (project_dir / "gradlew").chmod(0o755)
+
+    monkeypatch.setattr(agent_tools, "_agent_workspace_root", lambda _aid: ws_root)
+
+    async def fake_config(_agent_id, _name):
+        return {"sandbox_type": "android-build", "max_timeout": 600}
+
+    monkeypatch.setattr(agent_tools, "_get_tool_config", fake_config)
+
+    backend = FakeAndroidBuildBackend(
+        result=ExecutionResult(success=True, stdout="BUILD SUCCESSFUL\n", stderr="", exit_code=0, duration_ms=10000)
+    )
+    install_backend(monkeypatch, backend)
+
+    outcome = await agent_tools._android_compile_outcome(
+        agent_id, {"project_path": "indonesia-loan-app"}
+    )
+
+    assert outcome.status == "succeeded"
+    assert "[路径回退]" in outcome.result_summary
+    assert backend.calls, "backend 应被执行"
+    assert backend.calls[0]["project_path"] == str(project_dir)
+    assert backend.calls[0]["work_dir"] == str(project_dir)
+
+
+@pytest.mark.asyncio
+async def test_fallback_requires_gradlew_in_workspace_candidate(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """workspace/<p> 存在但没有 gradlew → 不回退，报路径诊断并建议正确目录."""
+    agent_id = uuid.uuid4()
+    ws_root = tmp_path / "workspace" / str(agent_id)
+    ws_root.mkdir(parents=True)
+    (ws_root / "workspace" / "foo").mkdir(parents=True)
+
+    monkeypatch.setattr(agent_tools, "_agent_workspace_root", lambda _aid: ws_root)
+
+    async def fake_config(_agent_id, _name):
+        return {"sandbox_type": "android-build", "max_timeout": 600}
+
+    monkeypatch.setattr(agent_tools, "_get_tool_config", fake_config)
+
+    backend = FakeAndroidBuildBackend(
+        result=ExecutionResult(success=True, stdout="BUILD SUCCESSFUL\n", stderr="", exit_code=0, duration_ms=10000)
+    )
+    install_backend(monkeypatch, backend)
+
+    outcome = await agent_tools._android_compile_outcome(
+        agent_id, {"project_path": "foo"}
+    )
+
+    assert outcome.status == "failed"
+    assert outcome.error_code == "android_project_not_found"
+    assert "Did you mean: 'workspace/foo'?" in outcome.result_summary
+    assert not backend.calls, "不应触发构建"
+
+
+@pytest.mark.asyncio
+async def test_wrapper_jar_missing_hint_on_failure(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """gradlew 在但 wrapper jar 缺失 → 构建失败时附带补齐提示."""
+    agent_id = uuid.uuid4()
+    ws_root = tmp_path / "workspace" / str(agent_id)
+    ws_root.mkdir(parents=True)
+    project_dir = ws_root / "app"
+    project_dir.mkdir(parents=True)
+    (project_dir / "gradlew").write_text("#!/bin/bash\necho fake\n")
+    (project_dir / "gradlew").chmod(0o755)
+
+    monkeypatch.setattr(agent_tools, "_agent_workspace_root", lambda _aid: ws_root)
+
+    async def fake_config(_agent_id, _name):
+        return {"sandbox_type": "android-build", "max_timeout": 600}
+
+    monkeypatch.setattr(agent_tools, "_get_tool_config", fake_config)
+
+    backend = FakeAndroidBuildBackend(
+        result=ExecutionResult(success=False, stdout="", stderr="FAILURE: Build failed\n", exit_code=1, duration_ms=10000)
+    )
+    install_backend(monkeypatch, backend)
+
+    outcome = await agent_tools._android_compile_outcome(
+        agent_id, {"project_path": "app"}
+    )
+
+    assert outcome.status == "failed"
+    assert "[wrapper 提示]" in outcome.result_summary
+    assert "gradle-wrapper.jar" in outcome.result_summary
 
 
 @pytest.mark.asyncio
