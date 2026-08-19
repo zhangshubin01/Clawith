@@ -129,10 +129,13 @@ WHERE role IN ('user', 'assistant');
   现有覆盖需跑全。
 - 不改 schema、不动 unread 查询、不动 WS 历史加载——用户可见行为零变化。
 
-## 5. 验收指标
+## 5. 验收指标（2026-08-19 建后实测回填）
 
-- 建索引后：compactable 查询 `Rows Removed by Filter` 归零、
-  buffers 从 ~532 降到 ~60 以下（同会话实测）。
-- 全量 pytest（当前基线 2467 passed）+ arch-guard。
+- 建索引后（同会话 f23045c7 实测）：recent-window 子计划切 **Index Only Scan**；
+  外层全列查询保持 **Index Scan**（全列 SELECT 必然触堆页）但命中部分索引，
+  role 过滤浪费（此前 89% 行丢弃）归零；buffers **532 → ~120（-78%）**。
+- 外层 `Rows Removed by Filter = 20` 是 NOT IN 反连接排除最近窗口所致（语义
+  正确），不等于角色过滤浪费——"归零"仅指角色过滤行，不指反连接行。
+- 全量 pytest（当前基线 2469 passed）+ arch-guard。
 - pg_stat_statements 下一窗口复核：compactable/unread 的 max_exec_time
   不再出现数十秒级尾部（事故窗口已排除）。

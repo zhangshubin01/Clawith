@@ -369,12 +369,18 @@ class RuntimeCommandDaemon:
         self,
         worker: RuntimeCommandWorker,
         *,
-        idle_delay_seconds: float = 0.25,
+        # 10 个并发 daemon 共用 claim_next_command（SKIP LOCKED）——0.25s 空闲轮询曾
+        # 是全库第一热查询（占 pg_stat_statements 总执行时间 ~47%，而命令表稳态无
+        # pending 行）。idle 只影响"新命令入队→开始处理"的延迟；忙时 delay=0 连续
+        # 处理，吞吐不受影响。
+        idle_delay_seconds: float = 1.0,
         retry_delay_seconds: float = 0.1,
         error_delay_seconds: float = 1.0,
         # Consecutive quiet results (idle / retry) double the delay up to this
-        # ceiling; any busy outcome resets the backoff to zero. With N daemons
-        # phase-spread on SKIP LOCKED, worst-case pickup latency ≈ cap / N.
+        # ceiling; any busy outcome resets the backoff to zero. Concurrent
+        # daemons drift apart naturally (run_once durations vary under SKIP
+        # LOCKED), so expected pickup latency while quiet stays far below the
+        # ceiling without any explicit phase spread.
         max_backoff_seconds: float = 4.0,
     ) -> None:
         delays = (idle_delay_seconds, retry_delay_seconds, error_delay_seconds)

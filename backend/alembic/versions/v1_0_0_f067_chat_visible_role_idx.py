@@ -10,9 +10,11 @@ Background:
     rows it touches (EXPLAIN ANALYZE on a 242-message session: 235 rows
     removed by filter, session scanned twice by the compactable NOT-IN
     subplan). This partial index covers exactly the visible subset (~18.5%
-    of rows) and lets those scans go index-only; the planner proves the
-    implication ``role IN ('user','assistant')`` → predicate (verified live:
-    outer + subplan switch to Index Only Scan, buffer reads -79%).
+    of rows); the planner proves the implication ``role IN ('user','assistant')``
+    → predicate (verified live on a 242-message session: both sides of the
+    compactable query switch to the partial index, the role-filter waste
+    disappears, and buffer reads drop -78%; the recent-window subplan goes
+    index-only, while the full-row outer select remains an Index Scan).
 
 Scope:
     - CREATE INDEX (partial predicate, btree) only; pure DDL, no data ops.
