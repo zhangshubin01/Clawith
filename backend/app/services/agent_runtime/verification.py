@@ -45,6 +45,97 @@ def _refs(metadata: object, field: str) -> tuple[str, ...] | None:
     return tuple(str(item).strip() for item in value)
 
 
+# Conservative artifact-freshness claim detection (L3 fallback). Only binary
+# build artifacts whose sole producer emits a structured workspace:// ref are
+# considered — narrower than the generic "any path" check, to avoid flagging
+# input files or legacy text tools that do not emit artifact_refs.
+_ARTIFACT_CLAIM_SUFFIX_RE = re.compile(r"\.(apk|aab)$", re.IGNORECASE)
+_NON_FILE_REF_SCHEMES = (
+    "http://",
+    "https://",
+    "imagekit:",
+    "published-page:",
+    "tool-result:",
+)
+_TOKEN_EDGE_PUNCT = ".,;:()[]{}<>\"'*~|，。；：、（）【】"
+
+
+def _looks_like_artifact_path(token: str) -> bool:
+    if _ARTIFACT_CLAIM_SUFFIX_RE.search(token) is None:
+        return False
+    if token.startswith(_NON_FILE_REF_SCHEMES):
+        return False
+    if token.startswith("workspace://") or token.startswith("workspace/"):
+        return True
+    return "/" in token or "\\" in token
+
+
+def _artifact_path_tokens(text: str) -> list[str]:
+    tokens: list[str] = []
+    for token in text.split():
+        token = token.strip(_TOKEN_EDGE_PUNCT)
+        if not token or not _looks_like_artifact_path(token):
+            continue
+        tokens.append(token)
+    return tokens
+
+
+def _extract_artifact_claims(candidate: str) -> list[str]:
+    """Extract artifact-path claims from a finish candidate.
+
+    Backticks are turned into spaces first so both `` `path` `` and bare paths
+    are handled uniformly; only tokens that look like a produced binary file
+    path (known suffix + a path separator, or an explicit workspace scheme)
+    are returned.
+    """
+    return list(dict.fromkeys(_artifact_path_tokens(candidate.replace("`", " "))))
+
+
+def _normalize_artifact_path(raw: str) -> str | None:
+    """Normalize a claimed/ledger path to a comparable workspace-relative key."""
+    cleaned = raw.replace("\\", "/").strip()
+    if not cleaned:
+        return None
+    if cleaned.startswith("workspace://"):
+        cleaned = cleaned[len("workspace://") :]
+        if "/" not in cleaned:
+            return None
+        cleaned = cleaned.split("/", 1)[1]
+    elif cleaned.startswith("workspace/"):
+        cleaned = cleaned[len("workspace/") :]
+    elif "://" in cleaned:
+        return None
+    cleaned = cleaned.strip("/")
+    normalized = normalize_workspace_path(cleaned)
+    if not normalized:
+        return None
+    return normalized
+
+
+def _artifact_claims_not_in_ledger(
+    claims: list[str],
+    ledger_refs: list[str],
+) -> list[str]:
+    """Return claims whose workspace-relative key is absent from the ledger."""
+    ledger_keys = {
+        key
+        for ref in ledger_refs
+        if (key := _normalize_artifact_path(ref)) is not None
+    }
+    uncovered: list[str] = []
+    for claim in claims:
+        key = _normalize_artifact_path(claim)
+        if key is None:
+            continue
+        if any(
+            key == ledger_key or ledger_key.endswith("/" + key)
+            for ledger_key in ledger_keys
+        ):
+            continue
+        uncovered.append(claim)
+    return uncovered
+
+
 def _async_pending_operation(execution: AgentToolExecution) -> dict | None:
     metadata = getattr(execution, "result_metadata", None)
     if (
@@ -676,6 +767,26 @@ class ToolLedgerRuntimeVerifier:
                             "reference": reference,
                         },
                     )
+
+        uncovered = _artifact_claims_not_in_ledger(
+            _extract_artifact_claims(candidate),
+            [*artifact_refs, *evidence_refs],
+        )
+        if uncovered:
+            return VerificationResult(
+                outcome="repair",
+                reason=(
+                    "The finish candidate cites artifact paths that are absent "
+                    "from this run's tool ledger: "
+                    + ", ".join(uncovered)
+                    + ". Remove the unverified artifact references, or run the "
+                    "tool that produces each path before finishing."
+                ),
+                details={
+                    "code": "artifact_path_not_in_ledger",
+                    "paths": uncovered,
+                },
+            )
 
         return VerificationResult(
             outcome="pass",

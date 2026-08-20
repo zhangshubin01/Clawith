@@ -2858,6 +2858,29 @@ def _format_android_build_failure(
     return "\n".join(parts)
 
 
+def _android_artifact_refs(
+    agent_id: uuid.UUID,
+    workspace_root: Path,
+    project_root: Path,
+    apk_rel_paths: list[Path],
+) -> tuple[str, ...]:
+    """Map project-relative APK/AAB paths to workspace:// artifact refs.
+
+    ``apk_rel_paths`` are relative to ``project_root`` (what the summary shows);
+    the durable ref must be relative to the agent workspace root so the
+    freshness ledger (``result_metadata.artifact_refs``) can be checked against
+    it by the runtime verifier.
+    """
+    try:
+        project_rel = project_root.relative_to(workspace_root.resolve())
+    except ValueError:
+        return ()
+    return tuple(
+        _workspace_artifact_ref(agent_id, (project_rel / rel).as_posix())
+        for rel in apk_rel_paths
+    )
+
+
 async def _android_compile_outcome(
     agent_id: uuid.UUID | None,
     arguments: dict,
@@ -2963,7 +2986,7 @@ async def _android_compile_outcome(
 
     # 结果处理
     if result.success and result.exit_code == 0:
-        apk_files: list[str] = []
+        apk_files: list[Path] = []
         for scan_dir in [resolved_path / "app/build/outputs/apk",
                           resolved_path / "app/build/outputs/bundle"]:
             if not scan_dir.is_dir():
@@ -2971,7 +2994,7 @@ async def _android_compile_outcome(
             try:
                 for pattern in ("*.apk", "*.aab"):
                     for f in scan_dir.rglob(pattern):
-                        apk_files.append(str(f.relative_to(resolved_path)))
+                        apk_files.append(f.relative_to(resolved_path))
             except (OSError, PermissionError):
                 logger.warning("[AndroidBuild] scan error: {}", scan_dir)
 
@@ -2980,16 +3003,22 @@ async def _android_compile_outcome(
             for pattern in ("*.apk", "*.aab"):
                 try:
                     for f in resolved_path.rglob(f"**/build/outputs/**/{pattern}"):
-                        apk_files.append(str(f.relative_to(resolved_path)))
+                        apk_files.append(f.relative_to(resolved_path))
                 except (OSError, PermissionError):
                     pass
 
         if apk_files:
+            artifact_refs = (
+                _android_artifact_refs(agent_id, ws, resolved_path, apk_files)
+                if agent_id is not None
+                else ()
+            )
             return _typed_success(
                 f"Android build succeeded: {task}\n"
                 + (f"{preflight_note}\n" if preflight_note else "")
                 + f"\n产物 ({len(apk_files)} 个):\n"
-                + "\n".join(f"  - {f}" for f in apk_files)
+                + "\n".join(f"  - {f.as_posix()}" for f in apk_files),
+                artifact_refs=artifact_refs,
             )
         return _typed_success(
             f"Android build succeeded: {task}\n"

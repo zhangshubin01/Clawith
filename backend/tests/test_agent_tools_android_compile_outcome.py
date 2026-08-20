@@ -157,6 +157,47 @@ async def test_apk_artifacts_listed_in_summary(
 
 
 @pytest.mark.asyncio
+async def test_apk_artifacts_emitted_as_workspace_refs(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """编译成功 + APK → artifact_refs 包含 workspace:// 结构化引用（L3 前置）."""
+    agent_id = uuid.uuid4()
+    ws_root = tmp_path / "workspace" / str(agent_id)
+    ws_root.mkdir(parents=True)
+    project_dir = ws_root / "app"
+    project_dir.mkdir(parents=True)
+
+    (project_dir / "gradlew").write_text("#!/bin/bash\necho ok\n")
+    (project_dir / "gradlew").chmod(0o755)
+
+    apk_dir = project_dir / "app/build/outputs/apk/debug"
+    apk_dir.mkdir(parents=True)
+    (apk_dir / "app-debug.apk").write_text("fake apk content")
+
+    monkeypatch.setattr(agent_tools, "_agent_workspace_root", lambda _aid: ws_root)
+
+    async def fake_config(_agent_id, _name):
+        return {"sandbox_type": "android-build", "max_timeout": 600}
+
+    monkeypatch.setattr(agent_tools, "_get_tool_config", fake_config)
+
+    backend = FakeAndroidBuildBackend(
+        result=ExecutionResult(success=True, stdout="BUILD SUCCESSFUL\n", stderr="", exit_code=0, duration_ms=30000)
+    )
+    install_backend(monkeypatch, backend)
+
+    outcome = await agent_tools._android_compile_outcome(
+        agent_id, {"project_path": "app", "task": "assembleDebug"}
+    )
+
+    assert outcome.status == "succeeded"
+    assert outcome.artifact_refs == (
+        f"workspace://{agent_id}/app/app/build/outputs/apk/debug/app-debug.apk",
+    )
+
+
+@pytest.mark.asyncio
 async def test_success_no_apk_returns_no_apk_message(
     monkeypatch,
     tmp_path: Path,
