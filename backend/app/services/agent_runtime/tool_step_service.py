@@ -1206,6 +1206,8 @@ class RuntimeToolStepService:
         )
         if details is None:
             return None, None
+        path = arguments.get("path")
+        path_text = f": {path}" if isinstance(path, str) and path else ""
         try:
             async with self._session_factory() as db:
                 async with db.begin():
@@ -1220,7 +1222,7 @@ class RuntimeToolStepService:
                 ToolExecutionOutcome(
                     status="failed",
                     result_summary=(
-                        "Workspace deletion was blocked because the autonomy "
+                        "File deletion was blocked because the autonomy "
                         "policy check could not be completed."
                     ),
                     result_ref=None,
@@ -1249,7 +1251,7 @@ class RuntimeToolStepService:
                 "correlation_id": correlation_id,
                 "reason": "tool_approval_required",
                 "question": (
-                    "Workspace deletion requires approval. "
+                    f"File deletion requires approval{path_text}. "
                     f"Approval ID: {approval_id}"
                 ),
                 "tool_call_id": call_id,
@@ -1264,7 +1266,7 @@ class RuntimeToolStepService:
             return ToolExecutionOutcome(
                 status="failed",
                 result_summary=(
-                    "Workspace deletion was rejected and was not executed. "
+                    f"File deletion was rejected and was not executed{path_text}. "
                     f"Approval ID: {approval_id}"
                 ),
                 result_ref=None,
@@ -1280,7 +1282,7 @@ class RuntimeToolStepService:
                 status="failed",
                 result_summary=str(
                     decision.get("message")
-                    or "Workspace deletion was denied by the autonomy policy."
+                    or "File deletion was denied by the autonomy policy."
                 ),
                 result_ref=None,
                 error_code="tool_autonomy_denied",

@@ -1608,7 +1608,7 @@ async def test_l3_private_workspace_delete_requires_approval_before_execution(
         "correlation_id": correlation_id,
         "reason": "tool_approval_required",
         "question": (
-            "Workspace deletion requires approval. "
+            "File deletion requires approval: workspace/remove-me.md. "
             f"Approval ID: {approval_id}"
         ),
         "tool_call_id": "call-private-delete",
@@ -1733,7 +1733,7 @@ async def test_l3_private_workspace_delete_rejection_resumes_with_failed_result(
     assert result.messages[0]["execution_status"] == "failed"
     assert result.messages[0]["error_code"] == "tool_approval_rejected"
     assert result.messages[0]["content"] == (
-        "Workspace deletion was rejected and was not executed. "
+        "File deletion was rejected and was not executed: workspace/keep-me.md. "
         f"Approval ID: {approval_id}"
     )
 
@@ -1828,7 +1828,7 @@ async def test_l3_group_workspace_delete_preserves_group_scope_for_approval(
         "correlation_id": correlation_id,
         "reason": "tool_approval_required",
         "question": (
-            "Workspace deletion requires approval. "
+            "File deletion requires approval: workspace/remove-me.md. "
             f"Approval ID: {approval_id}"
         ),
         "tool_call_id": "call-group-delete",

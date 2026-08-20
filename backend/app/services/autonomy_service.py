@@ -215,10 +215,10 @@ class AutonomyService:
                         "correlation_id": runtime_resume["correlation_id"],
                         "payload": {
                             "content": (
-                                "Workspace deletion approved. Continue the "
+                                "File deletion approved. Continue the "
                                 "pending tool call."
                                 if approval.status == "approved"
-                                else "Workspace deletion rejected. Do not "
+                                else "File deletion rejected. Do not "
                                 "execute the pending tool call."
                             ),
                             "approval_id": str(approval.id),
