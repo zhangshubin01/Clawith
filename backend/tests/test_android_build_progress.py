@@ -94,6 +94,24 @@ class TestCommandInjection:
         # 保证仍在 --no-daemon --console=plain 下运行（不改变既有构建语义）
         assert "--no-daemon --console=plain" in full
 
+    @pytest.mark.asyncio
+    async def test_command_is_valid_bash(self, backend, mock_docker_client):
+        """回归：heredoc 体结束后下一行以 `&&` 开头曾是 bash 语法错误（exit 2），
+        导致 gradle 从未被执行——精确复现时才定位到（探针与真实命令结构不一致）。"""
+        import subprocess
+
+        await backend.execute(
+            code="", language="java",
+            timeout=30, work_dir="/workspace",
+            project_path="/workspace/app",
+            gradle_task="assembleDebug",
+        )
+        full = mock_docker_client.containers.last_run_kwargs["command"][2]
+        r = subprocess.run(
+            ["bash", "-n", "-c", full], capture_output=True, text=True,
+        )
+        assert r.returncode == 0, f"构建命令含 bash 语法错误: {r.stderr}"
+
 
 class TestProgressStreaming:
     """验证进度 tail 实时转发 + 静默期心跳（方案 B + C 运行时行为）。"""

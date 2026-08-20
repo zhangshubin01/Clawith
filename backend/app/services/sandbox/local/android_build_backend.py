@@ -437,7 +437,10 @@ gradle.beforeProject { project ->
                         f"&& cat > /tmp/gradle-progress.gradle << 'GRADLE_PROGRESS_EOF'\n"
                         f"{self._GRADLE_PROGRESS_INIT_SCRIPT}\n"
                         f"GRADLE_PROGRESS_EOF\n"
-                        f"&& ./gradlew --no-daemon --console=plain -I /tmp/gradle-progress.gradle {shlex.quote(str(gradle_task))} ",
+                        # heredoc 体结束后，下一行不能以 `&&` 开头——那是 bash 语法错误
+                        # （`syntax error near unexpected token '&&'`，bash -c 解析期即 exit 2，
+                        # 导致 gradle 从未被执行）。gradle 作为独立语句执行即可。
+                        f"./gradlew --no-daemon --console=plain -I /tmp/gradle-progress.gradle {shlex.quote(str(gradle_task))} ",
                     ],
                     detach=True,
                     volumes=volumes,
