@@ -207,3 +207,111 @@ class TestProgressStreaming:
             gradle_task="assembleDebug",
         )
         assert not os.path.exists(progress_file), "构建后 .gradle-progress 应被清理"
+
+
+class TestDrainQueue:
+    """验证 _drain_queue 的行对齐（换行丢失根治）与 > Task 去重（重复根治）。"""
+
+    class _ChunkedContainer:
+        """logs() 返回指定 chunk 序列的容器 mock，可模拟 chunk 在行中间切分。"""
+
+        def __init__(self, chunks: list[bytes]):
+            self.id = "chunked123"
+            self._chunks = chunks
+            self.kill_called = False
+            self.remove_called = False
+
+        def exec_run(self, *a, **k):
+            class _R:
+                exit_code = 0
+                output = b""
+            return _R()
+
+        def logs(self, *, stream=False, follow=False, stdout=True, stderr=True):
+            def _gen():
+                for c in self._chunks:
+                    yield c
+            return _gen()
+
+        def wait(self):
+            return {"StatusCode": 0}
+
+        def kill(self, **k):
+            self.kill_called = True
+
+        def remove(self, *, force=False):
+            self.remove_called = True
+
+    @pytest.mark.asyncio
+    async def test_rejoins_chunk_split_midline(self, backend, mock_docker_client, tmp_path):
+        """chunk 在行中间切分时，on_output 必须收到完整行（含换行），不粘连。"""
+        outputs: list[str] = []
+
+        async def on_output(text: str):
+            outputs.append(text)
+
+        mock_docker_client.containers.run_result = self._ChunkedContainer(
+            [b"[setup] prov", b"isioning done\n"]  # 第一行被切成两半
+        )
+
+        result = await backend.execute(
+            code="", language="java",
+            timeout=30, work_dir="/workspace",
+            project_path=str(tmp_path),
+            gradle_task="assembleDebug",
+            on_output=on_output,
+        )
+        assert result.success
+        joined = "".join(outputs)
+        assert "[setup] provisioning done\n" in joined, f"应重组为完整行: {joined!r}"
+
+    @pytest.mark.asyncio
+    async def test_filters_plain_success_task_lines(self, backend, mock_docker_client, tmp_path):
+        """纯成功 > Task 行（无附加标记）被过滤；标记行与其余日志保留。"""
+        outputs: list[str] = []
+
+        async def on_output(text: str):
+            outputs.append(text)
+
+        mock_docker_client.containers.run_result = self._ChunkedContainer(
+            [b"> Task :app:preBuild\n"
+             b"> Task :app:mergeDebugNativeDebugMetadata NO-SOURCE\n"
+             b"> Task :app:checkDebugAarMetadata\n"
+             b"BUILD SUCCESSFUL in 24s\n"]
+        )
+
+        result = await backend.execute(
+            code="", language="java",
+            timeout=30, work_dir="/workspace",
+            project_path=str(tmp_path),
+            gradle_task="assembleDebug",
+            on_output=on_output,
+        )
+        assert result.success
+        joined = "".join(outputs)
+        # 纯成功任务行：已被进度侧信道 ▶/✓ 覆盖，过滤
+        assert "> Task :app:preBuild\n" not in joined
+        assert "> Task :app:checkDebugAarMetadata\n" not in joined
+        # 带标记行（NO-SOURCE/SKIPPED/FAILED 等）doFirst/doLast 不触发，保留
+        assert "> Task :app:mergeDebugNativeDebugMetadata NO-SOURCE\n" in joined
+        # 非 task 行保留
+        assert "BUILD SUCCESSFUL in 24s\n" in joined
+
+    @pytest.mark.asyncio
+    async def test_result_stdout_keeps_full_log(self, backend, mock_docker_client, tmp_path):
+        """工具最终返回的 result.stdout 保留完整日志（含被过滤的 > Task 行）。"""
+        mock_docker_client.containers.run_result = self._ChunkedContainer(
+            [b"> Task :app:preBuild\n> Task :app:x NO-SOURCE\nBUILD SUCCESSFUL\n"]
+        )
+
+        result = await backend.execute(
+            code="", language="java",
+            timeout=30, work_dir="/workspace",
+            project_path=str(tmp_path),
+            gradle_task="assembleDebug",
+        )
+        assert result.success
+        # 结果 stdout 完整（不过滤），供模型/工具最终消费
+        assert "> Task :app:preBuild" in result.stdout
+        assert "> Task :app:x NO-SOURCE" in result.stdout
+        assert "BUILD SUCCESSFUL" in result.stdout

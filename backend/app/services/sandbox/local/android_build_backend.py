@@ -513,31 +513,48 @@ gradle.beforeProject { project ->
                 stream_task = asyncio.ensure_future(asyncio.to_thread(_stream_logs))
 
                 async def _drain_queue():
-                    """主协程消费队列：独立定时器每 100ms 冲刷一次批次。
+                    """主协程消费队列：按完整行切分 + 过滤冗余任务行，独立定时器冲刷。
 
-                    Gradle 的 stdout 经 JVM 块缓冲，构建安静期没有任何新帧。
-                    旧实现只在「收到新 chunk」时检查 100ms 窗口——安静期的
-                    尾批会一直滞留到构建结束才送出去（历史线上现象：setup 行
-                    延迟到 build 结束才落事件）。定时器让帧到达与 flush 解耦，
-                    静默流也能在 ~100ms 内送达。
+                    两个根治点（android_compile 输出「任务名重复 + 换行丢失」）：
+                    1. 行对齐：docker logs 的 chunk 边界与 100ms 定时器可能在行中间切分，
+                       直接 join 会让 stdout 块末尾缺换行符，与进度侧信道的 on_output 在
+                       下游 "".join 拼接时粘连。这里维护半行缓冲，只在换行边界切分，
+                       每次只转发完整行（含结尾换行符）。
+                    2. 去重：Gradle --console=plain 的 "> Task :x" 行（无附加标记的纯成功
+                       执行）与进度侧信道的 ▶/✓ 重复，过滤掉；保留带 SKIPPED/NO-SOURCE/
+                       FAILED/UP-TO-DATE/FROM-CACHE 标记的行——这些任务的 doFirst/doLast
+                       不触发，▶/✓ 里没有，是唯一信息来源。
+
+                    定时器仍每 100ms 冲刷一次：Gradle stdout 经 JVM 块缓冲，构建安静期无
+                    新帧，旧实现只在收到新 chunk 时检查窗口会让尾批滞留到构建结束。
                     """
                     loop = asyncio.get_running_loop()
-                    batch: list[bytes] = []
+                    pending_line = bytearray()   # 半行缓冲（跨 chunk 的未完整行）
+                    line_batch: list[str] = []   # 待冲刷的完整行
                     BATCH_INTERVAL = 0.1  # 100ms 批处理窗口
+                    # 附加标记（前面带空格，避免误匹配任务名子串）
+                    _TASK_MARKS = (" SKIPPED", " NO-SOURCE", " FAILED", " UP-TO-DATE", " FROM-CACHE")
 
-                    async def _flush_batch():
-                        if not batch:
+                    def _keep_line(line: str) -> bool:
+                        """纯成功任务行已被 ▶/✓ 覆盖，过滤；其余（含标记行）保留。"""
+                        s = line.strip()
+                        if not s.startswith("> Task "):
+                            return True
+                        return any(m in s for m in _TASK_MARKS)
+
+                    async def _flush_lines():
+                        if not line_batch:
                             return
-                        merged = b"".join(batch)
-                        batch.clear()
+                        merged = "".join(line_batch)  # 每行都以换行符结尾，下游 join 不粘连
+                        line_batch.clear()
                         if on_output:
                             activity["last_output"] = time.time()
-                            await _safe_on_output(merged.decode("utf-8", errors="replace"), "")
+                            await _safe_on_output(merged, "")
 
                     async def _flush_timer():
                         while True:
                             await asyncio.sleep(BATCH_INTERVAL)
-                            await _flush_batch()
+                            await _flush_lines()
 
                     flush_timer = asyncio.create_task(_flush_timer())
                     normal_end = False
@@ -547,12 +564,21 @@ gradle.beforeProject { project ->
                             if chunk is None:
                                 normal_end = True
                                 break
-                            # stdout 缓冲上限保护 — on_output 始终透传，不受上限影响
+                            # stdout 缓冲上限保护 — 结果 stdout 保留完整内容（不过滤），
+                            # 供工具最终返回；on_output 实时流才做行对齐 + 去重。
                             if len(stdout_buf) < self._MAX_STDOUT_CAPTURE:
                                 allowed = self._MAX_STDOUT_CAPTURE - len(stdout_buf)
                                 stdout_buf.extend(chunk[:allowed])
                             if on_output:
-                                batch.append(chunk)
+                                pending_line.extend(chunk)
+                                while True:
+                                    nl = pending_line.find(b"\n")
+                                    if nl < 0:
+                                        break
+                                    line = bytes(pending_line[: nl + 1]).decode("utf-8", errors="replace")
+                                    del pending_line[: nl + 1]
+                                    if _keep_line(line):
+                                        line_batch.append(line)
                     finally:
                         flush_timer.cancel()
                         try:
@@ -563,7 +589,12 @@ gradle.beforeProject { project ->
                         # stdout 返回，且取消后回调 on_output 会与调用方的
                         # 最终 flush 并发（重复/交错事件）。
                         if normal_end:
-                            await _flush_batch()
+                            # 冲刷最后的半行（无换行符结尾的尾部）——补换行符保证下游 join 不粘连
+                            if pending_line:
+                                tail = pending_line.decode("utf-8", errors="replace")
+                                if _keep_line(tail):
+                                    line_batch.append(tail if tail.endswith("\n") else tail + "\n")
+                            await _flush_lines()
 
                 drain_task = asyncio.create_task(_drain_queue())
 
