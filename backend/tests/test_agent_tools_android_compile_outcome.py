@@ -323,16 +323,53 @@ async def test_invalid_project_path_type_returns_early_error(
 
 
 @pytest.mark.asyncio
-async def test_gradlew_not_found_returns_early_error(
+async def test_missing_wrapper_auto_provisioned(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
-    """项目目录存在但没有 gradlew → 独立文案 + 目录内容列表（L3 边界区分）."""
+    """B2：项目有构建标记但缺 wrapper → 自动补 pinned wrapper 并继续构建."""
+    agent_id = uuid.uuid4()
+    ws_root = tmp_path / "workspace" / str(agent_id)
+    ws_root.mkdir(parents=True)
+    project_dir = ws_root / "my_project"
+    project_dir.mkdir(parents=True)
+    (project_dir / "settings.gradle.kts").write_text("// no wrapper\n")
+
+    monkeypatch.setattr(agent_tools, "_agent_workspace_root", lambda _aid: ws_root)
+
+    async def fake_config(_agent_id, _name):
+        return {"sandbox_type": "android-build", "max_timeout": 600}
+
+    monkeypatch.setattr(agent_tools, "_get_tool_config", fake_config)
+
+    backend = FakeAndroidBuildBackend(
+        result=ExecutionResult(success=True, stdout="BUILD SUCCESSFUL\n", stderr="", exit_code=0, duration_ms=10000)
+    )
+    install_backend(monkeypatch, backend)
+
+    outcome = await agent_tools._android_compile_outcome(
+        agent_id, {"project_path": "my_project"}
+    )
+
+    assert outcome.status == "succeeded"
+    assert outcome.result_summary is not None
+    assert "[自动补 wrapper]" in outcome.result_summary
+    assert (project_dir / "gradlew").exists()
+    assert (project_dir / "gradle" / "wrapper" / "gradle-wrapper.jar").exists()
+    assert backend.calls, "backend 应被执行"
+
+
+@pytest.mark.asyncio
+async def test_gradlew_not_found_without_gradle_markers_still_errors(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """目录存在但无任何 Gradle 构建标记 → 仍报 'gradlew not found'（L3 诊断保留）."""
     agent_id = uuid.uuid4()
     ws_root = tmp_path / "workspace" / str(agent_id)
     ws_root.mkdir(parents=True)
     (ws_root / "my_project").mkdir(parents=True)
-    (ws_root / "my_project" / "settings.gradle.kts").write_text("// no wrapper\n")
+    (ws_root / "my_project" / "README.md").write_text("# not a gradle project\n")
 
     monkeypatch.setattr(agent_tools, "_agent_workspace_root", lambda _aid: ws_root)
 
@@ -350,7 +387,7 @@ async def test_gradlew_not_found_returns_early_error(
     assert outcome.result_summary is not None
     assert "gradlew not found" in outcome.result_summary
     assert "缺少 Gradle wrapper 脚本" in outcome.result_summary
-    assert "settings.gradle.kts" in outcome.result_summary
+    assert "README.md" in outcome.result_summary
 
 
 @pytest.mark.asyncio

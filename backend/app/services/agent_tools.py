@@ -2931,6 +2931,15 @@ async def _android_compile_outcome(
                 f"已自动按 'workspace/{normalized}' 解析（与 read_file/list_files 展示的路径一致）。"
             )
 
+    # B2: 缺 wrapper 时自动补 pinned 官方 wrapper（见 technical-plans 20260820 hard-layer）。
+    # 只补缺失文件、绝不覆盖已有 wrapper、不从网络下载。
+    from app.services.android_scaffold import provision_gradle_wrapper
+
+    provision_note = provision_gradle_wrapper(resolved_path)
+    if provision_note is not None:
+        preflight_note = (preflight_note + "\n" + provision_note) if preflight_note else provision_note
+        has_gradlew = (resolved_path / "gradlew").exists() or (resolved_path / "gradlew.bat").exists()
+
     if not has_gradlew:
         if resolved_path.is_dir():
             try:
