@@ -134,36 +134,6 @@ services:
     depends_on:
       - backend
 
-  # 内网 GitLab MCP 网关（zereight/gitlab-mcp，本地构建镜像 clawith-gitlab-mcp:1）
-  # Streamable HTTP + 远端鉴权：每个请求的 Bearer token 直接透传给内网 GitLab，
-  # 使 Clawith 的 per-agent api_key（各自 PAT）在 GitLab 侧真正按 agent 隔离。
-  # 不发布宿主端口，仅 compose 内网可达（MCP 端点本身无鉴权，靠网络隔离防护）。
-  gitlab-mcp:
-    image: clawith-gitlab-mcp:1
-    restart: unless-stopped
-    networks:
-      - default
-    environment:
-      HOST: 0.0.0.0
-      PORT: 3002
-      STREAMABLE_HTTP: "true"
-      REMOTE_AUTHORIZATION: "true"
-      GITLAB_API_URL: http://192.168.5.254/api/v4
-      # /mcp 的 Host 头白名单（防 DNS rebinding）：放行 backend 以容器名访问
-      MCP_ALLOWED_HOSTS: gitlab-mcp:3002
-    healthcheck:
-      # initialize 不带 token 时服务器按远端鉴权返回 401——401 说明服务存活且鉴权生效
-      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3002/mcp',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({jsonrpc:'2.0',id:0,method:'initialize',params:{protocolVersion:'2024-11-05',capabilities:{},clientInfo:{name:'health',version:'1'}}})}).then(r=>{if(!r.ok&&r.status!==401)process.exit(1)}).catch(()=>process.exit(1))"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 10s
-    logging:
-      driver: json-file
-      options:
-        max-size: "10m"
-        max-file: "3"
-
 volumes:
   pgdata:
   redisdata:
