@@ -1044,7 +1044,19 @@ class WebSocketChatHandler:
                     )
                 )
                 existing = existing_result.scalar_one_or_none()
-                if not run.lane_held and existing is None:
+                cancellable_start_result = await db.execute(
+                    select(AgentRunCommand.id).where(
+                        AgentRunCommand.tenant_id == agent.tenant_id,
+                        AgentRunCommand.run_id == run.id,
+                        AgentRunCommand.command_type == "start",
+                        AgentRunCommand.status.in_(("pending", "claimed")),
+                    ).limit(1)
+                )
+                if (
+                    not run.lane_held
+                    and existing is None
+                    and cancellable_start_result.scalar_one_or_none() is None
+                ):
                     raise ChatRuntimeIntakeError(
                         "chat_cancel_not_lane_holder",
                         "Cancel target is no longer the active Direct Chat Run",

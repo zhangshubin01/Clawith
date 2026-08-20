@@ -913,6 +913,69 @@ async def test_duplicate_cancel_remains_idempotent_after_lane_release() -> None:
 
 
 @pytest.mark.asyncio
+async def test_cancel_accepts_queued_run_with_pending_start() -> None:
+    handler = _handler(_WebSocket())
+    handle = _handle(handler.user.tenant_id)
+    agent, session, run = _direct_cancel_records(
+        handler,
+        handle.run_id,
+        lane_held=False,
+    )
+    pending_start_id = uuid.uuid4()
+    db = _Session(
+        {User: handler.user, ChatSession: session},
+        run,
+        None,  # existing cancel idempotency lookup
+        pending_start_id,  # cancellable start (queued)
+    )
+
+    with (
+        patch("app.api.websocket.async_session", return_value=db),
+        patch(
+            "app.api.websocket.check_agent_access",
+            new=AsyncMock(return_value=(agent, None)),
+        ),
+        patch(
+            "app.api.websocket.RuntimeCommandIntake.cancel_run",
+            new=AsyncMock(return_value=handle),
+        ) as cancel_run,
+    ):
+        result = await handler._cancel_runtime_run(handle.run_id)
+
+    assert result == handle
+    cancel_run.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_cancel_rejects_terminal_run_without_active_start() -> None:
+    handler = _handler(_WebSocket())
+    handle = _handle(handler.user.tenant_id)
+    agent, session, run = _direct_cancel_records(
+        handler,
+        handle.run_id,
+        lane_held=False,
+    )
+    db = _Session(
+        {User: handler.user, ChatSession: session},
+        run,
+        None,  # existing cancel idempotency lookup
+        None,  # no pending/claimed start (terminal)
+    )
+
+    with (
+        patch("app.api.websocket.async_session", return_value=db),
+        patch(
+            "app.api.websocket.check_agent_access",
+            new=AsyncMock(return_value=(agent, None)),
+        ),
+    ):
+        with pytest.raises(ChatRuntimeIntakeError) as raised:
+            await handler._cancel_runtime_run(handle.run_id)
+
+    assert getattr(raised.value, "code", None) == "chat_cancel_not_lane_holder"
+
+
+@pytest.mark.asyncio
 async def test_main_message_loop_accepts_cancel_after_waiting_stream_has_ended() -> None:
     run_id = uuid.uuid4()
     websocket = _WebSocket({"type": "abort", "run_id": str(run_id)})

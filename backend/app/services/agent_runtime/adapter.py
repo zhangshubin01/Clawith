@@ -25,6 +25,7 @@ from app.services.agent_runtime.persistence import (
     enqueue_cancel,
     enqueue_resume,
     register_run_with_start,
+    reject_unstarted_run_for_cancel,
 )
 from app.services.llm.model_resolution import load_active_model, resolve_active_agent_model
 
@@ -376,6 +377,17 @@ class RuntimeCommandIntake:
             actor_user_id=command.actor_user_id,
             actor_agent_id=command.actor_agent_id,
         )
+        if enqueued.created:
+            # A queued Run still has a pending start. Reject it here so the
+            # cancel truly preempts the start: the command worker claims FIFO
+            # (start before cancel), so without this the start would run and
+            # the cancel would only land after it as already_terminal.
+            await reject_unstarted_run_for_cancel(
+                self._db,
+                tenant_id=command.tenant_id,
+                run_id=command.run_id,
+                cancel_command_id=enqueued.command.id,
+            )
         return self._handle(run, enqueued.command, created=enqueued.created)
 
 

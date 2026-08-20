@@ -447,13 +447,38 @@ async def get_session_runtime_state(
     )
     holders = list(holders_result.scalars().all())
     if not holders:
-        return SessionRuntimeStateOut(active_run=None)
-    if len(holders) != 1:
-        raise HTTPException(
-            status_code=409,
-            detail="multiple_direct_session_lane_holders",
+        # No lane holder yet: a freshly-queued Run (start still pending) is
+        # still the active Direct Chat Run and must remain cancellable.
+        pending_result = await db.execute(
+            select(AgentRun)
+            .join(AgentRunCommand, AgentRunCommand.run_id == AgentRun.id)
+            .where(
+                AgentRun.tenant_id == tenant_id,
+                AgentRun.agent_id == agent_id,
+                AgentRun.session_id == session.id,
+                AgentRun.origin_user_id == current_user.id,
+                AgentRun.source_type == "chat",
+                AgentRun.run_kind == "foreground",
+                AgentRun.runtime_type == "langgraph",
+                AgentRun.runtime_thread_id == str(session.id),
+                AgentRun.scheduling_lane_key == lane_key,
+                AgentRunCommand.command_type == "start",
+                AgentRunCommand.status == "pending",
+            )
+            .order_by(AgentRun.created_at, AgentRun.id)
+            .limit(1)
         )
-    run = holders[0]
+        pending_runs = list(pending_result.scalars().all())
+        if not pending_runs:
+            return SessionRuntimeStateOut(active_run=None)
+        run = pending_runs[0]
+    else:
+        if len(holders) != 1:
+            raise HTTPException(
+                status_code=409,
+                detail="multiple_direct_session_lane_holders",
+            )
+        run = holders[0]
 
     try:
         async with _open_run_state_reader(db) as reader:

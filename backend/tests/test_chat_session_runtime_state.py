@@ -183,6 +183,45 @@ async def test_runtime_state_returns_exact_waiting_lane_holder() -> None:
 
 
 @pytest.mark.asyncio
+async def test_runtime_state_returns_queued_run_when_no_lane_holder() -> None:
+    agent, user, session, run = _records()
+    run.lane_held = False
+    reader = SimpleNamespace(
+        get_run_state=AsyncMock(return_value=_view(run, status="queued"))
+    )
+    db = _Session(
+        _Result(scalar=session),
+        _Result(values=[]),  # no lane holder
+        _Result(values=[run]),  # pending start run
+        _Result(scalar=None),  # no inflight cancel
+    )
+
+    with (
+        patch(
+            "app.api.chat_sessions.check_agent_access",
+            new=AsyncMock(return_value=(agent, None)),
+        ),
+        patch(
+            "app.api.chat_sessions._open_run_state_reader",
+            return_value=_ReaderContext(reader),
+        ),
+    ):
+        response = await get_session_runtime_state(
+            agent.id,
+            session.id,
+            current_user=user,
+            db=db,  # type: ignore[arg-type]
+        )
+
+    assert response.active_run is not None
+    assert response.active_run.run_id == str(run.id)
+    assert response.active_run.status == "queued"
+    assert response.active_run.can_resume is False
+    assert response.active_run.can_cancel is True
+    reader.get_run_state.assert_awaited_once_with(run.tenant_id, run.id)
+
+
+@pytest.mark.asyncio
 async def test_runtime_state_exposes_unknown_write_and_blocks_plain_resume() -> None:
     agent, user, session, run = _records()
     reader = SimpleNamespace(get_run_state=AsyncMock(return_value=_view(run)))
@@ -341,7 +380,11 @@ async def test_runtime_state_disables_resume_and_cancel_while_cancel_is_inflight
 @pytest.mark.asyncio
 async def test_runtime_state_has_null_active_run_without_lane_holder() -> None:
     agent, user, session, _run = _records()
-    db = _Session(_Result(scalar=session), _Result(values=[]))
+    db = _Session(
+        _Result(scalar=session),
+        _Result(values=[]),  # no lane holder
+        _Result(values=[]),  # no pending start
+    )
 
     with patch(
         "app.api.chat_sessions.check_agent_access",

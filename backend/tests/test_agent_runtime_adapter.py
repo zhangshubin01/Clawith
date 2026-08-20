@@ -435,6 +435,10 @@ async def test_resume_accepts_a_shared_thread_identity_and_cancel_is_scoped_to_r
             "app.services.agent_runtime.adapter.enqueue_cancel",
             new=AsyncMock(return_value=EnqueuedCommand(cancel, True)),
         ),
+        patch(
+            "app.services.agent_runtime.adapter.reject_unstarted_run_for_cancel",
+            new=AsyncMock(),
+        ),
     ):
         intake = RuntimeCommandIntake(db, settings=_settings(enabled=True))
         resumed = await intake.resume_run(
@@ -455,6 +459,67 @@ async def test_resume_accepts_a_shared_thread_identity_and_cancel_is_scoped_to_r
 
     assert resumed.thread_id == run.runtime_thread_id
     assert cancelled.run_id == run.id
+
+
+@pytest.mark.asyncio
+async def test_cancel_run_rejects_pending_start_synchronously() -> None:
+    tenant_id = uuid.uuid4()
+    run = _run(tenant_id=tenant_id, agent_id=uuid.uuid4())
+    cancel = _stored_command(run, "cancel")
+    db = _session(run)
+
+    with (
+        patch(
+            "app.services.agent_runtime.adapter.enqueue_cancel",
+            new=AsyncMock(return_value=EnqueuedCommand(cancel, True)),
+        ),
+        patch(
+            "app.services.agent_runtime.adapter.reject_unstarted_run_for_cancel",
+            new=AsyncMock(),
+        ) as reject,
+    ):
+        await RuntimeCommandIntake(db, settings=_settings(enabled=True)).cancel_run(
+            CancelRunCommand(
+                tenant_id=tenant_id,
+                run_id=run.id,
+                idempotency_key="cancel:1",
+            )
+        )
+
+    reject.assert_awaited_once_with(
+        db,
+        tenant_id=tenant_id,
+        run_id=run.id,
+        cancel_command_id=cancel.id,
+    )
+
+
+@pytest.mark.asyncio
+async def test_cancel_run_skips_reject_on_idempotent_retry() -> None:
+    tenant_id = uuid.uuid4()
+    run = _run(tenant_id=tenant_id, agent_id=uuid.uuid4())
+    cancel = _stored_command(run, "cancel")
+    db = _session(run)
+
+    with (
+        patch(
+            "app.services.agent_runtime.adapter.enqueue_cancel",
+            new=AsyncMock(return_value=EnqueuedCommand(cancel, False)),
+        ),
+        patch(
+            "app.services.agent_runtime.adapter.reject_unstarted_run_for_cancel",
+            new=AsyncMock(),
+        ) as reject,
+    ):
+        await RuntimeCommandIntake(db, settings=_settings(enabled=True)).cancel_run(
+            CancelRunCommand(
+                tenant_id=tenant_id,
+                run_id=run.id,
+                idempotency_key="cancel:1",
+            )
+        )
+
+    reject.assert_not_awaited()
 
 
 @pytest.mark.asyncio
