@@ -139,7 +139,7 @@ class TestProgressStreaming:
         monkeypatch.setattr(AndroidBuildBackend, "_HEARTBEAT_POLL", 0.1)
 
         project = str(tmp_path)
-        progress_file = os.path.join(project, ".gradle-progress")
+        progress_file = os.path.join(project, ".clawith-gradle-progress")
         outputs: list[str] = []
 
         async def on_output(text: str):
@@ -167,9 +167,10 @@ class TestProgressStreaming:
         assert result.success
 
         joined = "".join(outputs)
-        # 方案 B：任务边界被实时转发
-        assert "TASK_START|:app:compileDebugKotlin" in joined
-        assert "TASK_END|:app:compileDebugKotlin" in joined
+        # 方案 B：任务边界被实时转发，且渲染为可读文案（而非原始 TASK_START| 协议 token）
+        assert "▶ 正在执行 :app:compileDebugKotlin" in joined
+        assert "✓ 完成 :app:compileDebugKotlin" in joined
+        assert "TASK_START|" not in joined, "原始协议 token 不应透传给用户"
         # 方案 C：静默期心跳触发
         assert "构建进行中" in joined
 
@@ -177,7 +178,7 @@ class TestProgressStreaming:
     async def test_progress_file_cleaned_up(self, backend, mock_docker_client, tmp_path):
         """构建结束（含成功路径）后，进度侧信道文件应被清理，不污染用户工作区。"""
         project = str(tmp_path)
-        progress_file = os.path.join(project, ".gradle-progress")
+        progress_file = os.path.join(project, ".clawith-gradle-progress")
         with open(progress_file, "w", encoding="utf-8") as f:
             f.write("TASK_START|:x\n")
 

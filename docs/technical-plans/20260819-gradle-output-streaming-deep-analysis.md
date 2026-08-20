@@ -128,9 +128,11 @@ Gradle 官方 `gradle_daemon.html`（v9.7）明确区分两个进程：
 
 探针实测（对照 B/C）证明：即便客户端 JVM 堆与 `org.gradle.jvmargs` 精确匹配、且直接以 `-Xmx512m` 启动客户端，Gradle 8.10.2 仍 fork single-use daemon。源码 `BuildActionsFactory.canUseCurrentProcess` 要求客户端不可变 JVM 参数与 `getEffectiveSingleUseJvmArgs()` **逐字节相等**（含 Gradle 自动追加的 `-Dfile.encoding`/`-Duser.*` 等），官方文档称其为 "the rare case"。**在容器化、非交互、`--no-daemon` 的生产形态下不可靠触发，方案作废。**（曾设想的 PTY 包装 + `\r\n` 归一也一并作废——缓冲不在客户端 stdout，PTY 解决不了。）
 
-### 方案 B：init script 服务消息 + **文件侧信道**（绕过 daemon 缓冲）
+### 方案 B：init script 服务消息 + **文件侧信道**（绕过 daemon 缓冲）——**已实现（提交 `3394fda6`）**
 
-保持 `--no-daemon` 不变，用 **init script**（`-I` 注入）在构建内挂 `TaskExecutionListener`/`BuildListener`，在每个 task 边界写结构化进度。**关键教训（本次探针）**：服务消息若 `println` 到 stdout，会与 Gradle 自身任务行（"> Task :probe"）走同一条 daemon socket 转发、同样被缓冲。**必须写到一个文件侧信道**（如 `/workspace/.gradle-progress`，项目已 bind-mount，宿主/后端可实时 tail），才能绕过 socket 缓冲拿到任务级实时进度。
+保持 `--no-daemon` 不变，用 **init script**（`-I` 注入）在构建内挂 `TaskExecutionListener`/`BuildListener`，在每个 task 边界写结构化进度。**关键教训（本次探针）**：服务消息若 `println` 到 stdout，会与 Gradle 自身任务行（"> Task :probe"）走同一条 daemon socket 转发、同样被缓冲。**必须写到一个文件侧信道**（如 `/workspace/.clawith-gradle-progress`，项目已 bind-mount，宿主/后端可实时 tail），才能绕过 socket 缓冲拿到任务级实时进度。
+
+> **实现修正（探针钉死）**：注入方式最终用 `gradle.beforeProject { tasks.configureEach { doFirst/doLast } }`，**而非** `addListener(TaskExecutionListener)`/`addBuildListener`——后者与 configuration-cache 不兼容（实测报「unsupported」并令缓存条目「存储但永不复用」），而 doFirst/doLast 随任务图序列化、**缓存命中仍触发**（探针验证 miss + hit 都写文件）。后端把 `TASK_START|:path`/`TASK_END|:path` 渲染为「▶ 正在执行 …」/「✓ 完成 …」转发给 `on_output`，构建前后截断/清理该 Clawith 命名空间 dotfile。
 
 依据：TeamCity / JetBrains 官方对 Gradle 的集成即通过注入 init script 上报任务进度；区别在于它走的是 CI 服务器能拉取的日志通道，而非依赖 daemon 的 stdout 转发实时性。
 

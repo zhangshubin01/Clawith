@@ -83,9 +83,10 @@ class AndroidBuildBackend(BaseSandboxBackend):
     _GRADLE_CACHE_MODULE_DIRS_MAX = 500        # modules-2 目录数阈值
 
     # ── Gradle 构建进度（方案 B + C）──
-    # 进度侧信道文件名：init script 在构建容器内写 /workspace/.gradle-progress，
+    # 进度侧信道文件名：init script 在构建容器内写 /workspace/.clawith-gradle-progress，
     # 后端经同一 bind-mount 存储（容器内 project_path）tail 该文件实时拿到任务边界。
-    _PROGRESS_FILE = ".gradle-progress"
+    # 用 Clawith 命名空间前缀，避免与用户项目同名文件冲突（否则会被构建前截断 + 构建后删除）。
+    _PROGRESS_FILE = ".clawith-gradle-progress"
     # 静默期心跳阈值（秒）：超过该时长既无 docker 日志流、也无进度侧信道输出，
     # 则发「构建进行中…」心跳，兜底配置阶段 / 单任务长静默段的「像卡死」观感。
     _HEARTBEAT_INTERVAL = 15.0
@@ -95,7 +96,7 @@ class AndroidBuildBackend(BaseSandboxBackend):
     # （会令缓存条目「存储但永不复用」），而 doFirst/doLast 随任务图序列化、缓存命中仍触发。
     # 注意：进度走文件侧信道（绕过 daemon socket 转发缓冲），不写 stdout。
     _GRADLE_PROGRESS_INIT_SCRIPT = """\
-def progressFile = new File(System.getenv('CLAWITH_PROGRESS_FILE') ?: '/workspace/.gradle-progress')
+def progressFile = new File('/workspace/.clawith-gradle-progress')
 
 gradle.beforeProject { project ->
     project.tasks.configureEach { task ->
@@ -489,6 +490,15 @@ gradle.beforeProject { project ->
                 # 心跳协程据此在静默期发「构建进行中…」（方案 C）。
                 activity = {"last_output": time.time(), "last_heartbeat": time.time()}
 
+                async def _safe_on_output(text: str, tag: str) -> None:
+                    """统一 on_output 回调：未注入回调时跳过，回调异常仅告警不中断。"""
+                    if not on_output:
+                        return
+                    try:
+                        await on_output(text)
+                    except Exception:
+                        logger.opt(exception=True).warning(f"[AndroidBuild] on_output {tag}回调异常")
+
                 def _stream_logs():
                     """在后台线程中流式读取容器日志，写入线程安全队列。"""
                     try:
@@ -519,10 +529,7 @@ gradle.beforeProject { project ->
                         batch.clear()
                         if on_output:
                             activity["last_output"] = time.time()
-                            try:
-                                await on_output(merged.decode("utf-8", errors="replace"))
-                            except Exception:
-                                logger.opt(exception=True).warning("[AndroidBuild] on_output 回调异常")
+                            await _safe_on_output(merged.decode("utf-8", errors="replace"), "")
 
                     async def _flush_timer():
                         while True:
@@ -562,6 +569,7 @@ gradle.beforeProject { project ->
                 # socket 转发缓冲），后端轮询同一文件把新行实时转发给 on_output。
                 async def _tail_progress():
                     offset = 0
+                    pending = ""  # 未完整行缓冲（跨轮询的撕裂行）
                     try:
                         while True:
                             await asyncio.sleep(0.2)
@@ -574,12 +582,22 @@ gradle.beforeProject { project ->
                                     offset = f.tell()
                             except OSError:
                                 continue
-                            if data and on_output:
+                            if not data:
+                                continue
+                            # 按行切分：末段可能是半行（Groovy append 与轮询竞态），留下次拼接
+                            pending += data
+                            lines = pending.split("\n")
+                            pending = lines.pop()
+                            rendered = []
+                            for line in lines:
+                                line = line.strip()
+                                if line.startswith("TASK_START|"):
+                                    rendered.append("▶ 正在执行 " + line[len("TASK_START|"):])
+                                elif line.startswith("TASK_END|"):
+                                    rendered.append("✓ 完成 " + line[len("TASK_END|"):])
+                            if rendered:
                                 activity["last_output"] = time.time()
-                                try:
-                                    await on_output(data)
-                                except Exception:
-                                    logger.opt(exception=True).warning("[AndroidBuild] on_output 进度回调异常")
+                                await _safe_on_output("\n".join(rendered) + "\n", "进度")
                     except asyncio.CancelledError:
                         pass
 
@@ -593,10 +611,7 @@ gradle.beforeProject { project ->
                             since_hb = now - activity["last_heartbeat"]
                             if silent >= self._HEARTBEAT_INTERVAL and since_hb >= self._HEARTBEAT_INTERVAL and on_output:
                                 activity["last_heartbeat"] = now
-                                try:
-                                    await on_output(f"构建进行中… 已 {int(silent)}s，暂无新输出\n")
-                                except Exception:
-                                    logger.opt(exception=True).warning("[AndroidBuild] on_output 心跳回调异常")
+                                await _safe_on_output(f"构建进行中… 已 {int(silent)}s，暂无新输出\n", "心跳")
                     except asyncio.CancelledError:
                         pass
 
