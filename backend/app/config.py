@@ -109,6 +109,11 @@ class Settings(BaseSettings):
     CHECKPOINT_POOL_MIN_SIZE: int = 1
     CHECKPOINT_POOL_MAX_SIZE: int = 4
     CHECKPOINT_POOL_TIMEOUT_SECONDS: int = 10
+    # Selective checkpoint persistence: persist only essential boundaries
+    # (interrupts, wait/terminal states, every K-th super-step, force flag)
+    # instead of every super-step. See agent_runtime/selective_checkpointer.py.
+    CHECKPOINT_SELECTIVE_ENABLED: bool = False
+    CHECKPOINT_WATERMARK_STEPS: int = 5
 
     # Redis
     REDIS_URL: str = "redis://localhost:6379/0"

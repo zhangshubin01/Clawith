@@ -9,6 +9,7 @@ from urllib.parse import quote, unquote, urlsplit, urlunsplit
 import asyncio
 import uuid
 
+from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from langgraph.checkpoint.serde.base import SerializerProtocol
 from langgraph.checkpoint.serde.encrypted import EncryptedSerializer
@@ -175,19 +176,34 @@ def checkpoint_serializer(
 @asynccontextmanager
 async def create_checkpointer(
     settings: Settings | None = None,
-) -> AsyncIterator[AsyncPostgresSaver]:
+) -> AsyncIterator[BaseCheckpointSaver]:
     """Yield a saver bound to the process-level shared checkpoint pool.
 
     The pool outlives every saver: ``AsyncPostgresSaver`` acquires and releases
     connections per operation and never closes an externally supplied pool.
     Closing the pool once at application shutdown is handled by
     ``close_checkpointer_pool``.
+
+    When ``CHECKPOINT_SELECTIVE_ENABLED`` is on, the saver is wrapped in
+    ``SelectiveCheckpointSaver`` so only essential boundaries are persisted
+    (root-cause control of checkpoint table growth; see that module).
     """
-    pool = await get_shared_checkpoint_pool(settings)
-    yield AsyncPostgresSaver(
+    runtime_settings = settings or get_settings()
+    pool = await get_shared_checkpoint_pool(runtime_settings)
+    saver: BaseCheckpointSaver = AsyncPostgresSaver(
         conn=pool,
-        serde=checkpoint_serializer(settings),
+        serde=checkpoint_serializer(runtime_settings),
     )
+    if runtime_settings.CHECKPOINT_SELECTIVE_ENABLED:
+        from app.services.agent_runtime.selective_checkpointer import (
+            SelectiveCheckpointSaver,
+        )
+
+        saver = SelectiveCheckpointSaver(
+            inner=saver,
+            watermark=runtime_settings.CHECKPOINT_WATERMARK_STEPS,
+        )
+    yield saver
 
 
 # ---------------------------------------------------------------------------
