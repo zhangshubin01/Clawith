@@ -97,12 +97,12 @@ return VerificationResult(
 
 用户拍板「按推荐」：**两段一起做**，产物白名单**先只覆盖二进制产物**（`.apk`/`.aab`，最小误报面）。`.py/.md` 等「写文件」类覆盖留待 write_file 等核心工具补 `artifact_refs` 后再做。
 
-## 7. 落地状态（2026-08-20 已实现，待真实 checkpoint 验证 + 部署）
+## 7. 落地状态（2026-08-20 已实现 + 真实 checkpoint 验证 + 已部署）
 
 - **Part A（`agent_tools.py`）**：新增 `_android_artifact_refs()` 辅助函数；`_android_compile_outcome` 成功分支把 `apk_files` 改为收集 `Path`（相对项目目录），并 emit `artifact_refs=_android_artifact_refs(agent_id, ws, resolved_path, apk_files)`（workspace-relative）。`agent_id is None` 时回退空元组。
 - **Part B（`verification.py`）**：新增 `_extract_artifact_claims` / `_looks_like_artifact_path` / `_artifact_path_tokens` / `_normalize_artifact_path` / `_artifact_claims_not_in_ledger` 五个纯函数；`verify()` 在 return pass 前，把 `candidate` 提取的 artifact 声明与 `artifact_refs ∪ evidence_refs` 做后缀匹配，未覆盖 → `repair`（code=`artifact_path_not_in_ledger`）。
 - **测试**：`test_agent_runtime_artifact_freshness.py`（17 例，纯函数 + verifier 集成）、`test_agent_tools_android_compile_outcome.py` +1 例（Part A 的 artifact_refs）。全量 2538 passed，ruff + arch-guard 通过。
-- **待办**：真实 checkpoint 验证（用事故 thread `f8bfa104` 的 `79f4b0e6`/`3cb9e859` 跑 `verify()` 确认 repair/pass），随后按 clawith-prod-deploy 部署。
+- **部署**：commit `ffbca82b`，worktree `/tmp/clawith-deploy-ffbca82b`，回滚标签 `clawith-agent-backend:pre-ffbca82b-9784b7a465d2`。部署验证全过（health/frontend 200、LAN 拒连、三件套+新代码特征在镜像、/app 只读、uvicorn=clawith、Privileged=false+3caps、alembic=f068）。
 
 ### 真实 checkpoint 验证（2026-08-20 已完成）
 
