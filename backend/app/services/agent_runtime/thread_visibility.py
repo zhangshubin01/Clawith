@@ -26,12 +26,16 @@ def _prior_run_summary(
     *,
     current_run_id: str,
 ) -> JsonObject | None:
-    """Collapse the prior Run into one deterministic, single-line directive.
+    """Collapse the prior Run into one deterministic, single-line context note.
 
     The prior Run's own closing assistant reply is the most toxic pollution
     source (a stale ``✅ done`` summary replayed verbatim), so it is never
     copied. Only the prior goal and its produced artifact references survive,
-    as a compact template summary — zero model cost, deterministic.
+    as a compact template note — zero model cost, deterministic.
+
+    The wording is deliberately past-tense and marked "非当前任务": a
+    user-role summary that read "目标：重新编译项目" was itself mistaken for a
+    new directive (the model replied "用户说…目标：重新编译项目" and recompiled).
     """
     goal = ""
     for message in reversed(prior_messages):
@@ -59,12 +63,12 @@ def _prior_run_summary(
     unique.reverse()
     unique = unique[-3:]
 
-    parts = ["上轮任务已完成"]
+    parts = ["历史上下文（非当前任务）：上一轮已完成"]
     if goal:
-        parts.append(f"目标：{goal}")
+        parts.append(f"任务「{goal}」")
     if unique:
-        parts.append("产出：" + "、".join(unique))
-    content = "；".join(parts) + "。"
+        parts.append("产出 " + "、".join(unique))
+    content = "，".join(parts) + "。"
     return {
         "id": f"prior-run-summary:{current_run_id}",
         "role": "user",

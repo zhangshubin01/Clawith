@@ -129,3 +129,26 @@ def test_summary_drops_prior_plain_assistant_reply_and_keeps_only_goal_and_artif
     # The prior run's own closing reply must not be replayed as a directive.
     assert "重新编译完成" not in summary["content"]
     assert "重新编译项目" in summary["content"]
+
+
+def test_summary_is_history_context_not_a_new_instruction():
+    # Regression: the summary is a user-role message, so its wording must not
+    # read as a new directive. "目标：重新编译项目" made the model treat the
+    # prior goal as the current task (it literally replied "用户说…目标：重新
+    # 编译项目" and recompiled). The wording must be past-tense history, marked
+    # as not-the-current-task, and must never use the imperative "目标：".
+    prior = [
+        _marker("run-prior", "重新编译项目"),
+        _assistant("run-prior", "p1", ["call-compile"]),
+        _result("run-prior", "p2", "call-compile", result_ref="artifact://apk"),
+    ]
+    messages = [*prior, _marker("run-current", "优化现在的app项目")]
+
+    summary, _ = bound_current_run_window(messages, current_run_id="run-current")
+
+    content = summary["content"]
+    assert "目标：" not in content
+    assert "历史" in content or "已完成" in content
+    assert "非当前" in content or "已结束" in content
+    assert "重新编译项目" in content
+    assert "artifact://apk" in content
