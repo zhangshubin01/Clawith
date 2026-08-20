@@ -55,6 +55,7 @@ Durable runtime 每轮重发 `system + 动态上下文 + 全量历史`，动态�
 - **结论**：每轮按需注入工具子集（L3-B）与 DeepSeek 前缀缓存**根本互斥**——工具定义在 token 流最前部，任何变动摧毁全部前缀单元
 - **修正**：L3 只做「会话边界/r​​un 边界切换工具集」或纯静态挂载；每轮动态注入**放弃**
 - **状态**：仅结论，未实施（L3 尚未启动）
+- **2026-08-20 补充（实测）**：工具 schema 实测是 **cache-HIT（~0.1x）**，动态块在中间不切断工具缓存（见 `20260820-token-efficiency-completion-rate-research.md`）。故「工具路由与缓存互斥」需细化：路由确实使工具段 miss 化，但工具段本就 ~0.1x，净收益主要在**释放 context window 预算（~50K）+ 减少模型分心（179 工具只用 17 个）**——已下线 GitLab MCP 116 工具迈出第一步。
 
 ### R4 [低] 杂项 follow-up
 
@@ -84,7 +85,5 @@ Durable runtime 每轮重发 `system + 动态上下文 + 全量历史`，动态�
 
 | 文档 | 内容 |
 |---|---|
-| `docs/technical-plans/20260818-context-cost-optimization-plan.md` | 初版方案（L1-L5 分级、量化；第 9 节含设计 v2 演进过程） |
 | `docs/prompt-cache-prefix-research-2026-08-18.md` | 三方官方资料调研（DeepSeek/Anthropic/OpenAI 原文结论） |
-| `docs/technical-plans/20260818-context-cache-hit-model-audit.md` | 缓存命中模型审核（原 V1-V5 编号出处，本文件 R1-R4 对应） |
-| `docs/technical-plans/20260818-message-reorder-test-deploy-review.md` | 测试影响面与部署 A/B 审核 |
+| `docs/technical-plans/20260820-token-efficiency-completion-rate-research.md` | 2026-08-20「省 token + 高完成率」研究：reasoning 回放协议约束、工具 schema cache-HIT 实测、GitLab MCP 下线 |

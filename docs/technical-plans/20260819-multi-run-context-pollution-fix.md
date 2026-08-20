@@ -96,4 +96,4 @@ Clawith 已经有 run 边界的一切基础设施：
 
 - **L1（已落地，提交 `b4a18ba6`）**：`bound_current_run_window` + `ContextBuilder.build` 接入；5 个新测试；全量 2489 passed；arch-guard / ruff 通过。
 - **L2（不做）**：现有 `_prompt_messages` 已把窗口最后一条 user 消息（当前 run 的 current marker = goal 原文）提取为末尾控制消息，L1 之后上一 run 指令不再前置，当前 goal 天然成为唯一末尾指令；再写死会与 `_TURN_CONTINUATION_MESSAGE` 防循环机制冲突。
-- **L3（单独立项，待办）**：产物新鲜度台账兜底——检测最终回复引用的产物路径是否在当前 run 的 `agent_tool_executions.result_ref` 台账里，不在则拦截/降级。属「检测器」而非「根治」，按 `b31f51ec`/`d9eb094e` 教训须用真实 checkpoint 验证字段形态，独立 commit 实施。
+- **L3（单独立项，已研究待实施 → `20260820-artifact-freshness-ledger-fallback-research.md`）**：产物新鲜度台账兜底——检测最终回复引用的产物路径是否在当前 run 的台账里（事实源为 `result_metadata.artifact_refs`，**非** `result_ref`），不在则拦截/降级。属「检测器」而非「根治」，按 `b31f51ec`/`d9eb094e` 教训须用真实 checkpoint 验证字段形态，独立 commit 实施。研究另发现前置缺口：`android_compile`（legacy 文本工具）不 emit 结构化 `artifact_refs`，须先补、与检测器同一批落地。
