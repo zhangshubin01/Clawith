@@ -466,3 +466,67 @@ async def test_failed_delivery_reconnect_retains_original_code_and_worker_trace(
 
     assert packets[-1]["code"] == "provider_rate_limited"
     assert packets[-1]["trace_id"] == "failure-worker-trace"
+
+
+@pytest.mark.asyncio
+async def test_tool_output_content_preserves_trailing_newline() -> None:
+    """tool_output 的多行日志 content 不能被 strip——strip 会丢末尾换行导致前端粘连。"""
+    handle = _handle()
+    agent_id = uuid.uuid4()
+    session_id = uuid.uuid4()
+    user_id = uuid.uuid4()
+    message = ChatMessage(
+        id=uuid.uuid4(),
+        agent_id=agent_id,
+        user_id=user_id,
+        role="assistant",
+        content="Built",
+        conversation_id=str(session_id),
+        mentions=[],
+    )
+    events = [
+        _event(
+            handle,
+            "status_changed",
+            position=1,
+            payload={
+                "activity_type": "tool_output",
+                "status": "running",
+                "name": "android_compile",
+                "call_id": "call-1",
+                "stream": "stdout",
+                "content": "▶ 正在执行 :app:preBuild\n✓ 完成 :app:preBuild\n",
+            },
+        ),
+        _event(handle, "run_completed", position=2, payload={"status": "completed"}),
+        _event(
+            handle,
+            "delivery_succeeded",
+            position=3,
+            payload={
+                "delivery_kind": "terminal",
+                "lifecycle_status": "completed",
+                "message_id": str(message.id),
+            },
+        ),
+    ]
+    packets: list[dict] = []
+
+    async def send(packet: dict) -> None:
+        packets.append(packet)
+
+    await stream_web_chat_run(
+        handle=handle,
+        session_factory=_SessionFactory(_Session(message)),  # type: ignore[arg-type]
+        send_packet=send,
+        agent_id=agent_id,
+        session_id=session_id,
+        user_id=user_id,
+        event_source=_EventSource(events),
+    )
+
+    live = [p for p in packets if p.get("type") == "agentbay_live"]
+    assert len(live) == 1
+    assert live[0]["output"] == "▶ 正在执行 :app:preBuild\n✓ 完成 :app:preBuild\n", (
+        "tool_output 末尾换行不能被 strip，否则前端逐块 append 会粘连"
+    )

@@ -173,7 +173,15 @@ async def stream_web_chat_run(
             continue
 
         if event.event_type == "status_changed" and activity_type == "tool_output":
-            content = _text(payload.get("content"))
+            # 多行日志不能 strip：strip 会去掉末尾换行符，前端逐块 append 时
+            # 块边界粘连（▶/✓ 与 Gradle stdout 之间缺换行）。仅做非空判断，
+            # 保留原始内容（含末尾 \n）。call_id 是单值，仍走 _text。
+            content_raw = payload.get("content")
+            content = (
+                content_raw
+                if isinstance(content_raw, str) and content_raw.strip()
+                else None
+            )
             stream = payload.get("stream", "stdout")
             call_id = _text(payload.get("call_id"))
             if content is not None and call_id is not None:
