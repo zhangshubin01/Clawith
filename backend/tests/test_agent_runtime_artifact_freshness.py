@@ -14,6 +14,7 @@ from app.services.agent_runtime.verification import (
     ToolLedgerRuntimeVerifier,
     _artifact_claims_not_in_ledger,
     _extract_artifact_claims,
+    _extract_completion_claims,
     _normalize_artifact_path,
 )
 
@@ -206,5 +207,84 @@ async def test_verify_ignores_input_file_mentions() -> None:
         {"lifecycle": {"pending_tool_calls": []}},
         _context(),
         "我查看了 app/build.gradle 与 src/main.kt，未做任何修改。",
+    )
+    assert result.outcome == "pass"
+
+
+# ─── A3 completion-claim detection ───
+
+
+def _build_execution(*, tool_name: str = "android_compile", status: str = "succeeded"):
+    return SimpleNamespace(
+        status=status,
+        tool_call_id=f"call-{tool_name}-{status}",
+        tool_name=tool_name,
+        result_ref=None,
+        result_metadata={"artifact_refs": [], "evidence_refs": []},
+    )
+
+
+def test_extract_completion_claims_matches_build_pass() -> None:
+    assert _extract_completion_claims("编译通过，产物已生成。") == [{"type": "build", "text": "编译通过"}]
+
+
+def test_extract_completion_claims_matches_build_fixed() -> None:
+    # 真实失败措辞：已验证…编译隐患已修复
+    claims = _extract_completion_claims("已验证：文件结构完整、编译隐患已修复。")
+    assert any(c["text"] == "编译隐患已修复" for c in claims)
+
+
+def test_extract_completion_claims_ignores_bare_build_noun() -> None:
+    # 无成功/修复动词 → 不触发
+    assert _extract_completion_claims("这里说明如何编译 Linux 内核。") == []
+
+
+def test_extract_completion_claims_ignores_negated_claims() -> None:
+    # 否定表述（尚未通过/未通过/not passed）不得当作成功声明
+    assert _extract_completion_claims("编译尚未通过，还差一个依赖。") == []
+    assert _extract_completion_claims("编译没有通过。") == []
+    assert _extract_completion_claims("the build did not pass") == []
+
+
+def test_extract_completion_claims_dedupes() -> None:
+    assert len(_extract_completion_claims("编译通过。是的，编译通过。")) == 1
+
+
+@pytest.mark.asyncio
+async def test_verify_repairs_build_claim_without_succeeded_build() -> None:
+    verifier = ToolLedgerRuntimeVerifier(
+        session_factory=_factory(_ManyResult([_build_execution(status="failed")]))
+    )
+    result = await verifier.verify(  # type: ignore[arg-type]
+        {"lifecycle": {"pending_tool_calls": []}},
+        _context(),
+        "编译通过。",
+    )
+    assert result.outcome == "repair"
+    assert result.details["code"] == "unverified_completion_claim"
+
+
+@pytest.mark.asyncio
+async def test_verify_passes_build_claim_backed_by_succeeded_build() -> None:
+    verifier = ToolLedgerRuntimeVerifier(
+        session_factory=_factory(_ManyResult([_build_execution(status="succeeded")])),
+        reference_exists=_always_readable,
+    )
+    result = await verifier.verify(  # type: ignore[arg-type]
+        {"lifecycle": {"pending_tool_calls": []}},
+        _context(),
+        "编译通过。",
+    )
+    assert result.outcome == "pass"
+
+
+@pytest.mark.asyncio
+async def test_verify_skips_build_claim_when_run_never_touched_build_tools() -> None:
+    # 纯研究 run：台账无 android_compile/execute_code → 任务类型护栏使 A3 不触发
+    verifier = ToolLedgerRuntimeVerifier(session_factory=_factory(_ManyResult([])))
+    result = await verifier.verify(  # type: ignore[arg-type]
+        {"lifecycle": {"pending_tool_calls": []}},
+        _context(),
+        "关于如何编译 Android 应用的说明：先装 SDK，再编译通过即可。",
     )
     assert result.outcome == "pass"

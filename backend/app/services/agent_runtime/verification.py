@@ -136,6 +136,39 @@ def _artifact_claims_not_in_ledger(
     return uncovered
 
 
+# A3 completion-claim detection (see
+# docs/technical-plans/20260820-a3-completion-claim-verification.md). Only
+# "build/compile noun + success/fix verb" pairs are matched — conservative, so a
+# bare "编译" or "如何编译…" never triggers. Test claims are out of scope for the
+# first cut (evidence is fuzzy — no dedicated test tool).
+_BUILD_CLAIM_RE = re.compile(
+    r"(?:编译|构建|build|compile)[^\n。；;！!]{0,20}"
+    r"(?:通过|成功|已修复|passed|succeeded|success|fixed|ok)",
+    re.IGNORECASE,
+)
+# Negation guard: "编译尚未通过/没有通过/not passed" must not read as a success
+# claim. 未/没/not are unambiguous negators (unlike 不, which appears in positive
+# "不再报错" etc.).
+_NEGATION_TOKENS = ("未", "没", "not")
+
+
+def _extract_completion_claims(candidate: str) -> list[dict]:
+    """Extract build-completion claims from a finish candidate.
+
+    Returns deduplicated ``{"type": "build", "text": ...}`` dicts.
+    """
+    claims: list[dict] = []
+    seen: set[str] = set()
+    for match in _BUILD_CLAIM_RE.finditer(candidate):
+        text = match.group(0).strip()
+        if not text or any(neg in text.lower() for neg in _NEGATION_TOKENS):
+            continue
+        if text not in seen:
+            seen.add(text)
+            claims.append({"type": "build", "text": text})
+    return claims
+
+
 def _async_pending_operation(execution: AgentToolExecution) -> dict | None:
     metadata = getattr(execution, "result_metadata", None)
     if (
@@ -787,6 +820,37 @@ class ToolLedgerRuntimeVerifier:
                     "paths": uncovered,
                 },
             )
+
+        build_claims = _extract_completion_claims(candidate)
+        if build_claims:
+            # Task-type guard: only apply when this run actually touched a
+            # build/execution tool — a pure research/writing run never does, so
+            # general agents are unaffected.
+            touched_build_tools = any(
+                execution.tool_name in {"android_compile", "execute_code"}
+                for execution in executions
+            )
+            if touched_build_tools:
+                succeeded_build = any(
+                    execution.tool_name == "android_compile"
+                    and execution.status == "succeeded"
+                    for execution in executions
+                )
+                if not succeeded_build:
+                    return VerificationResult(
+                        outcome="repair",
+                        reason=(
+                            "The finish candidate claims a successful build/compile ("
+                            + ", ".join(c["text"] for c in build_claims)
+                            + ") but this run's tool ledger has no succeeded "
+                            "android_compile. If you did build successfully, name the "
+                            "tool and its result; otherwise reword the claim as 未验证/待验证."
+                        ),
+                        details={
+                            "code": "unverified_completion_claim",
+                            "claims": [c["text"] for c in build_claims],
+                        },
+                    )
 
         return VerificationResult(
             outcome="pass",
