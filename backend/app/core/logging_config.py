@@ -26,6 +26,11 @@ NOISY_CONNECTION_LOGGERS = {
     # emitted by httpx/httpcore for every model call and tool HTTP request.
     "httpx": logging.WARNING,
     "httpcore": logging.WARNING,
+    # LangGraph logs every safe-read tool retry with a full exc_info traceback.
+    # Retries are expected control flow (not errors); their outcome is already
+    # recorded in the tool ledger, so the INFO retry line is noise — quiet it
+    # while keeping any WARNING/ERROR from the same module visible.
+    "langgraph.pregel._retry": logging.WARNING,
 }
 
 
