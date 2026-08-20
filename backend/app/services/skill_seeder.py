@@ -944,7 +944,103 @@ To avoid unnecessary deployments, save Vercel build limits, and prevent serving 
 """
             }
         ]
-    }
+    },
+    # ─── Verification Checklist (mandatory default) ─────────
+    {
+        "name": "Verification Checklist",
+        "description": "Verify deliverables before declaring them done. Use when: finishing a coding/build/engineering task and about to report 'completed / verified / passed / fixed'. NOT for: live-chat replies that need no verification.",
+        "category": "development",
+        "icon": "✅",
+        "folder_name": "verification-checklist",
+        "is_default": True,
+        "files": [
+            {
+                "path": "SKILL.md",
+                "content": """---
+name: Verification Checklist
+description: Verify deliverables before declaring them done — compile, tests, and file completeness must be backed by real tool results
+---
+
+# 交付验证清单（完成 = 已验证）
+
+## 何时使用
+任何「交付 / 完成 / 已验证 / 编译通过 / 测试通过 / 已修复」的结论出口前，先过这份清单。
+
+## 核心原则
+- 结论必须能被**真实工具结果**背书，不能凭「我记得写了」或静态阅读下判断。
+- 没验证的，一律说「未验证」，禁止说「已完成 / 已验证 / 已修复」。
+
+## 交付前必查
+- [ ] **编译**：构建类任务必须真实执行过编译/构建工具，且返回 succeeded（不是「我没看到报错」）。
+- [ ] **测试**：写了测试就必须真的跑过（如 `./gradlew test`），用结果说话，不能只写不跑。
+- [ ] **文件完整**：关键入口文件（构建脚本、wrapper、清单、资源）必须用 list_files/read_file 确认存在，不能凭印象说「结构完整」。
+- [ ] **产物存在**：宣称的产物路径（APK / 报告 / 文件）必须与工具返回/台账一致，不能编路径。
+- [ ] **声明可追溯**：回复里每个「已完成 / 通过 / 已验证」都能对应一条 succeeded 的工具执行记录。
+
+## 反面清单（禁止）
+- ❌ 未编译就说「编译通过」「编译隐患已修复」
+- ❌ 写了测试却从没跑就说「已覆盖测试」「N 个用例」
+- ❌ 手写工程漏了构建入口（gradlew / wrapper）就说「项目已完成」「文件结构完整」
+- ❌ 工具超时/失败后脑补结果，或把「待确认」写成既定结论
+""",
+            },
+        ],
+    },
+    # ─── Android Project Scaffold (mandatory default) ─────────
+    {
+        "name": "Android Project Scaffold",
+        "description": "Generate a complete, buildable Android project skeleton with the Gradle wrapper included. Use when: creating a new Android app from scratch, or when android_compile reports a missing Gradle wrapper (gradlew not found). NOT for: incremental edits to an existing project.",
+        "category": "development",
+        "icon": "📱",
+        "folder_name": "android-scaffold",
+        "is_default": True,
+        "files": [
+            {
+                "path": "SKILL.md",
+                "content": """---
+name: Android Project Scaffold
+description: Generate a complete, buildable Android project skeleton with the Gradle wrapper included
+---
+
+# Android 工程脚手架
+
+## 何时使用
+- 从零新建 Android 项目
+- `android_compile` 报「gradlew not found / 缺少 Gradle wrapper」时
+
+## 核心原则：一次产出完整工程，禁止手写遗漏
+Android 工程必须包含 Gradle Wrapper（`gradlew`、`gradle/wrapper/gradle-wrapper.jar`、`gradle/wrapper/gradle-wrapper.properties`）。它们是**构建入口**，缺失则无法编译，且 `gradle-wrapper.jar` 是二进制、`write_file` 手写不出。
+
+## 标准文件清单（必须全部就位）
+```
+<project>/
+├── gradlew / gradlew.bat            # 构建入口脚本
+├── gradle/wrapper/
+│   ├── gradle-wrapper.jar           # 二进制，不可 write_file 手写生成
+│   └── gradle-wrapper.properties    # 指向固定 Gradle 版本
+├── gradle.properties
+├── settings.gradle.kts
+├── build.gradle.kts
+├── gradle/libs.versions.toml
+└── app/
+    ├── build.gradle.kts
+    └── src/main/AndroidManifest.xml + java/ + res/
+```
+
+## 步骤
+1. 用模板/脚手架生成骨架，而不是逐个 `write_file` 手写（手写必然漏 wrapper）。
+2. 写完立刻 `find_files` / `list_files` 确认 `gradlew` 与 `gradle/wrapper/gradle-wrapper.jar` 真实存在。
+3. 再调 `android_compile` 编译；若它提示缺 wrapper，按提示补**可信来源**的 wrapper（官方 Gradle 发行版解包出的、或平台提供的固定 wrapper），不要从任意网络地址抓二进制。
+4. 编译返回 succeeded 后才可宣称「完成」。
+
+## 红线（历史教训）
+- ❌ 不改写 `gradlew` / wrapper 来绕过缓存或网络问题（会污染工作区，跨 run 持久）。
+- ❌ 不从网络 curl 未知来源的 `gradle-wrapper.jar`（供应链风险）。
+- ❌ 编译失败却宣称「项目已完成」。
+""",
+            },
+        ],
+    },
 ]
 
 
