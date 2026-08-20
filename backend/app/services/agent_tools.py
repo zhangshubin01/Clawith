@@ -2627,6 +2627,26 @@ _GENERAL_ERROR_RE = re.compile(
     r"^(?:(?:\S+):(?:\d+):(?:\d+):\s*)?(?:error|Error|ERROR):\s*(.*)"
 )
 
+# Gradle 配置期 / 系统级错误：这些行没有 "error:" 前缀，也不属于 kotlinc /
+# javac 编译器格式。它们出现在 FAILURE 段的 "What went wrong:" 下，或由
+# Gradle 直接打印。file=""（无文件定位），message=整行。
+#   例: Task 'x' not found ... / Execution failed for task ':x'. /
+#       Script compilation error: / A problem occurred configuring ... /
+#       Timeout waiting to lock ... / Gradle could not start your build. /
+#       Could not read workspace metadata ... / java.io.IOException: ...
+_GRADLE_SYSTEM_ERROR_RE = re.compile(
+    r"^(?:"
+    r"Task\s+'[^']+'\s+not found"                 # Task 名拼错/不存在
+    r"|Execution failed for task\b"               # 任务执行失败标记
+    r"|Script compilation error:"                 # 脚本编译错误
+    r"|A problem occurred (?:configuring|evaluating)"  # 配置/评估期失败
+    r"|Timeout waiting to lock\b"                 # Gradle 缓存/锁超时
+    r"|Gradle could not start your build"         # 构建无法启动
+    r"|Could not (?:read|update)\b"               # workspace 元数据/文件损坏
+    r"|java\.io\.(?:IOException|UncheckedIOException):"  # IO 异常（磁盘满等）
+    r")"
+)
+
 # 英文 + 中文 Gradle summary: "27 errors, 5 warnings" / "27 个错误, 5 个警告"
 _BUILD_SUMMARY_RE = re.compile(
     r"(\d+)\s*(?:errors?|个错误|エラー)[,;\s]+(\d+)\s*(?:warnings?|个警告|警告)"
@@ -2724,6 +2744,19 @@ def _parse_android_build_errors(output: str) -> _BuildErrorSummary:
                 if message:
                     err = _BuildError(category="error", file="", line=None, column=None, message=message)
                     summary.errors.append(err)
+
+        # Gradle 配置期 / 系统级错误 — 同样 file=""，不去重
+        if not matched:
+            if _GRADLE_SYSTEM_ERROR_RE.match(line_stripped):
+                matched = True
+                err = _BuildError(
+                    category="error",
+                    file="",
+                    line=None,
+                    column=None,
+                    message=line_stripped,
+                )
+                summary.errors.append(err)
 
         # 统计未识别行
         if not matched and _is_likely_error_line(line_stripped):
