@@ -103,6 +103,39 @@ def bound_current_run_window(
     return summary, current
 
 
+def summary_is_stale_for_run(
+    messages: Sequence[Mapping[str, object]],
+    *,
+    current_run_id: str,
+    summary_covered_through_message_id: str | None,
+) -> bool:
+    """Whether the running summary covers only history before the current Run.
+
+    The LangGraph ``thread_summary`` channel is a cross-Run "work in progress"
+    summary. When a Thread hosts multiple Runs, a summary covering only a
+    *previous* Run's in-progress state (e.g. "builds still failing") poisons
+    the new directive — the model anchors the new task onto the old one. That
+    summary must not be fed to the model; ``_prior_run_summary`` already
+    supplies the neutral "非当前任务" history note.
+
+    The watermark alone cannot be compared positionally: compaction records
+    ``summary_covered_through_message_id`` as the last compacted message's id
+    and removes the whole compactable prefix in the same frame, so the
+    watermark message is never present in ``messages`` again. The reliable
+    signal is the current Run's marker position: if it is the first message,
+    prior Runs are either absent or fully compacted away and the summary
+    belongs to (or already covers) the current Run; if any message precedes
+    the marker, prior-Run messages survive and the summary covers only
+    pre-Run history.
+    """
+    if not summary_covered_through_message_id:
+        return False
+    current_start = _current_run_start(messages, current_run_id=current_run_id)
+    if current_start is None or current_start == 0:
+        return False
+    return True
+
+
 def model_visible_thread_messages(
     messages: Sequence[Mapping[str, object]],
     *,
@@ -137,4 +170,5 @@ def model_visible_thread_messages(
 __all__ = [
     "bound_current_run_window",
     "model_visible_thread_messages",
+    "summary_is_stale_for_run",
 ]

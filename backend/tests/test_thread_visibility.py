@@ -6,7 +6,10 @@ inherits a previous Run's directive or tool facts verbatim. These tests pin the
 pure ``bound_current_run_window`` seam.
 """
 
-from app.services.agent_runtime.thread_visibility import bound_current_run_window
+from app.services.agent_runtime.thread_visibility import (
+    bound_current_run_window,
+    summary_is_stale_for_run,
+)
 
 
 def _marker(run_id: str, content: str) -> dict:
@@ -152,3 +155,77 @@ def test_summary_is_history_context_not_a_new_instruction():
     assert "非当前" in content or "已结束" in content
     assert "重新编译项目" in content
     assert "artifact://apk" in content
+
+
+def test_summary_without_watermark_is_not_stale():
+    messages = [
+        _marker("run-prior", "旧任务"),
+        _marker("run-current", "新任务"),
+    ]
+    assert not summary_is_stale_for_run(
+        messages,
+        current_run_id="run-current",
+        summary_covered_through_message_id=None,
+    )
+
+
+def test_single_run_thread_summary_is_not_stale():
+    messages = [
+        _marker("run-a", "compile"),
+        _assistant("run-a", "a1", ["call-1"]),
+        _result("run-a", "r1", "call-1"),
+    ]
+    assert not summary_is_stale_for_run(
+        messages,
+        current_run_id="run-a",
+        summary_covered_through_message_id="r1",
+    )
+
+
+def test_no_marker_summary_is_not_stale():
+    messages = [
+        {"id": "m1", "role": "user", "content": "hi"},
+        {"id": "m2", "role": "assistant", "content": "hello"},
+    ]
+    assert not summary_is_stale_for_run(
+        messages,
+        current_run_id="run-x",
+        summary_covered_through_message_id="m1",
+    )
+
+
+def test_stale_summary_when_prior_run_messages_precede_marker():
+    # The watermark message is gone (compaction RemoveMessage'd it), and the
+    # current Run's marker is not the first message — prior-Run messages still
+    # precede it, so the summary covers only pre-Run history.
+    prior = [
+        _marker("run-prior", "旧任务"),
+        _assistant("run-prior", "p1", ["call-1"]),
+        _result("run-prior", "p2", "call-1"),
+    ]
+    current = [
+        _marker("run-current", "新任务"),
+        _assistant("run-current", "c1", ["call-2"]),
+    ]
+    messages = [*prior, *current]
+    assert summary_is_stale_for_run(
+        messages,
+        current_run_id="run-current",
+        summary_covered_through_message_id="compacted-away-message-id",
+    )
+
+
+def test_summary_retained_when_prior_run_compacted():
+    # After the prior Run is compacted away, the current Run's marker is the
+    # first message; the summary covers (or belongs to) the current Run and
+    # must stay visible.
+    current = [
+        _marker("run-current", "新任务"),
+        _assistant("run-current", "c1", ["call-2"]),
+        _result("run-current", "c2", "call-2"),
+    ]
+    assert not summary_is_stale_for_run(
+        current,
+        current_run_id="run-current",
+        summary_covered_through_message_id="compacted-away-message-id",
+    )

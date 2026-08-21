@@ -44,7 +44,10 @@ from app.services.agent_runtime.tool_exchange import (
     ToolExchangeCompactionSummary,
     build_recent_tool_safe_window,
 )
-from app.services.agent_runtime.thread_visibility import bound_current_run_window
+from app.services.agent_runtime.thread_visibility import (
+    bound_current_run_window,
+    summary_is_stale_for_run,
+)
 
 if TYPE_CHECKING:
     from app.services.agent_runtime.group_context_builder import GroupContextBuilder
@@ -560,11 +563,19 @@ class ContextBuilder:
         )
 
         raw_summary = state.get("thread_summary")
-        thread_summary = (
-            None
-            if raw_summary is None
-            else _json_object(raw_summary, field="thread_running_summary")
-        )
+        covered_id = state.get("summary_covered_through_message_id")
+        covered_id = covered_id if isinstance(covered_id, str) else None
+        # A running summary whose watermark predates the current Run is a
+        # previous Run's "work in progress" state and must not be fed to this
+        # Run's model; ``prior_run_summary`` above already supplies the neutral
+        # "非当前任务" history note.
+        thread_summary = None
+        if raw_summary is not None and not summary_is_stale_for_run(
+            thread_messages,
+            current_run_id=context.run_id,
+            summary_covered_through_message_id=covered_id,
+        ):
+            thread_summary = _json_object(raw_summary, field="thread_running_summary")
 
         return RuntimeContextBuild(
             session_context_snapshot=session_context,

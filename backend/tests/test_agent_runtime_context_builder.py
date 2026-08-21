@@ -102,6 +102,7 @@ def _state(
     status: str = "running",
     next_route: str = "model",
     run_id: str | None = None,
+    summary_covered_through_message_id: str | None = None,
 ) -> RuntimeGraphState:
     return {
         "registry": RunRegistrySnapshot(
@@ -125,6 +126,7 @@ def _state(
             "unfinished_or_blocked": "",
             "next_actions": "Continue",
         },
+        "summary_covered_through_message_id": summary_covered_through_message_id,
         "lifecycle": {
             "status": status,
             "next_route": next_route,
@@ -339,6 +341,87 @@ async def test_multi_run_thread_bounds_window_at_current_run_and_summarizes_prio
     summary = built.recent_thread_messages[0]
     assert "重新编译项目" in summary["content"]
     assert "app-debug-20260819-1457.apk" in summary["content"]
+
+
+@pytest.mark.asyncio
+async def test_stale_thread_summary_is_excluded_from_new_run():
+    # A summary whose watermark predates the current Run describes a previous
+    # Run's in-progress state; it must not be fed to the new Run's model.
+    run_id = str(uuid.uuid4())
+    prior_run_id = str(uuid.uuid4())
+    prior_marker = {
+        "id": f"prior-input-{prior_run_id}",
+        "role": "user",
+        "content": "接入 Hilt、或加 Compose UI 测试",
+        "runtime_input": "current",
+        "runtime_run_id": prior_run_id,
+    }
+    prior_result = _tool_result("prior-result", "call-compile")
+    current_marker = {
+        "id": f"current-input-{run_id}",
+        "role": "user",
+        "content": "重构这个app 项目",
+        "runtime_input": "current",
+        "runtime_run_id": run_id,
+    }
+    run_messages = [prior_marker, prior_result, current_marker, _normal("recent-0")]
+    snapshots = RunInputSnapshots(
+        session_context=SessionContextSnapshot.empty().to_json(),
+        session_context_version=0,
+        recent_session_messages=(),
+        related_run_summaries=(),
+        initial_input={"content": "start"},
+    )
+    builder = context_builder.ContextBuilder(
+        _SessionContextService(SessionContextPack(SessionContextSnapshot.empty(), ()))
+    )
+    state = _state(
+        snapshots=snapshots,
+        run_messages=run_messages,
+        run_id=run_id,
+        summary_covered_through_message_id="prior-result",
+    )
+
+    built = await builder.build(state, _context(state))
+
+    assert built.thread_running_summary is None
+
+
+@pytest.mark.asyncio
+async def test_current_run_summary_is_retained():
+    # After the prior Run is compacted away, the current marker is the first
+    # message and the current Run's own in-progress summary stays visible.
+    run_id = str(uuid.uuid4())
+    current_marker = {
+        "id": f"current-input-{run_id}",
+        "role": "user",
+        "content": "重构这个app 项目",
+        "runtime_input": "current",
+        "runtime_run_id": run_id,
+    }
+    current_result = _tool_result("current-result", "call-read")
+    run_messages = [current_marker, current_result]
+    snapshots = RunInputSnapshots(
+        session_context=SessionContextSnapshot.empty().to_json(),
+        session_context_version=0,
+        recent_session_messages=(),
+        related_run_summaries=(),
+        initial_input={"content": "start"},
+    )
+    builder = context_builder.ContextBuilder(
+        _SessionContextService(SessionContextPack(SessionContextSnapshot.empty(), ()))
+    )
+    state = _state(
+        snapshots=snapshots,
+        run_messages=run_messages,
+        run_id=run_id,
+        summary_covered_through_message_id="compacted-away-message-id",
+    )
+
+    built = await builder.build(state, _context(state))
+
+    assert built.thread_running_summary is not None
+    assert built.thread_running_summary["completed_work_and_results"] == "Read docs"
 
 
 @pytest.mark.asyncio
