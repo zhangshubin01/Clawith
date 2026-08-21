@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 import asyncio
 import logging
-from typing import Literal, Protocol, cast
+from typing import Callable, Literal, Protocol, cast
 import uuid
 
 from sqlalchemy import select
@@ -482,9 +482,23 @@ class RuntimeCommandWorker:
                     max_attempts=self._max_attempts,
                 )
 
-    async def _heartbeat(self, command: RuntimeCommandRecord, stop: asyncio.Event) -> None:
+    async def _heartbeat(
+        self,
+        command: RuntimeCommandRecord,
+        stop: asyncio.Event,
+        liveness_touch: Callable[[], None] | None = None,
+    ) -> None:
         consecutive_failures = 0
         while True:
+            # The heartbeat runs for the entire command execution, so touching
+            # liveness here keeps the owning daemon's `last_active_at` fresh even
+            # when a long graph execution prevents `run_once` from returning —
+            # which would otherwise freeze `last_active_at` and trip the
+            # supervisor's false STALLED alarm. Touch unconditionally: as long as
+            # this heartbeat task is scheduled the daemon is alive, regardless of
+            # whether a particular claim renewal just failed.
+            if liveness_touch is not None:
+                liveness_touch()
             try:
                 await asyncio.wait_for(stop.wait(), timeout=self._claim_renew_seconds)
                 return
@@ -1003,8 +1017,18 @@ class RuntimeCommandWorker:
             run=run,
         )
 
-    async def run_once(self) -> CommandWorkResult:
-        """Process at most one Command; callers own daemon polling/backoff."""
+    async def run_once(
+        self,
+        *,
+        liveness_touch: Callable[[], None] | None = None,
+    ) -> CommandWorkResult:
+        """Process at most one Command; callers own daemon polling/backoff.
+
+        ``liveness_touch`` is invoked by the claim heartbeat throughout a
+        command execution, so the caller (a ``RuntimeCommandDaemon``) can keep
+        its liveness clock advancing even while a long graph keeps this
+        coroutine from returning.
+        """
         command = await self._claim()
         if command is None:
             return CommandWorkResult(status="idle")
@@ -1014,7 +1038,7 @@ class RuntimeCommandWorker:
 
         stop_heartbeat = asyncio.Event()
         heartbeat = asyncio.create_task(
-            self._heartbeat(command, stop_heartbeat),
+            self._heartbeat(command, stop_heartbeat, liveness_touch),
             name=f"runtime-command-heartbeat-{command.id}",
         )
         try:

@@ -484,6 +484,67 @@ async def test_claim_commits_before_lock_and_heartbeat_runs_during_execution() -
 
 
 @pytest.mark.asyncio
+async def test_run_once_touches_liveness_throughout_long_execution() -> None:
+    """The claim heartbeat keeps refreshing liveness during a long command.
+
+    Regresses the false STALLED alarm: a graph execution longer than the
+    supervisor's stall threshold froze ``last_active_at`` because ``run_once``
+    had not returned. ``run_once`` must forward ``liveness_touch`` into the
+    heartbeat, which touches it every renewal interval while the executor is
+    still running.
+    """
+    timeline: list[str] = []
+    run = _run()
+    command = _command(run, "start")
+    executor_done = asyncio.Event()
+    touches = 0
+
+    def touch() -> None:
+        nonlocal touches
+        touches += 1
+
+    reader = _Reader(
+        command=(None, _checkpoint(run, status="completed", command=command)),
+        latest=(None,),
+    )
+    executor = _Executor(timeline, wait_for=executor_done)
+
+    with (
+        patch(
+            "app.services.agent_runtime.command_worker.claim_next_command",
+            new=AsyncMock(return_value=command),
+        ),
+        patch(
+            "app.services.agent_runtime.command_worker.renew_command_claim",
+            new=AsyncMock(),
+        ),
+        patch(
+            "app.services.agent_runtime.command_worker.mark_command_applied",
+            new=AsyncMock(),
+        ),
+    ):
+        worker = _worker(
+            timeline=timeline,
+            run=run,
+            reader=reader,
+            executor=executor,
+            claim_renew_seconds=0.01,
+        )
+        task = asyncio.create_task(worker.run_once(liveness_touch=touch))
+        # Let the heartbeat run several renewal intervals while the executor
+        # blocks waiting for `executor_done`.
+        for _ in range(200):
+            if touches >= 3:
+                break
+            await asyncio.sleep(0.005)
+        executor_done.set()
+        result = await task
+
+    assert result.status == "applied"
+    assert touches >= 3
+
+
+@pytest.mark.asyncio
 async def test_heartbeat_survives_transient_renewal_failure() -> None:
     """One transient renewal failure must not permanently kill the heartbeat.
 

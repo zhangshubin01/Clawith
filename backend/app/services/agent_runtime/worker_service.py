@@ -407,6 +407,18 @@ class RuntimeCommandDaemon:
         # ``RuntimeCommandDaemonSupervisor`` to detect silent stalls. A stalled
         # daemon (stuck acquiring a DB session or in the claim query) never
         # advances this, so the supervisor can dump its stack and surface it.
+        # It is also advanced mid-command by ``_touch_liveness`` (via the claim
+        # heartbeat) so a long graph execution is not mistaken for a stall.
+        self.last_active_at = time.monotonic()
+
+    def _touch_liveness(self) -> None:
+        """Advance ``last_active_at`` from the running command's heartbeat.
+
+        A long graph execution keeps ``run_once`` from returning, which would
+        otherwise freeze ``last_active_at`` and trip the supervisor's false
+        STALLED alarm. The claim heartbeat calls this through the whole
+        command, so the daemon is flagged only when it genuinely stops running.
+        """
         self.last_active_at = time.monotonic()
 
     @staticmethod
@@ -421,7 +433,9 @@ class RuntimeCommandDaemon:
         while not stop.is_set():
             delay = 0.0
             try:
-                result = await self._worker.run_once()
+                result = await self._worker.run_once(
+                    liveness_touch=self._touch_liveness,
+                )
             except asyncio.CancelledError:
                 raise
             except GraphRecursionError:

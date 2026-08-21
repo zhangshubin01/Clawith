@@ -68,7 +68,8 @@ class _Worker:
         self.results = deque(results)
         self.calls = 0
 
-    async def run_once(self) -> CommandWorkResult:
+    async def run_once(self, *, liveness_touch=None) -> CommandWorkResult:
+        del liveness_touch  # the daemon passes it; this fake does not need it
         self.calls += 1
         result = self.results.popleft()
         if not self.results:
@@ -606,6 +607,57 @@ async def test_supervisor_heartbeat_logs_when_healthy(caplog) -> None:
         supervisor._check()
 
     assert "alive" in caplog.text
+    assert "STALLED" not in caplog.text
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+
+@pytest.mark.asyncio
+async def test_supervisor_does_not_report_daemon_mid_long_command(caplog) -> None:
+    """A long command keeps `last_active_at` fresh via the liveness touch.
+
+    Regresses the false STALLED alarm: a graph execution longer than
+    ``stall_seconds`` froze ``last_active_at`` (``run_once`` had not returned),
+    so the supervisor misreported a healthy daemon as STALLED. The daemon now
+    passes ``_touch_liveness`` into ``run_once`` and the claim heartbeat keeps
+    touching it while the command runs, so a slow-but-alive daemon is never
+    flagged.
+    """
+
+    class LongCommandWorker:
+        def __init__(self) -> None:
+            self.received_touch: bool = False
+
+        async def run_once(self, *, liveness_touch=None):
+            # Mirror the real worker: a claimed command's heartbeat touches
+            # liveness while the graph executes for a long time.
+            self.received_touch = liveness_touch is not None
+            if liveness_touch is not None:
+                liveness_touch()
+            await asyncio.sleep(3600)  # command never returns within the test
+
+    daemon = RuntimeCommandDaemon(LongCommandWorker())  # type: ignore[arg-type]
+    # Backdate so the daemon would look stalled if liveness weren't refreshed.
+    daemon.last_active_at = time.monotonic() - 1000.0
+
+    stop = asyncio.Event()
+    task = asyncio.create_task(daemon.run(stop), name="agent-runtime-command-worker-1")
+    await asyncio.sleep(0)  # let run_once start and the touch fire
+
+    supervisor = RuntimeCommandDaemonSupervisor(
+        [(task, daemon)],
+        scan_seconds=1.0,
+        stall_seconds=60.0,
+        heartbeat_seconds=300.0,
+    )
+    with caplog.at_level(
+        logging.ERROR,
+        logger="app.services.agent_runtime.worker_service",
+    ):
+        supervisor._check()
+
     assert "STALLED" not in caplog.text
 
     task.cancel()
