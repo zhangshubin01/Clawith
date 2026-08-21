@@ -209,7 +209,8 @@ def _usage_from_response_or_estimate(response, api_messages: list[LLMMessage]) -
             }
             for message in api_messages
         ],
-        chars_per_token=3,
+        chars_per_token=4,
+        utf8_bytes=True,
     )
     output_usage = estimate_token_usage_from_chars(len(response.content or ""))
     total_tokens = input_tokens + output_usage.total_tokens

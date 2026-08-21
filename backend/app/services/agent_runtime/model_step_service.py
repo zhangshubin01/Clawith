@@ -628,7 +628,12 @@ def _soft_loop_reminder_message(signal: tuple[str, str, int]) -> LLMMessage:
 
 
 def _estimate_tokens(value: object) -> int:
-    return estimate_multimodal_tokens(value, chars_per_token=3)
+    # UTF-8 bytes / 4 aligns with run_compactor and session compactor.
+    # Measured against the real DeepSeek tokenizer this is +4%~+26% (vs the
+    # old chars/3 which over-estimates English reasoning by ~+69%, prematurely
+    # triggering compaction). See docs/technical-plans/
+    # 20260820-token-estimation-unification-deep-analysis.md.
+    return estimate_multimodal_tokens(value, chars_per_token=4, utf8_bytes=True)
 
 
 def _message_token_counter(messages: Sequence[Mapping[str, object]]) -> int:
