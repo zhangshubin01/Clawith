@@ -363,6 +363,14 @@ def build_runtime_worker_components(
     )
 
 
+# Ceiling for the idle/retry backoff streak. The backoff is already pinned at
+# max_backoff_seconds after a tiny exponent, so this only exists to keep
+# ``2 ** quiet_steps`` from overflowing float (OverflowError) during long idle
+# periods. 16 is far below the ~1024 overflow threshold and far above the ~3-7
+# steps any configured base/max actually needs.
+_QUIET_STEPS_CEILING = 16
+
+
 class RuntimeCommandDaemon:
     """Continuously drain the Command Inbox with bounded idle/error polling."""
 
@@ -434,9 +442,17 @@ class RuntimeCommandDaemon:
                 await self._wait(stop, delay)
 
     def _advance_backoff(self, result: CommandWorkResult | None) -> None:
-        """Grow the quiet streak on idle/retry; any other outcome resets it."""
+        """Grow the quiet streak on idle/retry; any other outcome resets it.
+
+        The streak is capped: the delay is already pinned at
+        ``max_backoff_seconds`` once the exponent exceeds
+        ``log2(max_backoff_seconds / base)``, so a larger streak contributes
+        nothing — and ``2 ** n`` would overflow ``float`` (``OverflowError``)
+        at ``n ≈ 1024``, which a long idle period reaches (~1025 idle polls)
+        and crashes the daemon (the 2026-08-21 outage).
+        """
         if result is not None and result.status in ("idle", "retry"):
-            self._quiet_steps += 1
+            self._quiet_steps = min(self._quiet_steps + 1, _QUIET_STEPS_CEILING)
         else:
             self._quiet_steps = 0
 

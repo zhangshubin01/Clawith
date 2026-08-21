@@ -204,6 +204,29 @@ def test_command_daemon_retry_backs_off_from_retry_base() -> None:
     assert delays == [0.1, 0.2, 0.4, 0.8, 1.0, 1.0]
 
 
+def test_command_daemon_backoff_does_not_overflow_after_long_idle_streak() -> None:
+    """2 ** quiet_steps must not overflow float after a very long idle streak.
+
+    Regresses the 2026-08-21 outage: an unbounded quiet streak reached
+    ~1025 idle polls and ``2 ** (quiet_steps - 1)`` raised ``OverflowError``,
+    crashing every command daemon.
+    """
+    daemon = RuntimeCommandDaemon(
+        _Worker(asyncio.Event()),  # type: ignore[arg-type]
+        idle_delay_seconds=1.0,
+        retry_delay_seconds=0.1,
+        error_delay_seconds=1.0,
+        max_backoff_seconds=4.0,
+    )
+
+    # Far past the previous ~1024-polls overflow threshold.
+    for _ in range(3000):
+        daemon._delay_after(CommandWorkResult(status="idle"))
+
+    # Still pinned at the ceiling, never OverflowError.
+    assert daemon._delay_after(CommandWorkResult(status="idle")) == 4.0
+
+
 def test_command_daemon_rejects_nonpositive_backoff_ceiling() -> None:
     with pytest.raises(ValueError):
         RuntimeCommandDaemon(
