@@ -8,7 +8,8 @@ import asyncio
 import logging
 import os
 import socket
-from typing import AsyncIterator
+import time
+from typing import AsyncIterator, Sequence
 import uuid
 
 from langgraph.checkpoint.base import BaseCheckpointSaver
@@ -394,6 +395,11 @@ class RuntimeCommandDaemon:
         self._error_delay_seconds = error_delay_seconds
         self._max_backoff_seconds = max_backoff_seconds
         self._quiet_steps = 0
+        # Monotonic clock of the last completed ``run_once`` iteration, read by
+        # ``RuntimeCommandDaemonSupervisor`` to detect silent stalls. A stalled
+        # daemon (stuck acquiring a DB session or in the claim query) never
+        # advances this, so the supervisor can dump its stack and surface it.
+        self.last_active_at = time.monotonic()
 
     @staticmethod
     async def _wait(stop: asyncio.Event, delay: float) -> None:
@@ -423,6 +429,7 @@ class RuntimeCommandDaemon:
                 self._advance_backoff(None)
             else:
                 delay = self._delay_after(result)
+            self.last_active_at = time.monotonic()
             if delay:
                 await self._wait(stop, delay)
 
@@ -439,6 +446,87 @@ class RuntimeCommandDaemon:
             return 0.0
         base = self._idle_delay_seconds if result.status == "idle" else self._retry_delay_seconds
         return min(base * (2 ** (self._quiet_steps - 1)), self._max_backoff_seconds)
+
+
+class RuntimeCommandDaemonSupervisor:
+    """Watch command daemons for silent stalls and dump their stacks.
+
+    A command daemon should complete ``run_once`` at least every few seconds
+    (idle backoff ≤ ``max_backoff_seconds``). When it stops advancing
+    ``last_active_at`` for ``stall_seconds`` — e.g. it is stuck acquiring a DB
+    session from an exhausted pool, or in the claim query — the supervisor
+    surfaces the stall with the daemon's coroutine stack so the exact await
+    point is visible in logs instead of vanishing silently.
+    """
+
+    def __init__(
+        self,
+        daemons: Sequence[tuple[asyncio.Task, RuntimeCommandDaemon]],
+        *,
+        scan_seconds: float,
+        stall_seconds: float,
+        heartbeat_seconds: float = 300.0,
+    ) -> None:
+        if scan_seconds <= 0 or stall_seconds <= 0 or heartbeat_seconds <= 0:
+            raise ValueError("supervisor delays must be positive")
+        self._daemons = list(daemons)
+        self._scan_seconds = scan_seconds
+        self._stall_seconds = stall_seconds
+        self._heartbeat_seconds = heartbeat_seconds
+        self._reported: set[int] = set()
+        self._last_heartbeat_at = time.monotonic()
+
+    async def run(self, stop: asyncio.Event) -> None:
+        while not stop.is_set():
+            try:
+                await asyncio.wait_for(stop.wait(), timeout=self._scan_seconds)
+                return
+            except TimeoutError:
+                self._check()
+
+    def _check(self) -> None:
+        now = time.monotonic()
+        stalled = 0
+        alive = 0
+        for idx, (task, daemon) in enumerate(self._daemons):
+            if task.done():
+                # Already surfaced by the done-callback; not a stall.
+                continue
+            stale = now - daemon.last_active_at
+            if stale >= self._stall_seconds:
+                stalled += 1
+                if idx not in self._reported:
+                    self._reported.add(idx)
+                    self._report_stall(task, stale)
+            else:
+                self._reported.discard(idx)
+                alive += 1
+        if stalled == 0 and now - self._last_heartbeat_at >= self._heartbeat_seconds:
+            self._last_heartbeat_at = now
+            logger.info(
+                "Runtime command daemons alive: %d/%d",
+                alive,
+                len(self._daemons),
+            )
+
+    @staticmethod
+    def _report_stall(task: asyncio.Task, stale: float) -> None:
+        frames = task.get_stack(limit=12)
+        if frames:
+            stack = "".join(
+                f'  File "{frame.f_code.co_filename}", line {frame.f_lineno}, '
+                f"in {frame.f_code.co_name}\n"
+                for frame in frames
+            )
+        else:
+            stack = "<no stack>"
+        logger.error(
+            "Runtime command daemon %r STALLED for %.0fs (run_once not completing). "
+            "May be a long-running command or a stuck DB session; stack:\n%s",
+            task.get_name(),
+            stale,
+            stack,
+        )
 
 
 class ChannelDeliveryDaemon:
@@ -708,13 +796,26 @@ async def running_runtime_worker_context(
         verify_schema=verify_schema,
     ) as components:
         stop = asyncio.Event()
+        command_daemons = [
+            RuntimeCommandDaemon(components.worker)
+            for _ in range(runtime_settings.AGENT_RUNTIME_COMMAND_CONCURRENCY)
+        ]
         command_tasks = [
             asyncio.create_task(
-                RuntimeCommandDaemon(components.worker).run(stop),
+                daemon.run(stop),
                 name=f"agent-runtime-command-worker-{slot + 1}",
             )
-            for slot in range(runtime_settings.AGENT_RUNTIME_COMMAND_CONCURRENCY)
+            for slot, daemon in enumerate(command_daemons)
         ]
+        supervisor_task = asyncio.create_task(
+            RuntimeCommandDaemonSupervisor(
+                list(zip(command_tasks, command_daemons)),
+                scan_seconds=runtime_settings.AGENT_RUNTIME_COMMAND_SUPERVISOR_SCAN_SECONDS,
+                stall_seconds=runtime_settings.AGENT_RUNTIME_COMMAND_STALL_SECONDS,
+                heartbeat_seconds=runtime_settings.AGENT_RUNTIME_COMMAND_HEARTBEAT_SECONDS,
+            ).run(stop),
+            name="agent-runtime-command-supervisor",
+        )
         compact_task = asyncio.create_task(
             components.session_context_scanner.run(stop),
             name="agent-runtime-session-context-compact",
@@ -759,6 +860,7 @@ async def running_runtime_worker_context(
         # otherwise vanish silently and leave the Command Inbox undrained.
         for task in (
             *command_tasks,
+            supervisor_task,
             compact_task,
             channel_delivery_task,
             async_tool_poll_task,
@@ -773,6 +875,7 @@ async def running_runtime_worker_context(
             stop.set()
             for task in command_tasks:
                 task.cancel()
+            supervisor_task.cancel()
             compact_task.cancel()
             channel_delivery_task.cancel()
             async_tool_poll_task.cancel()
@@ -782,6 +885,8 @@ async def running_runtime_worker_context(
             for task in command_tasks:
                 with suppress(asyncio.CancelledError):
                     await task
+            with suppress(asyncio.CancelledError):
+                await supervisor_task
             with suppress(asyncio.CancelledError):
                 await compact_task
             with suppress(asyncio.CancelledError):
@@ -803,6 +908,7 @@ __all__ = [
     "ProductReconcileDaemon",
     "ToolResultReconcileDaemon",
     "RuntimeCommandDaemon",
+    "RuntimeCommandDaemonSupervisor",
     "RuntimeSchemaNotReady",
     "RuntimeWorkerComponents",
     "assert_runtime_schema_ready",

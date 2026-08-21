@@ -168,6 +168,14 @@ class Settings(BaseSettings):
     # genuinely lost claim (another worker took over) should stop the heartbeat
     # rather than spam errors for the rest of a long graph execution.
     AGENT_RUNTIME_COMMAND_HEARTBEAT_MAX_FAILURES: int = Field(default=3, ge=0)
+    # Command-daemon liveness watchdog. A daemon that stops completing run_once
+    # for STALL_SECONDS is reported with a coroutine stack dump (it may be a
+    # long-running command, or a stuck DB-session acquisition). The supervisor
+    # scans every SCAN_SECONDS and emits an "alive" heartbeat every
+    # HEARTBEAT_SECONDS while all daemons are healthy.
+    AGENT_RUNTIME_COMMAND_STALL_SECONDS: float = Field(default=300.0, gt=0)
+    AGENT_RUNTIME_COMMAND_SUPERVISOR_SCAN_SECONDS: float = Field(default=30.0, gt=0)
+    AGENT_RUNTIME_COMMAND_HEARTBEAT_SECONDS: float = Field(default=300.0, gt=0)
     # Maximum LangGraph recursion steps per Agent Run. Raised from the
     # library default (25) to absorb long tool-call loops; override via
     # AGENT_RUNTIME_RECURSION_LIMIT when a tenant needs more headroom.

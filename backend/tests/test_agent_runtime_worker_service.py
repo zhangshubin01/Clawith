@@ -7,6 +7,7 @@ from collections import deque
 from dataclasses import replace
 import asyncio
 import logging
+import time
 import uuid
 from unittest.mock import AsyncMock, patch
 
@@ -43,6 +44,7 @@ from app.services.agent_runtime.worker_service import (
     ChannelDeliveryDaemon,
     ProductReconcileDaemon,
     RuntimeCommandDaemon,
+    RuntimeCommandDaemonSupervisor,
     RuntimeSchemaNotReady,
     ToolResultReconcileDaemon,
     assert_runtime_schema_ready,
@@ -521,6 +523,71 @@ async def test_running_context_surfaces_crashed_command_daemon(caplog) -> None:
 
     assert "CRASHED" in caplog.text
     assert "command worker exploded" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_supervisor_reports_stalled_daemon_with_stack(caplog) -> None:
+    """A daemon that stops advancing last_active_at is surfaced with its stack."""
+    daemon = RuntimeCommandDaemon(object())  # type: ignore[arg-type]
+    daemon.last_active_at = time.monotonic() - 1000.0
+
+    async def hang() -> None:
+        await asyncio.sleep(3600)
+
+    task = asyncio.create_task(hang(), name="agent-runtime-command-worker-1")
+    await asyncio.sleep(0)  # let the task start and suspend at the sleep
+
+    supervisor = RuntimeCommandDaemonSupervisor(
+        [(task, daemon)],
+        scan_seconds=1.0,
+        stall_seconds=60.0,
+        heartbeat_seconds=300.0,
+    )
+    with caplog.at_level(
+        logging.ERROR,
+        logger="app.services.agent_runtime.worker_service",
+    ):
+        supervisor._check()
+
+    assert "STALLED" in caplog.text
+    assert "agent-runtime-command-worker-1" in caplog.text
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+
+@pytest.mark.asyncio
+async def test_supervisor_heartbeat_logs_when_healthy(caplog) -> None:
+    """All daemons fresh ⇒ a low-noise alive heartbeat fires, no stall report."""
+    daemon = RuntimeCommandDaemon(object())  # type: ignore[arg-type]
+    daemon.last_active_at = time.monotonic()
+
+    async def hang() -> None:
+        await asyncio.sleep(3600)
+
+    task = asyncio.create_task(hang(), name="agent-runtime-command-worker-1")
+    await asyncio.sleep(0)
+
+    supervisor = RuntimeCommandDaemonSupervisor(
+        [(task, daemon)],
+        scan_seconds=1.0,
+        stall_seconds=60.0,
+        heartbeat_seconds=300.0,
+    )
+    supervisor._last_heartbeat_at = time.monotonic() - 1000.0
+    with caplog.at_level(
+        logging.INFO,
+        logger="app.services.agent_runtime.worker_service",
+    ):
+        supervisor._check()
+
+    assert "alive" in caplog.text
+    assert "STALLED" not in caplog.text
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
 
 
 @pytest.mark.asyncio
