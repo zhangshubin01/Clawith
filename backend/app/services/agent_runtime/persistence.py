@@ -827,11 +827,17 @@ async def mark_command_applied(
     *,
     tenant_id: uuid.UUID,
     command_id: uuid.UUID,
-    claimant: str,
     applied_checkpoint_id: str | None,
     clock: Callable[[], datetime] | None = None,
 ) -> AgentRunCommand:
-    """Mark a claimed command applied after its checkpoint is observable."""
+    """Mark a command applied after its checkpoint is observable.
+
+    This settlement runs under the Run's thread advisory lock (see
+    ``RuntimeCommandWorker._process_locked``), which proves the caller owns the
+    thread and is released automatically on crash. It therefore deliberately
+    does NOT re-require the command claim: the claim's 60s TTL legitimately
+    expires during a long graph execution, and that must not block settlement.
+    """
     command = await _get_locked_command(db, tenant_id=tenant_id, command_id=command_id)
     if applied_checkpoint_id is None:
         if command.command_type != "cancel":
@@ -841,13 +847,9 @@ async def mark_command_applied(
             )
     else:
         _require_text(applied_checkpoint_id, field="applied_checkpoint_id", max_length=255)
-    if (
-        command.status == "applied"
-        and command.claimed_by == claimant
-        and command.applied_checkpoint_id == applied_checkpoint_id
-    ):
+    if command.status == "applied":
+        # Idempotent: already settled by this or a prior thread-lock holder.
         return command
-    _require_claimant(command, claimant)
     command.status = "applied"
     command.applied_checkpoint_id = applied_checkpoint_id
     # Graph/control settlement and product reconciliation are intentionally

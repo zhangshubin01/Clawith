@@ -347,6 +347,7 @@ class RuntimeCommandWorker:
         claim_ttl_seconds: int | None = None,
         claim_renew_seconds: float | None = None,
         max_attempts: int | None = None,
+        max_heartbeat_failures: int | None = None,
     ) -> None:
         runtime_settings = settings or get_settings()
         self._session_factory = session_factory
@@ -370,6 +371,11 @@ class RuntimeCommandWorker:
         self._max_attempts = (
             max_attempts if max_attempts is not None else runtime_settings.AGENT_RUNTIME_COMMAND_MAX_ATTEMPTS
         )
+        self._max_heartbeat_failures = (
+            max_heartbeat_failures
+            if max_heartbeat_failures is not None
+            else runtime_settings.AGENT_RUNTIME_COMMAND_HEARTBEAT_MAX_FAILURES
+        )
         if not claimant.strip():
             raise ValueError("claimant must not be blank")
         if self._claim_ttl_seconds <= 0 or self._claim_renew_seconds <= 0:
@@ -378,6 +384,8 @@ class RuntimeCommandWorker:
             raise ValueError("claim renewal interval must be less than claim TTL")
         if self._max_attempts <= 0:
             raise ValueError("max_attempts must be positive")
+        if self._max_heartbeat_failures < 0:
+            raise ValueError("max_heartbeat_failures must be non-negative")
 
     async def _claim(self) -> RuntimeCommandRecord | None:
         async with self._session_factory() as db:
@@ -475,6 +483,7 @@ class RuntimeCommandWorker:
                 )
 
     async def _heartbeat(self, command: RuntimeCommandRecord, stop: asyncio.Event) -> None:
+        consecutive_failures = 0
         while True:
             try:
                 await asyncio.wait_for(stop.wait(), timeout=self._claim_renew_seconds)
@@ -485,8 +494,22 @@ class RuntimeCommandWorker:
                 except asyncio.CancelledError:
                     raise
                 except Exception:
-                    logger.exception("Runtime command claim heartbeat failed", extra={"command_id": command.id})
-                    return
+                    consecutive_failures += 1
+                    logger.exception(
+                        "Runtime command claim heartbeat failed",
+                        extra={
+                            "command_id": command.id,
+                            "consecutive_failures": consecutive_failures,
+                        },
+                    )
+                    # A transient DB/event-loop hiccup should not permanently
+                    # kill the claim renewal; but a genuinely lost claim (another
+                    # worker took over) must stop the heartbeat instead of
+                    # spamming errors for the rest of a long graph execution.
+                    if consecutive_failures >= self._max_heartbeat_failures:
+                        return
+                else:
+                    consecutive_failures = 0
 
     async def _mark_applied(
         self,
@@ -499,7 +522,6 @@ class RuntimeCommandWorker:
                     db,
                     tenant_id=command.tenant_id,
                     command_id=command.id,
-                    claimant=self._claimant,
                     applied_checkpoint_id=checkpoint_id,
                 )
 

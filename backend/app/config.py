@@ -163,6 +163,11 @@ class Settings(BaseSettings):
     AGENT_RUNTIME_COMMAND_CONCURRENCY: int = Field(default=10, gt=0, le=100)
     AGENT_RUNTIME_COMMAND_CLAIM_TTL_SECONDS: int = Field(default=60, gt=0)
     AGENT_RUNTIME_COMMAND_CLAIM_RENEW_SECONDS: int = Field(default=20, gt=0)
+    # Consecutive claim-renewal failures a command worker tolerates before its
+    # heartbeat gives up. A transient DB/event-loop hiccup should survive; a
+    # genuinely lost claim (another worker took over) should stop the heartbeat
+    # rather than spam errors for the rest of a long graph execution.
+    AGENT_RUNTIME_COMMAND_HEARTBEAT_MAX_FAILURES: int = Field(default=3, ge=0)
     # Maximum LangGraph recursion steps per Agent Run. Raised from the
     # library default (25) to absorb long tool-call loops; override via
     # AGENT_RUNTIME_RECURSION_LIMIT when a tenant needs more headroom.

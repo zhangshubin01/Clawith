@@ -691,14 +691,20 @@ def test_rejected_start_lane_repair_targets_only_abandoned_holders() -> None:
 
 
 @pytest.mark.asyncio
-async def test_applied_and_rejected_transitions_require_the_current_claimant():
+async def test_applied_settlement_does_not_require_the_claim():
+    """Settlement runs under the thread lock, not the short-TTL claim.
+
+    Regresses the 2026-08-21 claim-loss race: after a long graph run the 60s
+    claim TTL legitimately expires, so ``mark_command_applied`` must still
+    settle the command (the caller holds the thread advisory lock).
+    """
     now = datetime(2026, 7, 13, 12, 0, tzinfo=UTC)
     tenant_id = uuid.uuid4()
     command = _command(
         tenant_id=tenant_id,
         run_id=uuid.uuid4(),
-        status="claimed",
-        claimant="worker-1",
+        status="pending",  # claim lost: released by another worker
+        claimant=None,
     )
     db = _FakeSession(command)
 
@@ -706,7 +712,6 @@ async def test_applied_and_rejected_transitions_require_the_current_claimant():
         db,
         tenant_id=tenant_id,
         command_id=command.id,
-        claimant="worker-1",
         applied_checkpoint_id="checkpoint-1",
         clock=lambda: now,
     )
@@ -714,7 +719,36 @@ async def test_applied_and_rejected_transitions_require_the_current_claimant():
     assert applied.applied_checkpoint_id == "checkpoint-1"
     assert applied.applied_at == now
     assert applied.claim_expires_at is None
+    assert db.flush_count == 1
 
+
+@pytest.mark.asyncio
+async def test_applied_settlement_is_idempotent():
+    now = datetime(2026, 7, 13, 12, 0, tzinfo=UTC)
+    tenant_id = uuid.uuid4()
+    command = _command(
+        tenant_id=tenant_id,
+        run_id=uuid.uuid4(),
+        status="applied",
+        claimant=None,
+    )
+    db = _FakeSession(command)
+
+    applied = await persistence.mark_command_applied(
+        db,
+        tenant_id=tenant_id,
+        command_id=command.id,
+        applied_checkpoint_id="checkpoint-1",
+        clock=lambda: now,
+    )
+    assert applied.status == "applied"
+    assert db.flush_count == 0  # idempotent no-op
+
+
+@pytest.mark.asyncio
+async def test_rejected_transition_requires_the_current_claimant():
+    now = datetime(2026, 7, 13, 12, 0, tzinfo=UTC)
+    tenant_id = uuid.uuid4()
     other = _command(
         tenant_id=tenant_id,
         run_id=uuid.uuid4(),

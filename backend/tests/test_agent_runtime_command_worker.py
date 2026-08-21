@@ -353,6 +353,7 @@ def _worker(
     acquired: bool = True,
     claim_renew_seconds: float = 10,
     tool_execution_status: str | None = None,
+    max_heartbeat_failures: int | None = None,
 ) -> RuntimeCommandWorker:
     return RuntimeCommandWorker(
         session_factory=_SessionFactory(
@@ -370,6 +371,7 @@ def _worker(
         claim_ttl_seconds=60,
         claim_renew_seconds=claim_renew_seconds,
         max_attempts=5,
+        max_heartbeat_failures=max_heartbeat_failures,
     )
 
 
@@ -479,6 +481,82 @@ async def test_claim_commits_before_lock_and_heartbeat_runs_during_execution() -
     assert run_record.scheduling_position_id == trigger_message_id
     assert isinstance(command_record, RuntimeCommandRecord)
     assert initial_checkpoint is None
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_survives_transient_renewal_failure() -> None:
+    """One transient renewal failure must not permanently kill the heartbeat.
+
+    Regresses the 2026-08-21 claim-loss race: a single DB/event-loop hiccup used
+    to `return` from ``_heartbeat``, letting the 60s claim TTL expire mid-run.
+    """
+    timeline: list[str] = []
+    run = _run()
+    command = _command(run, "start")
+    renewals = 0
+
+    async def renew(*_args, **_kwargs):
+        nonlocal renewals
+        renewals += 1
+        if renewals == 1:
+            raise RuntimeError("transient hiccup")
+        timeline.append("claim_renewed")
+
+    with patch(
+        "app.services.agent_runtime.command_worker.renew_command_claim",
+        new=AsyncMock(side_effect=renew),
+    ):
+        worker = _worker(
+            timeline=timeline,
+            run=run,
+            reader=_Reader(),
+            executor=_Executor(timeline),
+            claim_renew_seconds=0.01,
+        )
+        stop = asyncio.Event()
+        task = asyncio.create_task(worker._heartbeat(command, stop))
+        for _ in range(200):
+            if "claim_renewed" in timeline:
+                break
+            await asyncio.sleep(0.005)
+        stop.set()
+        await task
+
+    assert "claim_renewed" in timeline
+    assert renewals >= 2  # first attempt failed, second succeeded
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_gives_up_after_bounded_consecutive_failures() -> None:
+    """A persistently lost claim stops the heartbeat, not spam it forever."""
+    timeline: list[str] = []
+    run = _run()
+    command = _command(run, "start")
+    renewals = 0
+
+    async def always_fail(*_args, **_kwargs):
+        nonlocal renewals
+        renewals += 1
+        raise RuntimeError("command is not currently claimed by this worker")
+
+    with patch(
+        "app.services.agent_runtime.command_worker.renew_command_claim",
+        new=AsyncMock(side_effect=always_fail),
+    ):
+        worker = _worker(
+            timeline=timeline,
+            run=run,
+            reader=_Reader(),
+            executor=_Executor(timeline),
+            claim_renew_seconds=0.01,
+            max_heartbeat_failures=2,
+        )
+        await asyncio.wait_for(
+            worker._heartbeat(command, asyncio.Event()),
+            timeout=1,
+        )
+
+    assert renewals == 2  # bounded: stopped after max_heartbeat_failures
 
 
 @pytest.mark.asyncio
