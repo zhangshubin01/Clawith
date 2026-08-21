@@ -6,6 +6,7 @@ from contextlib import asynccontextmanager
 from collections import deque
 from dataclasses import replace
 import asyncio
+import logging
 import uuid
 from unittest.mock import AsyncMock, patch
 
@@ -471,6 +472,55 @@ async def test_running_context_starts_configured_command_concurrency() -> None:
         "agent-runtime-command-worker-2",
         "agent-runtime-command-worker-3",
     ]
+
+
+@pytest.mark.asyncio
+async def test_running_context_surfaces_crashed_command_daemon(caplog) -> None:
+    """A command daemon that dies is logged at crash time, not silently swallowed.
+
+    Regresses the 2026-08-20 outage where the command daemons had no
+    done-callback, so a terminated task left the Command Inbox undrained and
+    runs stuck "thinking" with no log line to explain why.
+    """
+
+    async def crash(_daemon, stop: asyncio.Event) -> None:
+        raise RuntimeError("command worker exploded")
+
+    @asynccontextmanager
+    async def manager():
+        yield InMemorySaver()
+
+    settings = Settings(
+        _env_file=None,
+        AGENT_RUNTIME_GRAPH_NAME="worker_service_test",
+        AGENT_RUNTIME_GRAPH_VERSION="v1",
+        AGENT_RUNTIME_COMMAND_CONCURRENCY=1,
+    )
+    with (
+        patch.object(RuntimeCommandDaemon, "run", new=crash),
+        caplog.at_level(
+            logging.ERROR,
+            logger="app.services.agent_runtime.worker_service",
+        ),
+    ):
+        # The exception escapes the daemon loop entirely, so the task ends and
+        # the done-callback must surface it; cleanup re-raises the stored error.
+        with pytest.raises(RuntimeError, match="command worker exploded"):
+            async with running_runtime_worker_context(
+                settings=settings,
+                checkpointer_manager=manager(),
+                session_factory=_SessionFactory(),  # type: ignore[arg-type]
+                lock_engine=_Engine(),  # type: ignore[arg-type]
+                claimant="worker-test",
+                verify_schema=False,
+            ):
+                await asyncio.sleep(0)
+        # Flush the done-callback, which is scheduled via call_soon when the
+        # task transitions to done and runs on the next loop iteration.
+        await asyncio.sleep(0)
+
+    assert "CRASHED" in caplog.text
+    assert "command worker exploded" in caplog.text
 
 
 @pytest.mark.asyncio

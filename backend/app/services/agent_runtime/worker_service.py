@@ -661,6 +661,32 @@ async def runtime_worker_context(
         )
 
 
+def _surface_task_crash(task: asyncio.Task) -> None:
+    """Log a daemon task that died silently.
+
+    These daemon loops run forever until ``stop`` is set, so a task that ends
+    any other way — an exception raised during construction, a ``BaseException``
+    escaping the loop, or the event loop dropping it — previously vanished
+    without a trace, leaving the Command Inbox undrained and runs stuck
+    "thinking" (see run 5899881f / command 67901e70, 2026-08-20). Unlike the
+    app-level background tasks in ``app.main``, these tasks had no
+    ``add_done_callback``, so nothing surfaced the crash.
+    """
+    try:
+        exc = task.exception()
+    except asyncio.CancelledError:
+        # Normal shutdown path: the context manager cancels each daemon.
+        return
+    if exc is None:
+        return
+    logger.error(
+        "Runtime daemon task %r CRASHED: %s",
+        task.get_name(),
+        exc,
+        exc_info=(type(exc), exc, exc.__traceback__),
+    )
+
+
 @asynccontextmanager
 async def running_runtime_worker_context(
     *,
@@ -728,6 +754,19 @@ async def running_runtime_worker_context(
             ToolResultReconcileDaemon(components.tool_result_reconciler).run(stop),
             name="agent-runtime-tool-result-reconcile",
         )
+        # Each daemon loops forever until stopped; if one terminates outside its
+        # own try/except (construction error, BaseException, etc.) it would
+        # otherwise vanish silently and leave the Command Inbox undrained.
+        for task in (
+            *command_tasks,
+            compact_task,
+            channel_delivery_task,
+            async_tool_poll_task,
+            tool_lease_reconcile_task,
+            product_reconcile_task,
+            tool_result_reconcile_task,
+        ):
+            task.add_done_callback(_surface_task_crash)
         try:
             yield components
         finally:
