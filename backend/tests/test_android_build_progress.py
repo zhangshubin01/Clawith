@@ -93,6 +93,10 @@ class TestCommandInjection:
         assert "TASK_START|${task.path}" in full
         # 保证仍在 --no-daemon --console=plain 下运行（不改变既有构建语义）
         assert "--no-daemon --console=plain" in full
+        # 回归：gradle 必须 2>&1 合并 stderr——此环境容器 stderr 管道在 entrypoint
+        # 后台 job 组合下整体丢失（Kotlin e: 行/FAILURE 段走 stderr），不合并会
+        # 「构建失败但零错误输出」。见 20260821-android-stderr-loss-analysis.md
+        assert "2>&1" in full
 
     @pytest.mark.asyncio
     async def test_command_is_valid_bash(self, backend, mock_docker_client):

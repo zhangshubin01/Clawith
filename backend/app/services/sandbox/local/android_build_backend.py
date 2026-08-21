@@ -440,7 +440,13 @@ gradle.beforeProject { project ->
                         # heredoc 体结束后，下一行不能以 `&&` 开头——那是 bash 语法错误
                         # （`syntax error near unexpected token '&&'`，bash -c 解析期即 exit 2，
                         # 导致 gradle 从未被执行）。gradle 作为独立语句执行即可。
-                        f"./gradlew --no-daemon --console=plain -I /tmp/gradle-progress.gradle {shlex.quote(str(gradle_task))} ",
+                        # 2>&1 必须保留：entrypoint 以 `"$@" &` 后台执行此命令，此环境下
+                        # 容器 stderr 管道（OrbStack）对后台 job 的写入会整体丢失——实测
+                        # docker CLI logs / python SDK / attach 三通道都收不到 stderr，
+                        # 而 Gradle 的 Kotlin `e:` 错误与 FAILURE 段全部走 stderr，
+                        # 不合并会得到「compileDebugKotlin FAILED 但零错误」的盲修循环。
+                        # 详见 docs/technical-plans/20260821-android-stderr-loss-analysis.md
+                        f"./gradlew --no-daemon --console=plain -I /tmp/gradle-progress.gradle {shlex.quote(str(gradle_task))} 2>&1 ",
                     ],
                     detach=True,
                     volumes=volumes,
