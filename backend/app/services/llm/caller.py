@@ -770,8 +770,10 @@ async def call_llm(
                 LLMMessage(
                     role="user",
                     content=(
-                        "The previous response was truncated. Regenerate one complete "
-                        "final answer from the beginning."
+                        "The previous response was truncated because it exceeded "
+                        "the output limit. Do not repeat it. Produce a complete "
+                        "but much shorter final answer — a concise summary of "
+                        "the key results."
                         if repair_code == "incomplete_output"
                         else "Return one complete, non-empty final answer."
                     ),

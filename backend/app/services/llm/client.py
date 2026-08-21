@@ -2380,7 +2380,15 @@ PROVIDER_REGISTRY: dict[str, ProviderSpec] = {
         display_name="DeepSeek",
         protocol="openai_compatible",
         default_base_url="https://api.deepseek.com/v1",
-        default_max_tokens=8192,
+        # DeepSeek V4 raises the official max output to 384K (context 1M); the
+        # old 8192 was inherited from deepseek-chat V3 and silently truncated
+        # long final answers and write_file arguments. See
+        # docs/technical-plans/20260821-deepseek-max-tokens-raise.md
+        default_max_tokens=32768,
+        model_max_tokens={
+            "deepseek-v4-flash": 65536,
+            "deepseek-v4-pro": 65536,
+        },
     ),
     "qwen": ProviderSpec(
         provider="qwen",

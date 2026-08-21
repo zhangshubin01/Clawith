@@ -1289,7 +1289,9 @@ def _parse_step(
                 state,
                 context,
                 step,
-                "The response was truncated. Regenerate one complete final answer from the beginning.",
+                "The response was truncated because it exceeded the output "
+                "limit. Do not repeat it. Produce a complete but much shorter "
+                "final answer — a concise summary of the key results.",
                 repair_code="incomplete_output",
             )
         if step.finish_reason == "content_filter":
