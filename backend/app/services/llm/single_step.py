@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 import uuid
 
+from app.services.observability import observe_generation
 from app.services.token_tracker import TokenUsage, record_token_usage
 
 from .caller import (
@@ -66,22 +67,32 @@ async def complete_llm_once(
     )
     request_temperature = model.temperature if temperature is None else temperature
     try:
-        if on_chunk:
-            response = await client.stream(
-                messages=api_messages,
-                tools=tools or None,
-                temperature=request_temperature,
-                max_tokens=get_max_tokens(model.provider, model.model, getattr(model, "max_output_tokens", None)),
-                on_chunk=on_chunk,
-                on_thinking=on_thinking,
-            )
-        else:
-            response = await client.complete(
-                messages=api_messages,
-                tools=tools or None,
-                temperature=request_temperature,
-                max_tokens=get_max_tokens(model.provider, model.model, getattr(model, "max_output_tokens", None)),
-            )
+        with observe_generation(
+            name="llm",
+            model=model.model,
+            provider=model.provider,
+            agent_id=agent_id,
+            input=api_messages,
+        ) as gen:
+            if on_chunk:
+                response = await client.stream(
+                    messages=api_messages,
+                    tools=tools or None,
+                    temperature=request_temperature,
+                    max_tokens=get_max_tokens(model.provider, model.model, getattr(model, "max_output_tokens", None)),
+                    on_chunk=on_chunk,
+                    on_thinking=on_thinking,
+                )
+            else:
+                response = await client.complete(
+                    messages=api_messages,
+                    tools=tools or None,
+                    temperature=request_temperature,
+                    max_tokens=get_max_tokens(model.provider, model.model, getattr(model, "max_output_tokens", None)),
+                )
+            if gen is not None:
+                gen.set_output(response.content)
+                gen.set_usage(response.usage)
     finally:
         await client.close()
 

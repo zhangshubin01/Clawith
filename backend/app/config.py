@@ -205,6 +205,12 @@ class Settings(BaseSettings):
     AGENT_RUNTIME_EVENT_PAYLOAD_MAX_BYTES: int = Field(default=16384, gt=0)
     AGENT_RUNTIME_TOOL_RESULT_INLINE_MAX_BYTES: int = Field(default=8192, gt=0)
     MAX_AGENT_CYCLE_COUNT: int = Field(default=5, gt=0)
+
+    # Observability (Langfuse trace-level tracing; a no-op unless enabled + configured)
+    OBSERVABILITY_ENABLED: bool = False
+    LANGFUSE_PUBLIC_KEY: str = ""
+    LANGFUSE_SECRET_KEY: str = ""
+    LANGFUSE_HOST: str = ""  # self-hosted base URL; empty = Langfuse Cloud
     # Hard cap for file-upload endpoints (all of them buffer the whole body
     # into memory before writing). Without it a single authenticated request
     # can exhaust the process (see P0 fix plan D3). Override via env if a

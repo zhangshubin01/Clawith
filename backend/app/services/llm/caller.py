@@ -29,6 +29,7 @@ from app.services.token_tracker import (
     extract_token_usage,
     estimate_token_usage_from_chars,
 )
+from app.services.observability import observe_generation
 from app.services.llm.multimodal_content import estimate_multimodal_tokens
 from app.services.llm.model_resolution import active_agent_model_candidates
 
@@ -661,15 +662,30 @@ async def call_llm(
                 # The completed final response is emitted after stop validation.
                 return None
 
-            response = await client.stream(
-                messages=api_messages,
-                tools=tools_for_llm if tools_for_llm else None,
-                temperature=model.temperature,
-                max_tokens=max_tokens,
-                on_chunk=_buffer_chunk,
-                on_tool_delta=on_tool_delta,
-                on_thinking=on_thinking,
-            )
+            with observe_generation(
+                name="llm",
+                model=getattr(model, "model", None),
+                provider=getattr(model, "provider", None),
+                agent_id=agent_id,
+                capture_input=False,
+            ) as gen:
+                response = await client.stream(
+                    messages=api_messages,
+                    tools=tools_for_llm if tools_for_llm else None,
+                    temperature=model.temperature,
+                    max_tokens=max_tokens,
+                    on_chunk=_buffer_chunk,
+                    on_tool_delta=on_tool_delta,
+                    on_thinking=on_thinking,
+                )
+                if gen is not None:
+                    gen.set_output(response.content)
+                    gen.set_usage(response.usage)
+                    gen.add_metadata(
+                        tool_round=round_i,
+                        session_id=session_id or None,
+                        user_id=str(user_id) if user_id is not None else None,
+                    )
         except LLMError as e:
             logger.error(f"[LLM] LLMError: provider={getattr(model, 'provider', '?')} model={getattr(model, 'model', '?')} {e}")
             if agent_id and _unsaved_usage.total_tokens > 0:

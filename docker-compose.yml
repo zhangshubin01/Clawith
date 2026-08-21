@@ -85,6 +85,11 @@ services:
       MULTI_AGENT_COMPACT_MODEL_ID: ${MULTI_AGENT_COMPACT_MODEL_ID:-}
       # Password reset token lifetime in minutes (default: 30)
       PASSWORD_RESET_TOKEN_EXPIRE_MINUTES: ${PASSWORD_RESET_TOKEN_EXPIRE_MINUTES:-30}
+      # Observability (Langfuse trace export; values come from repo .env)
+      OBSERVABILITY_ENABLED: ${OBSERVABILITY_ENABLED:-false}
+      LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-}
+      LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-}
+      LANGFUSE_HOST: ${LANGFUSE_HOST:-}
     ports:
       - "127.0.0.1:${BACKEND_PORT:-8008}:8000"
     volumes:

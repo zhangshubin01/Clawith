@@ -21,6 +21,7 @@ from app.services.agent_runtime.state import (
     RuntimeStateUpdate,
     runtime_messages_as_json,
 )
+from app.services.observability import set_run_identity
 from app.services.llm.caller import (
     WRITE_FILE_PROTOCOL_FAILURE_MESSAGE,
     WRITE_FILE_PROTOCOL_REPAIR_COUNTER_KEY,
@@ -1193,6 +1194,21 @@ class DeterministicRuntimeNodeExecutor:
         *,
         resume_value: JsonValue | None = None,
     ) -> RuntimeStateUpdate:
+        set_run_identity(
+            tenant_id=context.tenant_id,
+            run_id=context.run_id,
+            command_id=context.command_id,
+            agent_id=context.agent_id,
+            session_id=context.session_id,
+            parent_run_id=context.parent_run_id,
+            root_run_id=context.root_run_id,
+            model_id=context.model_id,
+            graph_name=context.graph_name,
+            graph_version=context.graph_version,
+            source_type=context.source_type,
+            run_kind=context.run_kind,
+            actor_user_id=context.actor_user_id,
+        )
         if node == "control_guard":
             return await self._control_guard(state, context)
         if node == "compact":
