@@ -504,13 +504,23 @@ class RuntimeCommandDaemonSupervisor:
         if stalled == 0 and now - self._last_heartbeat_at >= self._heartbeat_seconds:
             self._last_heartbeat_at = now
             logger.info(
-                "Runtime command daemons alive: %d/%d",
+                "Runtime command daemons alive: %d/%d (pool: %s)",
                 alive,
                 len(self._daemons),
+                self._pool_status(),
             )
 
     @staticmethod
-    def _report_stall(task: asyncio.Task, stale: float) -> None:
+    def _pool_status() -> str:
+        """Snapshot the SQLAlchemy async pool so a leak is visible over time."""
+        try:
+            from app.database import engine
+
+            return engine.pool.status()
+        except Exception as exc:  # pragma: no cover - diagnostic only
+            return f"unknown ({exc})"
+
+    def _report_stall(self, task: asyncio.Task, stale: float) -> None:
         frames = task.get_stack(limit=12)
         if frames:
             stack = "".join(
@@ -522,9 +532,10 @@ class RuntimeCommandDaemonSupervisor:
             stack = "<no stack>"
         logger.error(
             "Runtime command daemon %r STALLED for %.0fs (run_once not completing). "
-            "May be a long-running command or a stuck DB session; stack:\n%s",
+            "Pool: %s. May be a long-running command or a stuck DB session; stack:\n%s",
             task.get_name(),
             stale,
+            self._pool_status(),
             stack,
         )
 
