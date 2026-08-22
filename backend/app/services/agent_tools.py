@@ -2812,6 +2812,11 @@ def _format_android_build_failure(
             parts.append(f"  {i}. [{loc}] {e.message}")
         if len(errors.errors) > _BUILD_MAX_STRUCTURED_ERRORS:
             parts.append(f"  ... (还有 {len(errors.errors) - _BUILD_MAX_STRUCTURED_ERRORS} 个错误未显示)")
+        parts.append(
+            "\n修复提示：请一次性修复上面列出的全部错误后再重新编译，"
+            "不要逐条修改、逐条编译——每次往返都要重跑一次完整编译，"
+            "一次改完所有同类错误通常能省一半以上轮次。"
+        )
 
     if errors.warnings:
         shown_w = errors.warnings[:_BUILD_MAX_STRUCTURED_ERRORS // 2]

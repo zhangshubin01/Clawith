@@ -82,3 +82,17 @@ def test_mixed_output_keeps_compiler_errors_and_adds_gradle_errors():
     assert len(kt_errors) == 1
     assert "HorizontalDivider" in kt_errors[0].message
     assert len(sys_errors) == 2
+
+
+def test_format_android_build_failure_prompts_batch_fix() -> None:
+    """回归：失败文案必须引导一次性修复全部错误（逐条往返浪费编译轮次）。"""
+    from app.services.agent_tools import _BuildError, _BuildErrorSummary, _format_android_build_failure
+
+    errs = _BuildErrorSummary()
+    errs.errors = [
+        _BuildError(category="error", file="a.kt", line=1, column=None, message="Unresolved reference 'X'."),
+        _BuildError(category="error", file="b.kt", line=2, column=None, message="Unresolved reference 'Y'."),
+    ]
+    text = _format_android_build_failure(1, "x", errs, 1000, gradle_task="assembleDebug")
+    assert "一次性修复" in text
+    assert "全部错误" in text
