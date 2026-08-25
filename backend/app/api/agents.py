@@ -12,7 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.config import get_settings
-from app.core.permissions import build_visible_agents_query, check_agent_access, is_agent_creator
+from app.core.permissions import check_agent_access, is_agent_creator
 from app.core.security import get_current_user
 from app.database import async_session, get_db
 from app.models.agent import Agent, AgentPermission, AgentTemplate
@@ -993,6 +993,22 @@ async def update_agent(
                             "reason": "company_ceiling",
                         }
                     )
+
+    # Enforce the platform cap on tool rounds. Legacy agents may hold values
+    # above it (the cap was introduced after they were created); clamp instead
+    # of rejecting so unrelated settings edits (e.g. model selection) still save.
+    if "max_tool_rounds" in update_data:
+        original = update_data["max_tool_rounds"]
+        update_data["max_tool_rounds"] = min(original, 500)
+        if update_data["max_tool_rounds"] != original:
+            clamped_fields.append(
+                {
+                    "field": "max_tool_rounds",
+                    "requested": original,
+                    "applied": update_data["max_tool_rounds"],
+                    "reason": "platform_cap",
+                }
+            )
 
     for field, value in update_data.items():
         setattr(agent, field, value)

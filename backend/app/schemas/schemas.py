@@ -313,7 +313,7 @@ class AgentUpdate(BaseModel):
     context_window_size: int | None = Field(default=None, ge=1, le=500)
     max_tokens_per_day: int | None = None
     max_tokens_per_month: int | None = None
-    max_tool_rounds: int | None = Field(default=None, ge=5, le=500)
+    max_tool_rounds: int | None = Field(default=None, ge=5)  # upper cap enforced (clamped) in the API layer for legacy rows above 500
     max_triggers: int | None = None
     min_poll_interval_min: int | None = None
     webhook_rate_limit: int | None = None
@@ -326,7 +326,8 @@ class AgentUpdate(BaseModel):
     @field_validator("timezone")
     @classmethod
     def validate_timezone(cls, value: str | None) -> str | None:
-        if value is None:
+        # Empty string means "inherit the company default" in the UI.
+        if value is None or value == "":
             return None
         return validate_timezone_name(value)
 

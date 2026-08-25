@@ -38,14 +38,23 @@ def test_tenant_update_allows_timezone_to_be_omitted() -> None:
     assert "timezone" not in update.model_dump(exclude_unset=True)
 
 
-@pytest.mark.parametrize("timezone_name", [None, "Asia/Shanghai", "America/New_York"])
+@pytest.mark.parametrize(
+    ("timezone_name", "expected"),
+    [
+        (None, None),
+        ("", None),  # empty string = "inherit the company default" in the UI
+        ("Asia/Shanghai", "Asia/Shanghai"),
+        ("America/New_York", "America/New_York"),
+    ],
+)
 def test_agent_update_accepts_inheritance_or_iana_timezone(
     timezone_name: str | None,
+    expected: str | None,
 ) -> None:
-    assert AgentUpdate(timezone=timezone_name).timezone == timezone_name
+    assert AgentUpdate(timezone=timezone_name).timezone == expected
 
 
-@pytest.mark.parametrize("timezone_name", ["", "UTC+8", "Invalid/Timezone"])
+@pytest.mark.parametrize("timezone_name", ["UTC+8", "Invalid/Timezone"])
 def test_agent_update_rejects_invalid_timezone(timezone_name: str) -> None:
     with pytest.raises(ValidationError):
         AgentUpdate(timezone=timezone_name)

@@ -3149,8 +3149,8 @@ export default function AgentDetailPage() {
             if (clamped && clamped.length > 0) {
                 const isCh = i18n.language?.startsWith('zh');
                 const fieldNames: Record<string, string> = isCh
-                    ? { min_poll_interval_min: 'Poll 最短间隔', webhook_rate_limit: 'Webhook 频率限制', heartbeat_interval_minutes: '心跳间隔' }
-                    : { min_poll_interval_min: 'Min Poll Interval', webhook_rate_limit: 'Webhook Rate Limit', heartbeat_interval_minutes: 'Heartbeat Interval' };
+                    ? { min_poll_interval_min: 'Poll 最短间隔', webhook_rate_limit: 'Webhook 频率限制', heartbeat_interval_minutes: '心跳间隔', max_tool_rounds: '工具轮数上限' }
+                    : { min_poll_interval_min: 'Min Poll Interval', webhook_rate_limit: 'Webhook Rate Limit', heartbeat_interval_minutes: 'Heartbeat Interval', max_tool_rounds: 'Max Tool Rounds' };
                 const msgs = clamped.map((c: any) => {
                     const name = fieldNames[c.field] || c.field;
                     return isCh
