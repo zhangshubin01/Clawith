@@ -22,7 +22,7 @@ from app.services.agent_runtime.state import (
     RuntimeStateUpdate,
     runtime_messages_as_json,
 )
-from app.services.observability import set_run_identity
+from app.services.observability import observe_node, set_run_identity
 from app.services.agent_runtime.tool_repair_budget import (
     ToolRepairBudgetError,
     apply_tool_result,
@@ -242,8 +242,7 @@ class DefaultRuntimeFinalizer:
     ) -> list[JsonValue]:
         raw_refs = verification.details.get(field_name, [])
         if not isinstance(raw_refs, list) or any(
-            not isinstance(reference, str) or not reference.strip()
-            for reference in raw_refs
+            not isinstance(reference, str) or not reference.strip() for reference in raw_refs
         ):
             raise RuntimeNodeTransitionError(
                 "invalid_verification_result",
@@ -301,13 +300,7 @@ def _model_protocol_repairs(lifecycle: RuntimeLifecycle) -> dict[str, int]:
         )
     repairs: dict[str, int] = {}
     for code, count in raw.items():
-        if (
-            not isinstance(code, str)
-            or not code
-            or isinstance(count, bool)
-            or not isinstance(count, int)
-            or count < 0
-        ):
+        if not isinstance(code, str) or not code or isinstance(count, bool) or not isinstance(count, int) or count < 0:
             raise RuntimeNodeTransitionError(
                 "invalid_model_protocol_repairs",
                 "checkpoint model protocol repair entries must be non-negative integers",
@@ -393,11 +386,7 @@ def _verification_repair_attempt(
         )
     prior_fingerprint = raw.get("fingerprint") if isinstance(raw, Mapping) else None
     prior_attempts = raw.get("attempts", 0) if isinstance(raw, Mapping) else 0
-    if (
-        isinstance(prior_attempts, bool)
-        or not isinstance(prior_attempts, int)
-        or prior_attempts < 0
-    ):
+    if isinstance(prior_attempts, bool) or not isinstance(prior_attempts, int) or prior_attempts < 0:
         raise RuntimeNodeTransitionError(
             "invalid_verification_repair_episode",
             "checkpoint verification repair attempts must be non-negative",
@@ -451,9 +440,7 @@ def _message_for_channel(message: JsonObject) -> JsonObject:
                     "function": {
                         "name": name,
                         "arguments": (
-                            arguments
-                            if isinstance(arguments, str)
-                            else json.dumps(arguments, ensure_ascii=False)
+                            arguments if isinstance(arguments, str) else json.dumps(arguments, ensure_ascii=False)
                         ),
                     },
                 }
@@ -537,11 +524,7 @@ def _async_poll_call_from_resume(resume_value: Mapping[str, object]) -> JsonObje
         return None
     tool_name = poll.get("tool")
     arguments = poll.get("arguments")
-    if (
-        not isinstance(tool_name, str)
-        or not tool_name.strip()
-        or not isinstance(arguments, Mapping)
-    ):
+    if not isinstance(tool_name, str) or not tool_name.strip() or not isinstance(arguments, Mapping):
         return None
     return {
         "id": poll_call_id,
@@ -649,10 +632,7 @@ class DeterministicRuntimeNodeExecutor:
                     "summary_covered_through_message_id": result.covered_through_message_id,
                     "messages": [
                         RemoveMessage(id=REMOVE_ALL_MESSAGES),
-                        *[
-                            _message_for_channel(dict(message))
-                            for message in result.recent_messages
-                        ],
+                        *[_message_for_channel(dict(message)) for message in result.recent_messages],
                     ],
                 }
             )
@@ -672,11 +652,7 @@ class DeterministicRuntimeNodeExecutor:
         lifecycle = dict(state["lifecycle"])
         step_count = _counter(state["lifecycle"], "model_step_count") + 1
         model_step_limit = context.model_turn_limit
-        if (
-            isinstance(model_step_limit, bool)
-            or not isinstance(model_step_limit, int)
-            or model_step_limit <= 0
-        ):
+        if isinstance(model_step_limit, bool) or not isinstance(model_step_limit, int) or model_step_limit <= 0:
             raise RuntimeNodeTransitionError(
                 "invalid_model_step_limit",
                 "Runtime Context model_turn_limit must be a positive integer",
@@ -787,9 +763,7 @@ class DeterministicRuntimeNodeExecutor:
                     "next_route": "verify",
                     "final_answer": result.finish_content,
                     "finish_delivery_intent": (
-                        dict(finish_delivery_intent)
-                        if finish_delivery_intent is not None
-                        else None
+                        dict(finish_delivery_intent) if finish_delivery_intent is not None else None
                     ),
                     "pending_tool_calls": [],
                 }
@@ -803,10 +777,7 @@ class DeterministicRuntimeNodeExecutor:
                         "model repair_code must not be blank",
                     )
                 repairs = _model_protocol_repairs(state["lifecycle"])
-                is_write_file_repair = (
-                    repair_code == "invalid_tool_call"
-                    and result.repair_tool_name == "write_file"
-                )
+                is_write_file_repair = repair_code == "invalid_tool_call" and result.repair_tool_name == "write_file"
                 repair_limit = (
                     WRITE_FILE_PROTOCOL_REPAIR_LIMIT
                     if is_write_file_repair
@@ -814,11 +785,7 @@ class DeterministicRuntimeNodeExecutor:
                     if repair_code == "invalid_tool_call"
                     else 1
                 )
-                repair_counter_key = (
-                    WRITE_FILE_PROTOCOL_REPAIR_COUNTER_KEY
-                    if is_write_file_repair
-                    else repair_code
-                )
+                repair_counter_key = WRITE_FILE_PROTOCOL_REPAIR_COUNTER_KEY if is_write_file_repair else repair_code
                 if repairs.get(repair_counter_key, 0) >= repair_limit:
                     violation_code = {
                         "empty_output": "model_empty_output",
@@ -828,13 +795,9 @@ class DeterministicRuntimeNodeExecutor:
                     if is_write_file_repair:
                         error_message = WRITE_FILE_PROTOCOL_FAILURE_MESSAGE
                     elif repair_code == "incomplete_output":
-                        error_message = (
-                            "The model output remained truncated after one bounded repair."
-                        )
+                        error_message = "The model output remained truncated after one bounded repair."
                     elif repair_code == "empty_output":
-                        error_message = (
-                            "The model repeated an empty final response after one bounded repair."
-                        )
+                        error_message = "The model repeated an empty final response after one bounded repair."
                     else:
                         error_message = (
                             f"The model repeated the {repair_code!r} protocol error "
@@ -855,9 +818,7 @@ class DeterministicRuntimeNodeExecutor:
                         }
                     )
                 else:
-                    repairs[repair_counter_key] = (
-                        repairs.get(repair_counter_key, 0) + 1
-                    )
+                    repairs[repair_counter_key] = repairs.get(repair_counter_key, 0) + 1
                     new_messages.append(
                         {
                             "id": _runtime_message_id(
@@ -865,10 +826,7 @@ class DeterministicRuntimeNodeExecutor:
                                 f"model-step:{step_count}:repair",
                             ),
                             "role": "user",
-                            "content": (
-                                result.repair_instruction
-                                or "Return one complete, non-empty final response."
-                            ),
+                            "content": (result.repair_instruction or "Return one complete, non-empty final response."),
                             "runtime_intent": "repair",
                             "runtime_run_id": context.run_id,
                         }
@@ -890,8 +848,7 @@ class DeterministicRuntimeNodeExecutor:
                         ),
                         "role": "user",
                         "content": (
-                            result.repair_instruction
-                            or "Retry after resolving the reported business constraint."
+                            result.repair_instruction or "Retry after resolving the reported business constraint."
                         ),
                         "runtime_intent": "repair",
                         "runtime_run_id": context.run_id,
@@ -907,11 +864,7 @@ class DeterministicRuntimeNodeExecutor:
         elif result.intent == "error":
             error = result.error or _error("model_call_failed", "The model call failed.")
             error_code = error.get("code")
-            reason = (
-                error_code
-                if isinstance(error_code, str) and error_code
-                else "model_call_failed"
-            )
+            reason = error_code if isinstance(error_code, str) and error_code else "model_call_failed"
             lifecycle.pop("pending_group_at", None)
             lifecycle.update(
                 {
@@ -930,9 +883,7 @@ class DeterministicRuntimeNodeExecutor:
             "lifecycle": cast(RuntimeLifecycle, lifecycle),
         }
         if new_messages:
-            update["messages"] = [
-                _message_for_channel(message) for message in new_messages
-            ]
+            update["messages"] = [_message_for_channel(message) for message in new_messages]
         return update
 
     async def _tool(
@@ -947,10 +898,9 @@ class DeterministicRuntimeNodeExecutor:
                 "tool route requires pending tool calls",
             )
         call_ids = [call.get("id") for call in calls]
-        if (
-            any(not isinstance(call_id, str) or not call_id.strip() for call_id in call_ids)
-            or len(set(call_ids)) != len(call_ids)
-        ):
+        if any(not isinstance(call_id, str) or not call_id.strip() for call_id in call_ids) or len(
+            set(call_ids)
+        ) != len(call_ids):
             lifecycle = dict(state["lifecycle"])
             lifecycle.pop("pending_group_at", None)
             lifecycle.update(
@@ -973,9 +923,14 @@ class DeterministicRuntimeNodeExecutor:
 
         # 卡片模式: 标记工具开始执行
         tool_call_id = current_call.get("id", "")
-        tool_name = (current_call.get("function") or {}).get("name", "") if isinstance(current_call.get("function"), dict) else ""
+        tool_name = (
+            (current_call.get("function") or {}).get("name", "")
+            if isinstance(current_call.get("function"), dict)
+            else ""
+        )
         if context.card_bridge_key and tool_call_id and tool_name:
             from app.services.agent_runtime.card_stream_bridge import get_bridge
+
             bridge = get_bridge(context.card_bridge_key)
             if bridge is not None:
                 bridge.start_tool(tool_call_id, tool_name)
@@ -988,25 +943,18 @@ class DeterministicRuntimeNodeExecutor:
         # 卡片模式: 标记工具执行完成
         if context.card_bridge_key and tool_call_id:
             from app.services.agent_runtime.card_stream_bridge import get_bridge
+
             bridge = get_bridge(context.card_bridge_key)
             if bridge is not None:
                 bridge.end_tool(tool_call_id, is_error=bool(result.error))
-        resumed_waiting_request = state["lifecycle"].get(
-            "resumed_waiting_request"
-        )
+        resumed_waiting_request = state["lifecycle"].get("resumed_waiting_request")
         discard_tail_calls = (
             isinstance(resumed_waiting_request, Mapping)
-            and resumed_waiting_request.get(
-                "discard_remaining_tool_calls_on_resume"
-            )
-            is True
-            and resumed_waiting_request.get("tool_call_id")
-            == current_call.get("id")
+            and resumed_waiting_request.get("discard_remaining_tool_calls_on_resume") is True
+            and resumed_waiting_request.get("tool_call_id") == current_call.get("id")
         )
         pending_calls = (
-            tuple(result.pending_tool_calls)
-            if discard_tail_calls
-            else (*result.pending_tool_calls, *tail_calls)
+            tuple(result.pending_tool_calls) if discard_tail_calls else (*result.pending_tool_calls, *tail_calls)
         )
         lifecycle = dict(state["lifecycle"])
         repair_pause_reason: str | None = None
@@ -1092,8 +1040,7 @@ class DeterministicRuntimeNodeExecutor:
                     "waiting_request": None,
                     "error": _error(
                         repair_pause_reason,
-                        f"Tool {repair_pause_tool or 'unknown'} reached its "
-                        "repair safety limit.",
+                        f"Tool {repair_pause_tool or 'unknown'} reached its repair safety limit.",
                     ),
                 }
             )
@@ -1113,14 +1060,9 @@ class DeterministicRuntimeNodeExecutor:
         update: RuntimeStateUpdate = {
             "lifecycle": cast(RuntimeLifecycle, lifecycle),
         }
-        output_messages = [
-            _message_for_channel(dict(message)) for message in result.messages
-        ]
+        output_messages = [_message_for_channel(dict(message)) for message in result.messages]
         if repair_pause_reason is not None:
-            output_messages.extend(
-                _message_for_channel(_paused_tail_result(context, call))
-                for call in tail_calls
-            )
+            output_messages.extend(_message_for_channel(_paused_tail_result(context, call)) for call in tail_calls)
         if (
             result.cancel_signal is None
             and result.waiting_request is None
@@ -1132,17 +1074,13 @@ class DeterministicRuntimeNodeExecutor:
                 [],
             )
             if not isinstance(deferred_resume_messages, list) or any(
-                not isinstance(message, Mapping)
-                for message in deferred_resume_messages
+                not isinstance(message, Mapping) for message in deferred_resume_messages
             ):
                 raise RuntimeNodeTransitionError(
                     "invalid_deferred_resume_messages",
                     "deferred resume messages must be an array of objects",
                 )
-            output_messages.extend(
-                _message_for_channel(dict(message))
-                for message in deferred_resume_messages
-            )
+            output_messages.extend(_message_for_channel(dict(message)) for message in deferred_resume_messages)
             lifecycle["deferred_resume_messages"] = []
             update["lifecycle"] = cast(RuntimeLifecycle, lifecycle)
         if output_messages:
@@ -1187,25 +1125,17 @@ class DeterministicRuntimeNodeExecutor:
                 candidate,
                 verification,
             )
-            delivery_request = (
-                dict(finalized.delivery_request)
-                if finalized.delivery_request is not None
-                else None
-            )
+            delivery_request = dict(finalized.delivery_request) if finalized.delivery_request is not None else None
             if raw_finish_delivery_intent is not None:
                 delivery_request = delivery_request or {}
                 existing_handoff = delivery_request.get("group_handoff")
-                if existing_handoff is not None and existing_handoff != dict(
-                    raw_finish_delivery_intent
-                ):
+                if existing_handoff is not None and existing_handoff != dict(raw_finish_delivery_intent):
                     raise RuntimeNodeTransitionError(
                         "invalid_group_handoff_intent",
                         "finalizer changed the frozen Group handoff intent",
                     )
                 delivery_request["content"] = candidate
-                delivery_request["group_handoff"] = dict(
-                    raw_finish_delivery_intent
-                )
+                delivery_request["group_handoff"] = dict(raw_finish_delivery_intent)
             lifecycle.pop("finish_delivery_intent", None)
             lifecycle.pop("pending_group_at", None)
             lifecycle.update(
@@ -1216,17 +1146,18 @@ class DeterministicRuntimeNodeExecutor:
                     "session_context_delta": (
                         dict(finalized.session_context_delta) if finalized.session_context_delta is not None else None
                     ),
-                    "delivery_request": (
-                        delivery_request
-                    ),
+                    "delivery_request": (delivery_request),
                 }
             )
         elif verification.outcome == "repair":
             if verification.details.get("code") == "task_completion_repair_required":
-                attempts = _counter(
-                    state["lifecycle"],
-                    "verification_attempt_count",
-                ) + 1
+                attempts = (
+                    _counter(
+                        state["lifecycle"],
+                        "verification_attempt_count",
+                    )
+                    + 1
+                )
                 verification_episode = {
                     "fingerprint": "task_completion_repair_required",
                     "attempts": attempts,
@@ -1241,8 +1172,7 @@ class DeterministicRuntimeNodeExecutor:
             lifecycle["verification_repair_episode"] = verification_episode
             if (
                 attempts > self._max_verification_repairs
-                and verification.details.get("code")
-                != "task_completion_repair_required"
+                and verification.details.get("code") != "task_completion_repair_required"
             ):
                 lifecycle.pop("finish_delivery_intent", None)
                 lifecycle.pop("pending_group_at", None)
@@ -1276,17 +1206,11 @@ class DeterministicRuntimeNodeExecutor:
                     candidate,
                     exhausted,
                 )
-                delivery_request = (
-                    dict(finalized.delivery_request)
-                    if finalized.delivery_request is not None
-                    else None
-                )
+                delivery_request = dict(finalized.delivery_request) if finalized.delivery_request is not None else None
                 if raw_finish_delivery_intent is not None:
                     delivery_request = delivery_request or {}
                     delivery_request["content"] = candidate
-                    delivery_request["group_handoff"] = dict(
-                        raw_finish_delivery_intent
-                    )
+                    delivery_request["group_handoff"] = dict(raw_finish_delivery_intent)
                 lifecycle.pop("finish_delivery_intent", None)
                 lifecycle.pop("pending_group_at", None)
                 lifecycle["verification_result"] = {
@@ -1320,17 +1244,19 @@ class DeterministicRuntimeNodeExecutor:
                 return {
                     "lifecycle": cast(RuntimeLifecycle, lifecycle),
                     "messages": [
-                        _message_for_channel({
-                            "id": _runtime_message_id(
-                                context,
-                                f"verification:{attempts}:repair",
-                            ),
-                            "role": "user",
-                            "content": verification.reason
-                            or "The finish candidate needs repair before completion.",
-                            "runtime_intent": "repair",
-                            "runtime_run_id": context.run_id,
-                        })
+                        _message_for_channel(
+                            {
+                                "id": _runtime_message_id(
+                                    context,
+                                    f"verification:{attempts}:repair",
+                                ),
+                                "role": "user",
+                                "content": verification.reason
+                                or "The finish candidate needs repair before completion.",
+                                "runtime_intent": "repair",
+                                "runtime_run_id": context.run_id,
+                            }
+                        )
                     ],
                 }
         elif verification.outcome == "fail":
@@ -1372,9 +1298,7 @@ class DeterministicRuntimeNodeExecutor:
             )
         lifecycle = dict(state["lifecycle"])
         waiting_status = state["lifecycle"]["status"]
-        waiting_request = _validate_waiting_request(
-            cast(JsonObject | None, state["lifecycle"].get("waiting_request"))
-        )
+        waiting_request = _validate_waiting_request(cast(JsonObject | None, state["lifecycle"].get("waiting_request")))
         lifecycle.update(
             {
                 "status": "running",
@@ -1382,18 +1306,18 @@ class DeterministicRuntimeNodeExecutor:
                 "waiting_request": None,
             }
         )
-        resume_message = _message_for_channel({
-            "id": _runtime_message_id(
-                context,
-                f"resume:{context.command_id}",
-            ),
-            "role": "user",
-            "content": _resume_message_content(
-                cast(Mapping[str, JsonValue], resume_value)
-            ),
-            "runtime_input": "resume",
-            "runtime_run_id": context.run_id,
-        })
+        resume_message = _message_for_channel(
+            {
+                "id": _runtime_message_id(
+                    context,
+                    f"resume:{context.command_id}",
+                ),
+                "role": "user",
+                "content": _resume_message_content(cast(Mapping[str, JsonValue], resume_value)),
+                "runtime_input": "resume",
+                "runtime_run_id": context.run_id,
+            }
+        )
         if (
             waiting_status == "waiting_user"
             and state["lifecycle"].get("reason")
@@ -1404,9 +1328,7 @@ class DeterministicRuntimeNodeExecutor:
             and resume_value.get("resume_type") == "user_input"
         ):
             try:
-                lifecycle["tool_repair_episodes"] = reset_tool_repair_episodes(
-                    lifecycle.get("tool_repair_episodes")
-                )
+                lifecycle["tool_repair_episodes"] = reset_tool_repair_episodes(lifecycle.get("tool_repair_episodes"))
             except ToolRepairBudgetError as exc:
                 raise RuntimeNodeTransitionError(
                     "invalid_tool_repair_episodes",
@@ -1420,18 +1342,12 @@ class DeterministicRuntimeNodeExecutor:
                     "model_step_count",
                 ),
             }
-        confirmation_text = _resume_confirmation_text(
-            cast(Mapping[str, JsonValue], resume_value)
-        )
+        confirmation_text = _resume_confirmation_text(cast(Mapping[str, JsonValue], resume_value))
         if confirmation_text is not None:
             resume_message["runtime_confirmation_text"] = confirmation_text
         if resume_value.get("resume_type") == "tool_reconciliation":
             payload = resume_value.get("payload")
-            reconciliation_action = (
-                payload.get("workspace_resolution_action")
-                if isinstance(payload, Mapping)
-                else None
-            )
+            reconciliation_action = payload.get("workspace_resolution_action") if isinstance(payload, Mapping) else None
             if reconciliation_action in {"applied", "keep_workspace"}:
                 resume_message["runtime_reconciliation_action"] = cast(
                     str,
@@ -1441,9 +1357,7 @@ class DeterministicRuntimeNodeExecutor:
         if waiting_status == "waiting_user" and pending_calls:
             lifecycle["resumed_waiting_request"] = waiting_request
             deferred = lifecycle.get("deferred_resume_messages", [])
-            if not isinstance(deferred, list) or any(
-                not isinstance(message, Mapping) for message in deferred
-            ):
+            if not isinstance(deferred, list) or any(not isinstance(message, Mapping) for message in deferred):
                 raise RuntimeNodeTransitionError(
                     "invalid_deferred_resume_messages",
                     "deferred resume messages must be an array of objects",
@@ -1465,9 +1379,7 @@ class DeterministicRuntimeNodeExecutor:
                 lifecycle["next_route"] = "tool"
                 return {"lifecycle": cast(RuntimeLifecycle, lifecycle)}
             deferred = lifecycle.get("deferred_resume_messages", [])
-            if not isinstance(deferred, list) or any(
-                not isinstance(message, Mapping) for message in deferred
-            ):
+            if not isinstance(deferred, list) or any(not isinstance(message, Mapping) for message in deferred):
                 raise RuntimeNodeTransitionError(
                     "invalid_deferred_resume_messages",
                     "deferred resume messages must be an array of objects",
@@ -1507,29 +1419,30 @@ class DeterministicRuntimeNodeExecutor:
             run_kind=context.run_kind,
             actor_user_id=context.actor_user_id,
         )
-        if node == "control_guard":
-            return await self._control_guard(state, context)
-        if node == "compact":
-            return await self._compact(state, context)
-        if node == "model":
-            return await self._model(state, context)
-        if node == "tool":
-            return await self._tool(state, context)
-        if node == "verify":
-            return await self._verify(state, context)
-        if node == "wait":
-            return await self._wait(state, context, resume_value)
-        if node == "terminal":
-            if state["lifecycle"]["status"] not in _TERMINAL_STATUSES:
-                raise RuntimeNodeTransitionError(
-                    "run_not_terminal",
-                    "terminal node requires a terminal lifecycle",
-                )
-            return {"lifecycle": dict(state["lifecycle"])}
-        raise RuntimeNodeTransitionError(
-            "unsupported_runtime_node",
-            f"unsupported Runtime node {node!r}",
-        )
+        with observe_node(node=node):
+            if node == "control_guard":
+                return await self._control_guard(state, context)
+            if node == "compact":
+                return await self._compact(state, context)
+            if node == "model":
+                return await self._model(state, context)
+            if node == "tool":
+                return await self._tool(state, context)
+            if node == "verify":
+                return await self._verify(state, context)
+            if node == "wait":
+                return await self._wait(state, context, resume_value)
+            if node == "terminal":
+                if state["lifecycle"]["status"] not in _TERMINAL_STATUSES:
+                    raise RuntimeNodeTransitionError(
+                        "run_not_terminal",
+                        "terminal node requires a terminal lifecycle",
+                    )
+                return {"lifecycle": dict(state["lifecycle"])}
+            raise RuntimeNodeTransitionError(
+                "unsupported_runtime_node",
+                f"unsupported Runtime node {node!r}",
+            )
 
 
 __all__ = [

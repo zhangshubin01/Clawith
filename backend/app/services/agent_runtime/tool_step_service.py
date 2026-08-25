@@ -111,6 +111,7 @@ from app.services.agent_runtime.feishu_approval_authorization import (
     issue_feishu_approval_create_authorization,
 )
 from app.services.autonomy_service import autonomy_service
+from app.services.observability import observe_tool
 from app.services.agent_tools import (
     agentbay_run_scope_id,
     execute_builtin_tool_outcome,
@@ -131,8 +132,7 @@ _HEARTBEAT_PLAZA_LIMITS = {
     "plaza_add_comment": 2,
 }
 LEGACY_TOOL_CONTEXT_DELETE_GATE = (
-    "zero legacy pending batches observed for one full supported release, "
-    "with the rollback window closed"
+    "zero legacy pending batches observed for one full supported release, with the rollback window closed"
 )
 
 
@@ -145,17 +145,11 @@ def legacy_tool_context_deletion_ready(
     """Make compatibility removal an explicit, testable release gate."""
     if observed_legacy_batches < 0:
         raise ValueError("observed_legacy_batches cannot be negative")
-    return (
-        observed_legacy_batches == 0
-        and full_supported_release_elapsed
-        and rollback_window_closed
-    )
+    return observed_legacy_batches == 0 and full_supported_release_elapsed and rollback_window_closed
 
 
 _FEISHU_APPROVAL_CREATE_TOOL = "feishu_approval_create"
-_FEISHU_APPROVAL_CONFIRMATION_REASON = (
-    "feishu_approval_create_confirmation"
-)
+_FEISHU_APPROVAL_CONFIRMATION_REASON = "feishu_approval_create_confirmation"
 _FEISHU_APPROVAL_CONFIRMATION_REJECT = frozenset(
     {
         "不确认",
@@ -730,16 +724,8 @@ def _delete_autonomy_details(
         group_id = initial_input.get("group_id")
         participant_id = initial_input.get("target_participant_id")
         group_context = initial_input.get("group_context")
-        context_agent = (
-            group_context.get("agent")
-            if isinstance(group_context, Mapping)
-            else None
-        )
-        context_agent_id = (
-            context_agent.get("agent_id")
-            if isinstance(context_agent, Mapping)
-            else None
-        )
+        context_agent = group_context.get("agent") if isinstance(group_context, Mapping) else None
+        context_agent_id = context_agent.get("agent_id") if isinstance(context_agent, Mapping) else None
         try:
             uuid.UUID(str(group_id))
             uuid.UUID(str(participant_id))
@@ -806,14 +792,8 @@ def _feishu_approval_confirmation_summary(
     approval_code = cast(str, validated["approval_code"])
     target_member_id = cast(str, validated["target_member_id"])
     parsed_form = cast(list, validated["parsed_form"])
-    approval_fingerprint = hashlib.sha256(
-        approval_code.encode("utf-8")
-    ).hexdigest()[:8].upper()
-    return (
-        f"审批定义标识 {approval_fingerprint}；"
-        f"发起成员 ID {target_member_id[:8]}…；"
-        f"表单字段 {len(parsed_form)} 项"
-    )
+    approval_fingerprint = hashlib.sha256(approval_code.encode("utf-8")).hexdigest()[:8].upper()
+    return f"审批定义标识 {approval_fingerprint}；发起成员 ID {target_member_id[:8]}…；表单字段 {len(parsed_form)} 项"
 
 
 def _feishu_approval_confirmation_reply(
@@ -823,11 +803,7 @@ def _feishu_approval_confirmation_reply(
     if not isinstance(messages, list) or not messages:
         return None
     latest = messages[-1]
-    if (
-        not isinstance(latest, Mapping)
-        or latest.get("role") != "user"
-        or latest.get("runtime_input") != "resume"
-    ):
+    if not isinstance(latest, Mapping) or latest.get("role") != "user" or latest.get("runtime_input") != "resume":
         return None
     content = latest.get("runtime_confirmation_text")
     return content if isinstance(content, str) and content.strip() else None
@@ -847,44 +823,42 @@ def _feishu_approval_confirmation_gate(
 ]:
     if tool_name != _FEISHU_APPROVAL_CREATE_TOOL:
         return None, None, False
-    if (
-        context.source_type != "chat"
-        or not context.session_id
-        or not context.actor_user_id
-    ):
-        return ToolExecutionOutcome(
-            status="failed",
-            result_summary=(
-                "Feishu approval creation requires an authenticated human "
-                "confirmation in the active Chat Run; no approval instance "
-                "was created."
+    if context.source_type != "chat" or not context.session_id or not context.actor_user_id:
+        return (
+            ToolExecutionOutcome(
+                status="failed",
+                result_summary=(
+                    "Feishu approval creation requires an authenticated human "
+                    "confirmation in the active Chat Run; no approval instance "
+                    "was created."
+                ),
+                result_ref=None,
+                error_code="tool_confirmation_unavailable",
+                retryable=False,
+                metadata={"confirmation_status": "unavailable"},
             ),
-            result_ref=None,
-            error_code="tool_confirmation_unavailable",
-            retryable=False,
-            metadata={"confirmation_status": "unavailable"},
-        ), None, False
-    validated, validation_error = validate_feishu_approval_create_arguments(
-        dict(arguments)
-    )
+            None,
+            False,
+        )
+    validated, validation_error = validate_feishu_approval_create_arguments(dict(arguments))
     if validation_error is not None or validated is None:
-        return validation_error or ToolExecutionOutcome(
-            status="failed",
-            result_summary=(
-                "Feishu approval creation arguments are invalid; no approval "
-                "instance was created."
+        return (
+            validation_error
+            or ToolExecutionOutcome(
+                status="failed",
+                result_summary=("Feishu approval creation arguments are invalid; no approval instance was created."),
+                result_ref=None,
+                error_code="invalid_tool_arguments",
+                retryable=False,
             ),
-            result_ref=None,
-            error_code="invalid_tool_arguments",
-            retryable=False,
-        ), None, False
+            None,
+            False,
+        )
     try:
-        correlation_id, arguments_hash = (
-            _feishu_approval_confirmation_correlation(
-                run_id=uuid.UUID(context.run_id),
-                call_id=call_id,
-                arguments=arguments,
-            )
+        correlation_id, arguments_hash = _feishu_approval_confirmation_correlation(
+            run_id=uuid.UUID(context.run_id),
+            call_id=call_id,
+            arguments=arguments,
         )
     except (TypeError, ValueError) as exc:
         raise ToolExecutionError(
@@ -895,28 +869,30 @@ def _feishu_approval_confirmation_gate(
     resumed_request = state["lifecycle"].get("resumed_waiting_request")
     confirmation_nonce = correlation_id.replace("-", "")[:6].upper()
     confirmation_phrase = f"确认发起 {confirmation_nonce}"
-    confirming_actor_hash = hashlib.sha256(
-        context.actor_user_id.encode("utf-8")
-    ).hexdigest()
+    confirming_actor_hash = hashlib.sha256(context.actor_user_id.encode("utf-8")).hexdigest()
     if not isinstance(resumed_request, Mapping):
         summary = _feishu_approval_confirmation_summary(validated)
-        return None, {
-            "waiting_type": "user",
-            "correlation_id": correlation_id,
-            "reason": _FEISHU_APPROVAL_CONFIRMATION_REASON,
-            "question": (
-                "即将发起正式飞书审批，提交后会进入审批流程。\n"
-                f"确认摘要：{summary}\n"
-                f"请整句回复“{confirmation_phrase}”继续；"
-                "回复其他内容不会提交，"
-                "Agent 会按你的新指示继续处理。"
-            ),
-            "tool_call_id": call_id,
-            "arguments_hash": arguments_hash,
-            "confirming_actor_hash": confirming_actor_hash,
-            "confirmation_phrase": confirmation_phrase,
-            "discard_remaining_tool_calls_on_resume": True,
-        }, False
+        return (
+            None,
+            {
+                "waiting_type": "user",
+                "correlation_id": correlation_id,
+                "reason": _FEISHU_APPROVAL_CONFIRMATION_REASON,
+                "question": (
+                    "即将发起正式飞书审批，提交后会进入审批流程。\n"
+                    f"确认摘要：{summary}\n"
+                    f"请整句回复“{confirmation_phrase}”继续；"
+                    "回复其他内容不会提交，"
+                    "Agent 会按你的新指示继续处理。"
+                ),
+                "tool_call_id": call_id,
+                "arguments_hash": arguments_hash,
+                "confirming_actor_hash": confirming_actor_hash,
+                "confirmation_phrase": confirmation_phrase,
+                "discard_remaining_tool_calls_on_resume": True,
+            },
+            False,
+        )
 
     expected_request = {
         "reason": _FEISHU_APPROVAL_CONFIRMATION_REASON,
@@ -925,50 +901,56 @@ def _feishu_approval_confirmation_gate(
         "arguments_hash": arguments_hash,
         "confirming_actor_hash": confirming_actor_hash,
     }
-    if any(
-        resumed_request.get(key) != value
-        for key, value in expected_request.items()
-    ):
-        return ToolExecutionOutcome(
-            status="failed",
-            result_summary=(
-                "The Feishu approval was not created because the confirmed "
-                "proposal no longer matches the pending tool call."
+    if any(resumed_request.get(key) != value for key, value in expected_request.items()):
+        return (
+            ToolExecutionOutcome(
+                status="failed",
+                result_summary=(
+                    "The Feishu approval was not created because the confirmed "
+                    "proposal no longer matches the pending tool call."
+                ),
+                result_ref=None,
+                error_code="tool_confirmation_mismatch",
+                retryable=False,
+                metadata={"confirmation_status": "mismatch"},
             ),
-            result_ref=None,
-            error_code="tool_confirmation_mismatch",
-            retryable=False,
-            metadata={"confirmation_status": "mismatch"},
-        ), None, False
+            None,
+            False,
+        )
 
     reply = _feishu_approval_confirmation_reply(state)
     trimmed_reply = reply.strip() if reply is not None else ""
     if trimmed_reply == confirmation_phrase:
         return None, None, True
     if trimmed_reply.casefold() in _FEISHU_APPROVAL_CONFIRMATION_REJECT:
-        return ToolExecutionOutcome(
+        return (
+            ToolExecutionOutcome(
+                status="failed",
+                result_summary=("The user rejected the Feishu approval proposal; no approval instance was created."),
+                result_ref=None,
+                error_code="tool_confirmation_rejected",
+                retryable=False,
+                metadata={"confirmation_status": "rejected"},
+            ),
+            None,
+            False,
+        )
+    return (
+        ToolExecutionOutcome(
             status="failed",
             result_summary=(
-                "The user rejected the Feishu approval proposal; no approval "
-                "instance was created."
+                "The Feishu approval proposal did not receive an explicit "
+                "confirmation; no approval instance was created. Treat the user's "
+                "reply as a new instruction before preparing another proposal."
             ),
             result_ref=None,
-            error_code="tool_confirmation_rejected",
+            error_code="tool_confirmation_not_granted",
             retryable=False,
-            metadata={"confirmation_status": "rejected"},
-        ), None, False
-    return ToolExecutionOutcome(
-        status="failed",
-        result_summary=(
-            "The Feishu approval proposal did not receive an explicit "
-            "confirmation; no approval instance was created. Treat the user's "
-            "reply as a new instruction before preparing another proposal."
+            metadata={"confirmation_status": "not_granted"},
         ),
-        result_ref=None,
-        error_code="tool_confirmation_not_granted",
-        retryable=False,
-        metadata={"confirmation_status": "not_granted"},
-    ), None, False
+        None,
+        False,
+    )
 
 
 def _heartbeat_blocked_summary(
@@ -1079,10 +1061,7 @@ class RuntimeToolStepService:
                 contract_version=contract_version,
                 lease_owner=lease_owner,
                 lease_ttl_seconds=self._lease_ttl_seconds,
-                resume_safe_read=(
-                    policy.side_effect_classification == "read"
-                    and policy.retry_policy == "safe"
-                ),
+                resume_safe_read=(policy.side_effect_classification == "read" and policy.retry_policy == "safe"),
             )
             if reasoning_content.strip():
                 await _insert_runtime_activity(
@@ -1384,14 +1363,8 @@ class RuntimeToolStepService:
                 db,
                 tenant_id=tenant_id,
                 run_id=reservation.execution.run_id,
-                key=(
-                    f"activity:tool:{reservation.execution.tool_call_id}:"
-                    f"{normalized.status}"
-                ),
-                summary=(
-                    f"Runtime tool {reservation.execution.tool_name} "
-                    f"{normalized.status}"
-                ),
+                key=(f"activity:tool:{reservation.execution.tool_call_id}:{normalized.status}"),
+                summary=(f"Runtime tool {reservation.execution.tool_name} {normalized.status}"),
                 payload={
                     "status": "done",
                     "activity_type": "tool_call",
@@ -1550,9 +1523,7 @@ class RuntimeToolStepService:
             "runtime_tenant_id": context.tenant_id,
         }
         if local_code_execution_seconds is not None:
-            executor_arguments["runtime_code_timeout_seconds"] = (
-                local_code_execution_seconds
-            )
+            executor_arguments["runtime_code_timeout_seconds"] = local_code_execution_seconds
         if confirmation_granted:
             runtime_authorization = issue_feishu_approval_create_authorization(
                 run_id=context.run_id,
@@ -1567,19 +1538,13 @@ class RuntimeToolStepService:
             executor_arguments["runtime_authorization"] = runtime_authorization
         try:
             if accepted.entry.binding.kind == "mcp":
-                executor_arguments["execution_binding"] = (
-                    accepted.entry.binding.to_json()
-                )
+                executor_arguments["execution_binding"] = accepted.entry.binding.to_json()
             operation_task = asyncio.create_task(
                 self._tool_executor(
                     accepted.entry.binding.handler_key,
                     arguments,
                     agent.id,
-                    (
-                        uuid.UUID(context.actor_user_id)
-                        if context.actor_user_id
-                        else agent.creator_id
-                    ),
+                    (uuid.UUID(context.actor_user_id) if context.actor_user_id else agent.creator_id),
                     context.session_id or "",
                     on_output=on_output,
                     **executor_arguments,
@@ -1618,11 +1583,7 @@ class RuntimeToolStepService:
                 else:
                     operation_task.cancel()
                     await asyncio.gather(operation_task, return_exceptions=True)
-                    status = (
-                        "failed"
-                        if accepted.entry.effect == "read"
-                        else "unknown"
-                    )
+                    status = "failed" if accepted.entry.effect == "read" else "unknown"
                     result = ToolExecutionOutcome(
                         status=status,
                         result_summary=(
@@ -1631,18 +1592,10 @@ class RuntimeToolStepService:
                             else "Tool execution was cancelled after a possible write; reconcile before retrying."
                         ),
                         result_ref=None,
-                        error_code=(
-                            "tool_cancelled"
-                            if status == "failed"
-                            else "tool_cancelled_outcome_unknown"
-                        ),
+                        error_code=("tool_cancelled" if status == "failed" else "tool_cancelled_outcome_unknown"),
                         retryable=False,
-                        model_action=(
-                            "wait" if status == "failed" else "reconcile"
-                        ),
-                        side_effect_state=(
-                            "none" if status == "failed" else "unknown"
-                        ),
+                        model_action=("wait" if status == "failed" else "reconcile"),
+                        side_effect_state=("none" if status == "failed" else "unknown"),
                         metadata={
                             **cancel_token.telemetry(signal),
                             "deadline_policy": policy_name,
@@ -1654,11 +1607,7 @@ class RuntimeToolStepService:
             else:
                 operation_task.cancel()
                 await asyncio.gather(operation_task, return_exceptions=True)
-                status = (
-                    "failed"
-                    if accepted.entry.effect == "read"
-                    else "unknown"
-                )
+                status = "failed" if accepted.entry.effect == "read" else "unknown"
                 result = ToolExecutionOutcome(
                     status=status,
                     result_summary=(
@@ -1667,15 +1616,9 @@ class RuntimeToolStepService:
                         else "Tool deadline elapsed after a possible write; reconcile before retrying."
                     ),
                     result_ref=None,
-                    error_code=(
-                        "tool_deadline_exceeded"
-                        if status == "failed"
-                        else "tool_deadline_outcome_unknown"
-                    ),
+                    error_code=("tool_deadline_exceeded" if status == "failed" else "tool_deadline_outcome_unknown"),
                     retryable=False,
-                    model_action=(
-                        "choose_other_tool" if status == "failed" else "reconcile"
-                    ),
+                    model_action=("choose_other_tool" if status == "failed" else "reconcile"),
                     side_effect_state="none" if status == "failed" else "unknown",
                     metadata={
                         "deadline_policy": policy_name,
@@ -1930,8 +1873,7 @@ class RuntimeToolStepService:
                 ToolExecutionOutcome(
                     status="failed",
                     result_summary=(
-                        "File deletion was blocked because the autonomy "
-                        "policy check could not be completed."
+                        "File deletion was blocked because the autonomy policy check could not be completed."
                     ),
                     result_ref=None,
                     error_code="tool_autonomy_check_failed",
@@ -1958,24 +1900,15 @@ class RuntimeToolStepService:
                 "waiting_type": "user",
                 "correlation_id": correlation_id,
                 "reason": "tool_approval_required",
-                "question": (
-                    f"File deletion requires approval{path_text}. "
-                    f"Approval ID: {approval_id}"
-                ),
+                "question": (f"File deletion requires approval{path_text}. Approval ID: {approval_id}"),
                 "tool_call_id": call_id,
                 "approval_id": approval_id,
             }
-        if (
-            level == "L3"
-            and approval_status == "rejected"
-            and isinstance(approval_id, str)
-            and approval_id
-        ):
+        if level == "L3" and approval_status == "rejected" and isinstance(approval_id, str) and approval_id:
             return ToolExecutionOutcome(
                 status="failed",
                 result_summary=(
-                    f"File deletion was rejected and was not executed{path_text}. "
-                    f"Approval ID: {approval_id}"
+                    f"File deletion was rejected and was not executed{path_text}. Approval ID: {approval_id}"
                 ),
                 result_ref=None,
                 error_code="tool_approval_rejected",
@@ -1988,10 +1921,7 @@ class RuntimeToolStepService:
         return (
             ToolExecutionOutcome(
                 status="failed",
-                result_summary=str(
-                    decision.get("message")
-                    or "File deletion was denied by the autonomy policy."
-                ),
+                result_summary=str(decision.get("message") or "File deletion was denied by the autonomy policy."),
                 result_ref=None,
                 error_code="tool_autonomy_denied",
                 retryable=False,
@@ -2037,19 +1967,14 @@ class RuntimeToolStepService:
                 raise ToolExecutionError("tool_context_corrupt", str(exc)) from exc
             is_async_poll = assistant_message.get("runtime_intent") == "async_poll"
             if is_async_poll:
-                raw_origin_call_id = assistant_message.get(
-                    "runtime_origin_tool_call_id"
-                )
+                raw_origin_call_id = assistant_message.get("runtime_origin_tool_call_id")
                 if not isinstance(raw_origin_call_id, str) or not raw_origin_call_id:
                     raise ToolExecutionError(
                         "tool_context_corrupt",
                         "async poll is missing its origin Tool Call ID",
                     )
                 async_origin_call_id = raw_origin_call_id
-            elif (
-                step_context is not None
-                and step_context.assistant_message_id != assistant_message_id
-            ):
+            elif step_context is not None and step_context.assistant_message_id != assistant_message_id:
                 raise ToolExecutionError(
                     "tool_context_corrupt",
                     "Step Tool Context does not match the pending Assistant message",
@@ -2094,9 +2019,7 @@ class RuntimeToolStepService:
                     len(step_context.accepted_calls),
                     LEGACY_TOOL_CONTEXT_DELETE_GATE,
                 )
-            allowed_names = frozenset(
-                call.entry.tool_name for call in step_context.accepted_calls
-            )
+            allowed_names = frozenset(call.entry.tool_name for call in step_context.accepted_calls)
             messages: list[JsonObject] = []
             pending_group_at_changed = False
             pending_group_at: JsonObject | None = None
@@ -2156,9 +2079,7 @@ class RuntimeToolStepService:
                             f"Accepted Tool schema is invalid: {exc}",
                         ) from exc
                 if validation_issues:
-                    issue_summary = "; ".join(
-                        issue.summary for issue in validation_issues
-                    )[:2000]
+                    issue_summary = "; ".join(issue.summary for issue in validation_issues)[:2000]
                     messages.append(
                         _result_message(
                             run_id=run_id,
@@ -2171,10 +2092,7 @@ class RuntimeToolStepService:
                                 error_code="tool_arguments_invalid",
                                 model_action="repair_arguments",
                                 side_effect_state="none",
-                                safe_remediation=(
-                                    "Correct the listed argument paths and call "
-                                    "the same Tool again."
-                                ),
+                                safe_remediation=("Correct the listed argument paths and call the same Tool again."),
                             ),
                         )
                     )
@@ -2207,9 +2125,7 @@ class RuntimeToolStepService:
                         {
                             "participant_ids": list(participant_ids),
                             "tool_call_id": call_id,
-                            "staged_at_model_step": int(
-                                state["lifecycle"].get("model_step_count", 0)
-                            ),
+                            "staged_at_model_step": int(state["lifecycle"].get("model_step_count", 0)),
                         }
                         if participant_ids
                         else None
@@ -2233,10 +2149,7 @@ class RuntimeToolStepService:
                         )
                     )
                     continue
-                if (
-                    _is_group_agent_run(state)
-                    and tool_name in SCOPED_WORKSPACE_TOOL_NAMES
-                ):
+                if _is_group_agent_run(state) and tool_name in SCOPED_WORKSPACE_TOOL_NAMES:
                     arguments = dict(arguments)
                     arguments.setdefault("workspace_scope", "group")
                 if tool_name in _CONTROL_TOOL_NAMES or tool_name not in allowed_names:
@@ -2248,14 +2161,12 @@ class RuntimeToolStepService:
                     confirmation_outcome,
                     confirmation_wait,
                     confirmation_granted,
-                ) = (
-                    _feishu_approval_confirmation_gate(
-                        state=state,
-                        context=context,
-                        call_id=call_id,
-                        tool_name=tool_name,
-                        arguments=arguments,
-                    )
+                ) = _feishu_approval_confirmation_gate(
+                    state=state,
+                    context=context,
+                    call_id=call_id,
+                    tool_name=tool_name,
+                    arguments=arguments,
                 )
                 if confirmation_wait is not None:
                     return ToolStepResult(
@@ -2263,15 +2174,13 @@ class RuntimeToolStepService:
                         waiting_request=confirmation_wait,
                         pending_tool_calls=tool_calls[index:],
                     )
-                autonomy_outcome, approval_wait = (
-                    await self._delete_autonomy_gate(
-                        state=state,
-                        context=context,
-                        agent=agent,
-                        call_id=call_id,
-                        tool_name=tool_name,
-                        arguments=arguments,
-                    )
+                autonomy_outcome, approval_wait = await self._delete_autonomy_gate(
+                    state=state,
+                    context=context,
+                    agent=agent,
+                    call_id=call_id,
+                    tool_name=tool_name,
+                    arguments=arguments,
                 )
                 if approval_wait is not None:
                     return ToolStepResult(
@@ -2389,16 +2298,11 @@ class RuntimeToolStepService:
                         if reconciliation.status == "unavailable":
                             try:
                                 async with self._session_factory() as db, db.begin():
-                                    execution = (
-                                        await mark_expired_safe_read_result_unavailable(
-                                            db,
-                                            tenant_id=tenant_id,
-                                            execution_id=reservation.execution.id,
-                                            probe_error_code=(
-                                                reconciliation.error_code
-                                                or "tool_result_unavailable"
-                                            ),
-                                        )
+                                    execution = await mark_expired_safe_read_result_unavailable(
+                                        db,
+                                        tenant_id=tenant_id,
+                                        execution_id=reservation.execution.id,
+                                        probe_error_code=(reconciliation.error_code or "tool_result_unavailable"),
                                     )
                             except Exception as exc:
                                 raise ToolExecutionReconciliationPending(
@@ -2727,26 +2631,22 @@ class RuntimeToolStepService:
                         arguments,
                     ):
                         if tool_name in SCOPED_GROUP_WORKSPACE_MUTATION_TOOL_NAMES:
-                            raw_result = (
-                                await self._group_tool_service.execute_scoped_workspace_tool(
-                                    state,
-                                    context,
-                                    agent,
-                                    tool_name,
-                                    arguments,
-                                    operation_id=reservation.execution.id,
-                                    lease_owner=lease_owner,
-                                )
+                            raw_result = await self._group_tool_service.execute_scoped_workspace_tool(
+                                state,
+                                context,
+                                agent,
+                                tool_name,
+                                arguments,
+                                operation_id=reservation.execution.id,
+                                lease_owner=lease_owner,
                             )
                         else:
-                            raw_result = (
-                                await self._group_tool_service.execute_scoped_workspace_tool(
-                                    state,
-                                    context,
-                                    agent,
-                                    tool_name,
-                                    arguments,
-                                )
+                            raw_result = await self._group_tool_service.execute_scoped_workspace_tool(
+                                state,
+                                context,
+                                agent,
+                                tool_name,
+                                arguments,
                             )
                     else:
                         on_output_callback = None
@@ -2768,9 +2668,7 @@ class RuntimeToolStepService:
                                     await db.execute(
                                         insert(AgentRunEvent)
                                         .values(
-                                            id=uuid.uuid5(
-                                                run_id, f"activity:tool:{call_id}:output:{output_seq}"
-                                            ),
+                                            id=uuid.uuid5(run_id, f"activity:tool:{call_id}:output:{output_seq}"),
                                             tenant_id=tenant_id,
                                             run_id=run_id,
                                             event_type="status_changed",
@@ -2802,9 +2700,15 @@ class RuntimeToolStepService:
 
                             on_output_callback = _tool_on_output
 
-                        try:
-                            raw_result, inflight_cancel = (
-                                await self._execute_application_with_controls(
+                        with observe_tool(
+                            tool_name=tool_name,
+                            tool_call_id=call_id,
+                            tool_execution_id=reservation.execution.id,
+                            side_effect_classification=policy.side_effect_classification,
+                            retry_policy=policy.retry_policy,
+                        ) as tool_handle:
+                            try:
+                                raw_result, inflight_cancel = await self._execute_application_with_controls(
                                     state=state,
                                     context=context,
                                     tenant_id=tenant_id,
@@ -2817,19 +2721,29 @@ class RuntimeToolStepService:
                                     on_output=on_output_callback,
                                     lease_renewal_external=True,
                                 )
-                            )
-                        finally:
-                            # 流结束后的最终 flush：Gradle 输出经 JVM 块缓冲，
-                            # 以构建结束时的一次性突发到达——落在 0.5s 窗口内
-                            # 会被上面的节流条件漏掉，必须无条件冲刷一次。
-                            if on_output_callback is not None:
-                                try:
-                                    await _flush_pending_output()
-                                except Exception:
-                                    logger.opt(exception=True).warning(
-                                        "[ToolStep] final output flush failed for call %s",
-                                        call_id,
+                            finally:
+                                # 流结束后的最终 flush：Gradle 输出经 JVM 块缓冲，
+                                # 以构建结束时的一次性突发到达——落在 0.5s 窗口内
+                                # 会被上面的节流条件漏掉，必须无条件冲刷一次。
+                                if on_output_callback is not None:
+                                    try:
+                                        await _flush_pending_output()
+                                    except Exception:
+                                        logger.opt(exception=True).warning(
+                                            "[ToolStep] final output flush failed for call %s",
+                                            call_id,
+                                        )
+                            if tool_handle is not None:
+                                if isinstance(raw_result, ToolExecutionOutcome):
+                                    tool_handle.set_output(
+                                        {
+                                            "status": raw_result.status,
+                                            "result_summary": (raw_result.result_summary or "")[:2000],
+                                            "error_code": raw_result.error_code,
+                                        }
                                     )
+                                else:
+                                    tool_handle.set_output(str(raw_result)[:2000])
                 except GroupWorkspaceReconciliationPending:
                     raise
                 except Exception as exc:

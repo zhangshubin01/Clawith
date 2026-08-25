@@ -30,7 +30,9 @@ __all__ = [
     "is_enabled",
     "mask_text",
     "observe_generation",
+    "observe_node",
     "observe_run",
+    "observe_tool",
     "set_run_identity",
 ]
 
@@ -263,6 +265,95 @@ def observe_generation(
                 raise
             finally:
                 handle.finalize(started)
+
+
+@contextmanager
+def _observe_span(
+    *,
+    as_type: str,
+    name: str,
+    model: str | None = None,
+    input: Any = None,
+    capture_input: bool = True,
+    identity: dict[str, Any] | None = None,
+) -> Iterator[GenerationHandle | None]:
+    """Shared span machinery for tool/node observations (no-op when disabled)."""
+    client = _get_client()
+    if client is None:
+        yield None
+        return
+
+    meta = dict(_run_identity.get())
+    if identity:
+        meta.update({key: str(value) for key, value in identity.items() if value is not None})
+
+    span_input = mask_text(input) if (capture_input and input is not None) else None
+    prop_cm = _user_session_propagation(meta)
+    try:
+        start_cm = client.start_as_current_observation(
+            as_type=as_type,
+            name=name,
+            input=span_input,
+            **({"model": model} if model else {}),
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[Observability] failed to start {} span: {}", as_type, exc)
+        yield None
+        return
+
+    started = time.perf_counter()
+    handle: GenerationHandle | None = None
+    with ExitStack() as stack:
+        if prop_cm is not None:
+            stack.enter_context(prop_cm)
+        with start_cm as span:
+            handle = GenerationHandle(span, mask=True)
+            handle.add_metadata(**meta)
+            try:
+                yield handle
+            except BaseException as exc:
+                handle.mark_error(exc)
+                raise
+            finally:
+                handle.finalize(started)
+
+
+@contextmanager
+def observe_tool(
+    *,
+    tool_name: str,
+    tool_call_id: Any = None,
+    tool_execution_id: Any = None,
+    **identity: Any,
+) -> Iterator[GenerationHandle | None]:
+    """Open a ``tool`` observation around one tool handler execution (no-op when disabled).
+
+    Process-view only: the durable ledger (``agent_tool_executions``) remains the
+    authoritative record of outcome/effect; this span records the execution
+    latency/errors plus alignment keys (``tool_call_id``, ``tool_execution_id``)
+    that link back to the ledger. Tool arguments are intentionally not captured.
+    """
+    meta: dict[str, Any] = {"tool_name": tool_name}
+    if tool_call_id is not None:
+        meta["tool_call_id"] = str(tool_call_id)
+    if tool_execution_id is not None:
+        meta["tool_execution_id"] = str(tool_execution_id)
+    meta.update({key: value for key, value in identity.items() if value is not None})
+    with _observe_span(as_type="tool", name=f"tool:{tool_name}", identity=meta) as handle:
+        yield handle
+
+
+@contextmanager
+def observe_node(
+    *,
+    node: str,
+    **identity: Any,
+) -> Iterator[GenerationHandle | None]:
+    """Open a ``span`` observation around one Runtime graph node (no-op when disabled)."""
+    meta: dict[str, Any] = {"node": node}
+    meta.update({key: value for key, value in identity.items() if value is not None})
+    with _observe_span(as_type="span", name=f"node:{node}", identity=meta) as handle:
+        yield handle
 
 
 def _user_session_propagation(identity: dict[str, Any]) -> Any | None:

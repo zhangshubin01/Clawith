@@ -126,6 +126,58 @@ def test_observe_run_sets_identity_for_nested_generation(
     assert update["metadata"]["tenant_id"] == "t-9"
 
 
+def test_observe_tool_records_identity_and_output(monkeypatch: pytest.MonkeyPatch) -> None:
+    span = _FakeSpan()
+    monkeypatch.setattr(tracing, "_get_client", lambda: _FakeClient(span=span))
+
+    with tracing.observe_tool(
+        tool_name="edit_file",
+        tool_call_id="call-1",
+        tool_execution_id="exec-1",
+        side_effect_classification="write",
+        retry_policy="conditional",
+    ) as tool_handle:
+        assert tool_handle is not None
+        tool_handle.set_output({"status": "succeeded", "result_summary": "patched", "error_code": None})
+
+    update = span.updates[-1]
+    assert update["output"] == {"status": "succeeded", "result_summary": "patched", "error_code": None}
+    assert update["metadata"]["tool_name"] == "edit_file"
+    assert update["metadata"]["tool_call_id"] == "call-1"
+    assert update["metadata"]["tool_execution_id"] == "exec-1"
+    assert update["metadata"]["side_effect_classification"] == "write"
+    assert update["metadata"]["retry_policy"] == "conditional"
+
+
+def test_observe_node_records_node_and_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    span = _FakeSpan()
+    monkeypatch.setattr(tracing, "_get_client", lambda: _FakeClient(span=span))
+
+    class Boom(Exception):
+        pass
+
+    with pytest.raises(Boom):
+        with tracing.observe_node(node="model") as node_handle:
+            assert node_handle is not None
+            raise Boom("node failed")
+
+    update = span.updates[-1]
+    assert update["metadata"]["node"] == "model"
+    assert update["level"] == "ERROR"
+    assert "Boom" in update["status_message"]
+
+
+def test_observe_tool_swallows_start_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(tracing, "_get_client", lambda: _FakeClient(raise_on_start=True))
+    captured: list[str] = []
+
+    with tracing.observe_tool(tool_name="write_file") as tool_handle:
+        assert tool_handle is None
+        captured.append("ran")
+
+    assert captured == ["ran"]
+
+
 def test_observe_generation_swallows_span_start_failure(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(tracing, "_get_client", lambda: _FakeClient(raise_on_start=True))
     captured: list[str] = []

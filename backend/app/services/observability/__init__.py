@@ -10,7 +10,9 @@ from app.services.observability.tracing import (
     is_enabled,
     mask_text,
     observe_generation,
+    observe_node,
     observe_run,
+    observe_tool,
     set_run_identity,
 )
 
@@ -21,6 +23,8 @@ __all__ = [
     "is_enabled",
     "mask_text",
     "observe_generation",
+    "observe_node",
     "observe_run",
+    "observe_tool",
     "set_run_identity",
 ]
