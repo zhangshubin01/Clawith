@@ -92,6 +92,8 @@ services:
       LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-}
       LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-}
       LANGFUSE_HOST: ${LANGFUSE_HOST:-}
+      # OTel service identity for Langfuse/OTel exporters (UI grouping; defaults to unknown_service)
+      OTEL_SERVICE_NAME: ${OTEL_SERVICE_NAME:-clawith-backend}
     ports:
       - "127.0.0.1:${BACKEND_PORT:-8008}:8000"
     volumes:
