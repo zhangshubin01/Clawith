@@ -994,12 +994,12 @@ async def update_agent(
                         }
                     )
 
-    # Enforce the platform cap on tool rounds. Legacy agents may hold values
-    # above it (the cap was introduced after they were created); clamp instead
-    # of rejecting so unrelated settings edits (e.g. model selection) still save.
+    # Enforce the platform cap on tool rounds. Rows may hold values above it
+    # (e.g. from clients that predate the cap); clamp instead of rejecting so
+    # unrelated settings edits (e.g. model selection) still save.
     if "max_tool_rounds" in update_data:
         original = update_data["max_tool_rounds"]
-        update_data["max_tool_rounds"] = min(original, 500)
+        update_data["max_tool_rounds"] = min(original, 10000)
         if update_data["max_tool_rounds"] != original:
             clamped_fields.append(
                 {

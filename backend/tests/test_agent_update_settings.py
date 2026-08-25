@@ -3,9 +3,10 @@
 The v1.11 merge introduced two validation changes that broke saves for
 pre-existing agents:
 
-1. ``AgentUpdate.max_tool_rounds`` gained an upper bound (500) while legacy
-   agents hold 10000 — the endpoint now clamps instead of rejecting, with
-   ``_clamped_fields`` feedback (same pattern as tenant floors).
+1. ``AgentUpdate.max_tool_rounds`` gained an upper bound while legacy agents
+   may hold values above it — the endpoint now clamps to the platform cap
+   (10000) instead of rejecting, with ``_clamped_fields`` feedback (same
+   pattern as tenant floors).
 2. ``AgentUpdate.timezone`` gained an IANA validator while the UI sends an
    empty string for "inherit the company default" — empty now normalizes
    to None.
@@ -93,16 +94,16 @@ def test_timezone_invalid_name_rejected():
 
 
 @pytest.mark.asyncio
-async def test_update_agent_clamps_legacy_max_tool_rounds(monkeypatch):
-    agent = _make_agent(max_tool_rounds=10000)
-    result = await _call_update_agent(monkeypatch, AgentUpdate(max_tool_rounds=10000), agent)
+async def test_update_agent_clamps_above_cap_max_tool_rounds(monkeypatch):
+    agent = _make_agent(max_tool_rounds=20000)
+    result = await _call_update_agent(monkeypatch, AgentUpdate(max_tool_rounds=20000), agent)
 
-    assert agent.max_tool_rounds == 500
+    assert agent.max_tool_rounds == 10000
     assert result["_clamped_fields"] == [
         {
             "field": "max_tool_rounds",
-            "requested": 10000,
-            "applied": 500,
+            "requested": 20000,
+            "applied": 10000,
             "reason": "platform_cap",
         }
     ]
@@ -110,8 +111,8 @@ async def test_update_agent_clamps_legacy_max_tool_rounds(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_update_agent_leaves_in_range_max_tool_rounds_untouched(monkeypatch):
-    agent = _make_agent(max_tool_rounds=50)
-    result = await _call_update_agent(monkeypatch, AgentUpdate(max_tool_rounds=50), agent)
+    agent = _make_agent(max_tool_rounds=10000)
+    result = await _call_update_agent(monkeypatch, AgentUpdate(max_tool_rounds=10000), agent)
 
-    assert agent.max_tool_rounds == 50
+    assert agent.max_tool_rounds == 10000
     assert "_clamped_fields" not in result

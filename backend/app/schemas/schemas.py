@@ -313,7 +313,7 @@ class AgentUpdate(BaseModel):
     context_window_size: int | None = Field(default=None, ge=1, le=500)
     max_tokens_per_day: int | None = None
     max_tokens_per_month: int | None = None
-    max_tool_rounds: int | None = Field(default=None, ge=5)  # upper cap enforced (clamped) in the API layer for legacy rows above 500
+    max_tool_rounds: int | None = Field(default=None, ge=5)  # upper cap (10000) enforced (clamped) in the API layer
     max_triggers: int | None = None
     min_poll_interval_min: int | None = None
     webhook_rate_limit: int | None = None
