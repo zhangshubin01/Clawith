@@ -325,7 +325,7 @@ class AcpHandler:
                     if msg_id is not None:
                         await self._send_result(msg_id, result)
                 except Exception as e:
-                    logger.error(f"[ACP] {method} 失败", exc_info=True)
+                    logger.error(f"[ACP] {method} 失败: {type(e).__name__}: {e}", exc_info=True)
                     await self._send_error(msg_id, -32603, "Internal error")
         finally:
             watchdog.cancel()
@@ -485,7 +485,8 @@ class AcpHandler:
         self._cwd = result.get("cwd", "")
 
         # Accept agentId from client _meta (user may have switched agent)
-        client_agent_id = (params.get("_meta") or {}).get("agentId")
+        meta = params.get("_meta")
+        client_agent_id = (meta or {}).get("agentId") if isinstance(meta, dict) else None
         if client_agent_id:
             new_agent = await self._find_agent_by_id(client_agent_id)
             if new_agent:

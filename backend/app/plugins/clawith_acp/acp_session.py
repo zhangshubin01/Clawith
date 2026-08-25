@@ -61,12 +61,14 @@ class AcpSessionManager:
 
     async def load(self, session_id: str, user_id: str) -> dict | None:
         """加载已有会话 — 返回 agent_id + cwd + 历史消息。"""
+        try:
+            sid_uuid = uuid.UUID(session_id)
+            uid_uuid = uuid.UUID(user_id)
+        except (ValueError, TypeError, AttributeError):
+            logger.warning(f"[ACP] 非法 UUID: session={session_id}")
+            return None
         async with async_session() as db:
-            result = await db.execute(
-                select(ChatSession)
-                .where(ChatSession.id == session_id)
-                .limit(1)
-            )
+            result = await db.execute(select(ChatSession).where(ChatSession.id == sid_uuid).limit(1))
             session: ChatSession | None = result.scalar_one_or_none()
             if not session:
                 logger.warning(f"[ACP] 会话不存在: {session_id}")
@@ -79,23 +81,20 @@ class AcpSessionManager:
             # 增加 user_id 过滤: 与 load_history_for_llm 保持一致, 纵深防御 + 索引覆盖。
             history_result = await db.execute(
                 select(ChatMessage)
-                .where(ChatMessage.conversation_id == session_id)
-                .where(ChatMessage.user_id == uuid.UUID(user_id))
+                .where(ChatMessage.conversation_id == sid_uuid)
+                .where(ChatMessage.user_id == uid_uuid)
                 .where(ChatMessage.role.in_(("user", "assistant")))
                 .order_by(ChatMessage.created_at.desc())
                 .limit(ACP_HISTORY_LIMIT)
             )
             messages = list(reversed(history_result.scalars().all()))
-            history = [
-                {"role": msg.role, "content": msg.content}
-                for msg in messages
-            ]
+            history = [{"role": msg.role, "content": msg.content} for msg in messages]
 
             tc_r = await db.execute(
                 select(func.count())
                 .select_from(ChatMessage)
-                .where(ChatMessage.conversation_id == session_id)
-                .where(ChatMessage.user_id == uuid.UUID(user_id))
+                .where(ChatMessage.conversation_id == sid_uuid)
+                .where(ChatMessage.user_id == uid_uuid)
                 .where(ChatMessage.role == "tool_call")
             )
             tool_call_count = int(tc_r.scalar() or 0)
@@ -116,13 +115,17 @@ class AcpSessionManager:
 
     async def update_agent(self, session_id: str, agent_id: str) -> None:
         """更新会话绑定的智能体（用户切换智能体后重连）。"""
+        try:
+            sid_uuid = uuid.UUID(session_id)
+            aid_uuid = uuid.UUID(agent_id)
+        except (ValueError, TypeError, AttributeError):
+            logger.warning(f"[ACP] update_agent 非法 UUID: session={session_id} agent={agent_id}")
+            return
         async with async_session() as db:
-            result = await db.execute(
-                select(ChatSession).where(ChatSession.id == session_id).limit(1)
-            )
+            result = await db.execute(select(ChatSession).where(ChatSession.id == sid_uuid).limit(1))
             session: ChatSession | None = result.scalar_one_or_none()
             if session:
-                session.agent_id = agent_id
+                session.agent_id = aid_uuid
                 await db.commit()
                 logger.info(f"[ACP] 更新会话智能体: id={session_id} → agent={agent_id}")
 
@@ -149,9 +152,7 @@ class AcpSessionManager:
 
         raw_limit = max(limit, ACP_RAW_HISTORY_LIMIT)
         async with async_session() as db:
-            sr = await db.execute(
-                select(ChatSession).where(ChatSession.id == sid_uuid).limit(1)
-            )
+            sr = await db.execute(select(ChatSession).where(ChatSession.id == sid_uuid).limit(1))
             sess = sr.scalar_one_or_none()
             if not sess or str(sess.user_id) != str(user_id):
                 return []
@@ -171,10 +172,7 @@ class AcpSessionManager:
 
                 result = await hydrate_history_tool_results(result)
             self._history_cache[session_id] = (time.monotonic(), result)
-            logger.info(
-                f"[ACP] load_history_for_llm: session={session_id} "
-                f"raw_rows={len(rows)} llm_msgs={len(result)}"
-            )
+            logger.info(f"[ACP] load_history_for_llm: session={session_id} raw_rows={len(rows)} llm_msgs={len(result)}")
             return result
 
     async def persist_turn(
@@ -200,9 +198,7 @@ class AcpSessionManager:
         try:
             async with async_session() as db:
                 async with db.begin():
-                    sr = await db.execute(
-                        select(ChatSession).where(ChatSession.id == sid_uuid).limit(1)
-                    )
+                    sr = await db.execute(select(ChatSession).where(ChatSession.id == sid_uuid).limit(1))
                     sess = sr.scalar_one_or_none()
                     if not sess or str(sess.user_id) != str(user_id):
                         logger.warning(f"[ACP] persist 会话不存在或无权限: {session_id}")
@@ -237,8 +233,7 @@ class AcpSessionManager:
                     # message_count is a dynamic API-layer value computed from ChatMessage table;
                     # ChatSession does not have a message_count ORM column.
             logger.info(
-                f"[ACP] persist: session={session_id} "
-                f"user_len={len(user_text)} reply_len={len(assistant_text)}"
+                f"[ACP] persist: session={session_id} user_len={len(user_text)} reply_len={len(assistant_text)}"
             )
             # 淘汰缓存: 会话已更新, 下次 prompt 从 DB 加载最新历史。TTL 30s 覆盖连续对话间隔。
             self.invalidate_history_cache(session_id)
