@@ -92,6 +92,8 @@ services:
       LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-}
       LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-}
       LANGFUSE_HOST: ${LANGFUSE_HOST:-}
+      # Multi-tenant isolation: JSON map tenant_id -> {public_key, secret_key}
+      LANGFUSE_TENANT_KEYS: ${LANGFUSE_TENANT_KEYS:-}
       # OTel service identity for Langfuse/OTel exporters (UI grouping; defaults to unknown_service)
       OTEL_SERVICE_NAME: ${OTEL_SERVICE_NAME:-clawith-backend}
     ports:

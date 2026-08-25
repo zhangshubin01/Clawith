@@ -66,6 +66,9 @@ _UNSET = object()
 
 _client: Any = None
 _client_error: Exception | None = None
+_tenant_clients: dict[str, Any] = {}
+_tenant_errors: dict[str, Exception] = {}
+_tenant_keys: dict[str, dict[str, str]] | None = None
 
 _run_identity: contextvars.ContextVar[dict[str, str]] = contextvars.ContextVar(
     "clawith_observability_identity", default={}
@@ -78,6 +81,40 @@ def is_enabled() -> bool:
     return bool(settings.OBSERVABILITY_ENABLED and settings.LANGFUSE_PUBLIC_KEY and settings.LANGFUSE_SECRET_KEY)
 
 
+def _tenant_key_map() -> dict[str, dict[str, str]]:
+    """Parse the LANGFUSE_TENANT_KEYS JSON map once (tenant_id -> credentials)."""
+    global _tenant_keys
+    if _tenant_keys is not None:
+        return _tenant_keys
+    settings = get_settings()
+    raw = (settings.LANGFUSE_TENANT_KEYS or "").strip()
+    if not raw:
+        _tenant_keys = {}
+        return _tenant_keys
+    try:
+        parsed = json.loads(raw)
+        if not isinstance(parsed, dict):
+            raise ValueError("LANGFUSE_TENANT_KEYS must be a JSON object")
+        normalized: dict[str, dict[str, str]] = {}
+        for tenant_id, creds in parsed.items():
+            if not isinstance(creds, dict):
+                continue
+            public_key = creds.get("public_key")
+            secret_key = creds.get("secret_key")
+            if isinstance(public_key, str) and public_key and isinstance(secret_key, str) and secret_key:
+                normalized[str(tenant_id)] = {"public_key": public_key, "secret_key": secret_key}
+            else:
+                logger.warning(
+                    "[Observability] LANGFUSE_TENANT_KEYS entry for tenant {} is missing public_key/secret_key; skipped",
+                    tenant_id,
+                )
+        _tenant_keys = normalized
+    except Exception as exc:  # noqa: BLE001 — observability is best-effort
+        _tenant_keys = {}
+        logger.warning("[Observability] failed to parse LANGFUSE_TENANT_KEYS; tenant isolation disabled: {}", exc)
+    return _tenant_keys
+
+
 def set_run_identity(**identity: Any) -> None:
     """Record Run/tenant/agent identity for the current async context.
 
@@ -88,26 +125,52 @@ def set_run_identity(**identity: Any) -> None:
     _run_identity.set({key: str(value) for key, value in identity.items() if value is not None and value != ""})
 
 
-def _get_client() -> Any:
+def _build_client(*, public_key: str, secret_key: str) -> Any:
+    from langfuse import Langfuse  # lazy import (only when enabled)
+
+    settings = get_settings()
+    kwargs: dict[str, str] = {}
+    if settings.LANGFUSE_HOST:
+        kwargs["base_url"] = settings.LANGFUSE_HOST
+    return Langfuse(public_key=public_key, secret_key=secret_key, **kwargs)
+
+
+def _get_client(tenant_id: str | None = None) -> Any:
+    """Return the Langfuse client for a tenant, or the default client (None when disabled).
+
+    A configured per-tenant key isolates that tenant's traces into its own
+    Langfuse project; unmatched tenants fall back to the default client.
+    """
     global _client, _client_error
     if not is_enabled():
         return None
+    if tenant_id:
+        creds = _tenant_key_map().get(tenant_id)
+        if creds is not None:
+            client = _tenant_clients.get(tenant_id)
+            if client is not None:
+                return client
+            if tenant_id in _tenant_errors:
+                return None
+            try:
+                client = _build_client(**creds)
+                _tenant_clients[tenant_id] = client
+                return client
+            except Exception as exc:  # noqa: BLE001 — observability is best-effort
+                _tenant_errors[tenant_id] = exc
+                logger.warning(
+                    "[Observability] failed to init Langfuse for tenant {}; tenant tracing disabled: {}",
+                    tenant_id,
+                    exc,
+                )
+                return None
     if _client is not None:
         return _client
     if _client_error is not None:
         return None
     try:
-        from langfuse import Langfuse  # lazy import (only when enabled)
-
         settings = get_settings()
-        kwargs: dict[str, str] = {}
-        if settings.LANGFUSE_HOST:
-            kwargs["base_url"] = settings.LANGFUSE_HOST
-        _client = Langfuse(
-            public_key=settings.LANGFUSE_PUBLIC_KEY,
-            secret_key=settings.LANGFUSE_SECRET_KEY,
-            **kwargs,
-        )
+        _client = _build_client(public_key=settings.LANGFUSE_PUBLIC_KEY, secret_key=settings.LANGFUSE_SECRET_KEY)
     except Exception as exc:  # noqa: BLE001 — observability is best-effort
         _client_error = exc
         logger.warning("[Observability] failed to init Langfuse; tracing disabled: {}", exc)
@@ -222,16 +285,16 @@ def observe_generation(
     Exceptions raised inside the block are recorded as ``level=ERROR`` and
     re-raised to the caller; observability-internal failures are swallowed.
     """
-    client = _get_client()
-    if client is None:
-        yield None
-        return
-
     identity = dict(_run_identity.get())
     if agent_id is not None:
         identity["agent_id"] = str(agent_id)
     if provider:
         identity["provider"] = provider
+
+    client = _get_client(identity.get("tenant_id"))
+    if client is None:
+        yield None
+        return
 
     span_input = mask_text(input) if (capture_input and input is not None) else None
 
@@ -278,14 +341,14 @@ def _observe_span(
     identity: dict[str, Any] | None = None,
 ) -> Iterator[GenerationHandle | None]:
     """Shared span machinery for tool/node observations (no-op when disabled)."""
-    client = _get_client()
-    if client is None:
-        yield None
-        return
-
     meta = dict(_run_identity.get())
     if identity:
         meta.update({key: str(value) for key, value in identity.items() if value is not None})
+
+    client = _get_client(meta.get("tenant_id"))
+    if client is None:
+        yield None
+        return
 
     span_input = mask_text(input) if (capture_input and input is not None) else None
     prop_cm = _user_session_propagation(meta)
@@ -423,7 +486,7 @@ def observe_run(
     ``level=ERROR`` and re-raised to the caller; observability-internal failures
     are swallowed.
     """
-    client = _get_client()
+    client = _get_client(str(tenant_id) if tenant_id is not None else None)
     if client is None:
         yield None
         return
@@ -483,9 +546,13 @@ def observe_run(
 
 
 def flush() -> None:
-    """Flush any pending trace exports (no-op when disabled)."""
-    client = _get_client()
-    if client is not None:
+    """Flush any pending trace exports across all clients (no-op when disabled)."""
+    clients: list[Any] = []
+    default_client = _get_client()
+    if default_client is not None:
+        clients.append(default_client)
+    clients.extend(_tenant_clients.values())
+    for client in clients:
         try:
             client.flush()
         except Exception:  # noqa: BLE001

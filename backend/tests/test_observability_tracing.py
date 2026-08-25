@@ -36,7 +36,7 @@ class _FakeClient:
 
 
 def test_observe_generation_is_noop_when_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(tracing, "_get_client", lambda: None)
+    monkeypatch.setattr(tracing, "_get_client", lambda _tenant_id=None: None)
     captured: list[str] = []
 
     with tracing.observe_generation(name="llm", model="m", provider="p") as gen:
@@ -47,7 +47,7 @@ def test_observe_generation_is_noop_when_disabled(monkeypatch: pytest.MonkeyPatc
 
 
 def test_observe_run_is_noop_when_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(tracing, "_get_client", lambda: None)
+    monkeypatch.setattr(tracing, "_get_client", lambda _tenant_id=None: None)
     captured: list[str] = []
 
     with tracing.observe_run(run_id="r-1", command_id="c-1", tenant_id="t-1") as run_handle:
@@ -61,7 +61,7 @@ def test_observe_run_creates_root_span_with_identity(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     span = _FakeSpan()
-    monkeypatch.setattr(tracing, "_get_client", lambda: _FakeClient(span=span))
+    monkeypatch.setattr(tracing, "_get_client", lambda _tenant_id=None, _span=span: _FakeClient(span=_span))
 
     with tracing.observe_run(
         run_id="r-1",
@@ -87,7 +87,7 @@ def test_observe_run_creates_root_span_with_identity(
 
 def test_observe_run_records_error_and_reraises(monkeypatch: pytest.MonkeyPatch) -> None:
     span = _FakeSpan()
-    monkeypatch.setattr(tracing, "_get_client", lambda: _FakeClient(span=span))
+    monkeypatch.setattr(tracing, "_get_client", lambda _tenant_id=None, _span=span: _FakeClient(span=_span))
 
     class Boom(Exception):
         pass
@@ -106,7 +106,7 @@ def test_observe_run_sets_identity_for_nested_generation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     span = _FakeSpan()
-    monkeypatch.setattr(tracing, "_get_client", lambda: _FakeClient(span=span))
+    monkeypatch.setattr(tracing, "_get_client", lambda _tenant_id=None, _span=span: _FakeClient(span=_span))
 
     with tracing.observe_run(
         run_id="r-9",
@@ -128,7 +128,7 @@ def test_observe_run_sets_identity_for_nested_generation(
 
 def test_observe_tool_records_identity_and_output(monkeypatch: pytest.MonkeyPatch) -> None:
     span = _FakeSpan()
-    monkeypatch.setattr(tracing, "_get_client", lambda: _FakeClient(span=span))
+    monkeypatch.setattr(tracing, "_get_client", lambda _tenant_id=None, _span=span: _FakeClient(span=_span))
 
     with tracing.observe_tool(
         tool_name="edit_file",
@@ -151,7 +151,7 @@ def test_observe_tool_records_identity_and_output(monkeypatch: pytest.MonkeyPatc
 
 def test_observe_node_records_node_and_error(monkeypatch: pytest.MonkeyPatch) -> None:
     span = _FakeSpan()
-    monkeypatch.setattr(tracing, "_get_client", lambda: _FakeClient(span=span))
+    monkeypatch.setattr(tracing, "_get_client", lambda _tenant_id=None, _span=span: _FakeClient(span=_span))
 
     class Boom(Exception):
         pass
@@ -168,7 +168,7 @@ def test_observe_node_records_node_and_error(monkeypatch: pytest.MonkeyPatch) ->
 
 
 def test_observe_tool_swallows_start_failure(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(tracing, "_get_client", lambda: _FakeClient(raise_on_start=True))
+    monkeypatch.setattr(tracing, "_get_client", lambda _tenant_id=None: _FakeClient(raise_on_start=True))
     captured: list[str] = []
 
     with tracing.observe_tool(tool_name="write_file") as tool_handle:
@@ -178,8 +178,105 @@ def test_observe_tool_swallows_start_failure(monkeypatch: pytest.MonkeyPatch) ->
     assert captured == ["ran"]
 
 
+def test_tenant_key_map_parses_valid_json(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(tracing, "_tenant_keys", None)
+    settings = tracing.get_settings()
+    monkeypatch.setattr(
+        settings,
+        "LANGFUSE_TENANT_KEYS",
+        '{"t-1": {"public_key": "pk-1", "secret_key": "sk-1"}, "t-2": {"public_key": "pk-2", "secret_key": "sk-2"}}',
+    )
+    assert tracing._tenant_key_map() == {
+        "t-1": {"public_key": "pk-1", "secret_key": "sk-1"},
+        "t-2": {"public_key": "pk-2", "secret_key": "sk-2"},
+    }
+    # cached on second call
+    assert tracing._tenant_key_map() == tracing._tenant_key_map()
+
+
+def test_tenant_key_map_rejects_bad_json(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(tracing, "_tenant_keys", None)
+    settings = tracing.get_settings()
+    monkeypatch.setattr(settings, "LANGFUSE_TENANT_KEYS", "{not-json")
+    assert tracing._tenant_key_map() == {}
+
+
+def test_tenant_key_map_skips_incomplete_entries(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(tracing, "_tenant_keys", None)
+    settings = tracing.get_settings()
+    monkeypatch.setattr(
+        settings,
+        "LANGFUSE_TENANT_KEYS",
+        '{"t-ok": {"public_key": "pk", "secret_key": "sk"}, "t-bad": {"public_key": "pk-only"}}',
+    )
+    assert tracing._tenant_key_map() == {"t-ok": {"public_key": "pk", "secret_key": "sk"}}
+
+
+def test_get_client_uses_tenant_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
+    built: list[tuple[str, str]] = []
+
+    def _fake_build(*, public_key: str, secret_key: str) -> object:
+        built.append((public_key, secret_key))
+        return object()
+
+    monkeypatch.setattr(tracing, "_build_client", _fake_build)
+    monkeypatch.setattr(tracing, "_tenant_keys", {"t-1": {"public_key": "pk-t1", "secret_key": "sk-t1"}})
+    monkeypatch.setattr(tracing, "_tenant_clients", {})
+    monkeypatch.setattr(tracing, "_tenant_errors", {})
+    monkeypatch.setattr(tracing, "_client", None)
+    monkeypatch.setattr(tracing, "_client_error", None)
+
+    c1 = tracing._get_client("t-1")
+    c2 = tracing._get_client("t-1")
+    assert built == [("pk-t1", "sk-t1")]  # cached, built once
+    assert c1 is c2
+
+
+def test_get_client_falls_back_to_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    default = object()
+    monkeypatch.setattr(tracing, "_client", default)
+    monkeypatch.setattr(tracing, "_tenant_keys", {"t-1": {"public_key": "pk", "secret_key": "sk"}})
+    # unknown tenant -> default client
+    assert tracing._get_client("t-unknown") is default
+    # no tenant -> default client
+    assert tracing._get_client(None) is default
+
+
+def test_get_client_tenant_init_failure_swallowed(monkeypatch: pytest.MonkeyPatch) -> None:
+    def _boom(*, public_key: str, secret_key: str) -> object:
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(tracing, "_build_client", _boom)
+    monkeypatch.setattr(tracing, "_tenant_keys", {"t-1": {"public_key": "pk", "secret_key": "sk"}})
+    monkeypatch.setattr(tracing, "_tenant_clients", {})
+    monkeypatch.setattr(tracing, "_tenant_errors", {})
+
+    assert tracing._get_client("t-1") is None
+    assert "t-1" in tracing._tenant_errors
+    # error cached — second call also None without rebuilding
+    assert tracing._get_client("t-1") is None
+
+
+def test_flush_covers_tenant_clients(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _FakeFlushClient:
+        def __init__(self, name: str) -> None:
+            self.name = name
+            self.flushed = False
+
+        def flush(self) -> None:
+            self.flushed = True
+
+    default = _FakeFlushClient("default")
+    tenant = _FakeFlushClient("tenant")
+    monkeypatch.setattr(tracing, "_client", default)
+    monkeypatch.setattr(tracing, "_tenant_clients", {"t-1": tenant})
+
+    tracing.flush()
+    assert default.flushed and tenant.flushed
+
+
 def test_observe_generation_swallows_span_start_failure(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(tracing, "_get_client", lambda: _FakeClient(raise_on_start=True))
+    monkeypatch.setattr(tracing, "_get_client", lambda _tenant_id=None: _FakeClient(raise_on_start=True))
     captured: list[str] = []
 
     with tracing.observe_generation(name="llm") as gen:
@@ -193,7 +290,7 @@ def test_observe_generation_records_output_usage_and_identity(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     span = _FakeSpan()
-    monkeypatch.setattr(tracing, "_get_client", lambda: _FakeClient(span=span))
+    monkeypatch.setattr(tracing, "_get_client", lambda _tenant_id=None, _span=span: _FakeClient(span=_span))
 
     with tracing.observe_generation(
         name="llm",
@@ -215,7 +312,7 @@ def test_observe_generation_records_output_usage_and_identity(
 
 def test_observe_generation_records_error_and_reraises(monkeypatch: pytest.MonkeyPatch) -> None:
     span = _FakeSpan()
-    monkeypatch.setattr(tracing, "_get_client", lambda: _FakeClient(span=span))
+    monkeypatch.setattr(tracing, "_get_client", lambda _tenant_id=None, _span=span: _FakeClient(span=_span))
 
     class Boom(Exception):
         pass
@@ -234,7 +331,7 @@ def test_set_run_identity_propagates_and_direct_arg_wins(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     span = _FakeSpan()
-    monkeypatch.setattr(tracing, "_get_client", lambda: _FakeClient(span=span))
+    monkeypatch.setattr(tracing, "_get_client", lambda _tenant_id=None, _span=span: _FakeClient(span=_span))
 
     token = tracing._run_identity.set({})
     try:

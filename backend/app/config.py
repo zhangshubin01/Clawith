@@ -77,9 +77,12 @@ def _default_allow_unsafe_bwrap_fallback() -> bool:
 
 def _read_version() -> str:
     """Read version from local VERSION file, fallback to root."""
-    for candidate in [Path(__file__).resolve().parent.parent / "VERSION",
-                      Path(__file__).resolve().parent.parent.parent / "VERSION",
-                      Path("/app/VERSION"), Path("/VERSION")]:
+    for candidate in [
+        Path(__file__).resolve().parent.parent / "VERSION",
+        Path(__file__).resolve().parent.parent.parent / "VERSION",
+        Path("/app/VERSION"),
+        Path("/VERSION"),
+    ]:
         try:
             return candidate.read_text(encoding="utf-8").strip()
         except OSError:
@@ -217,6 +220,10 @@ class Settings(BaseSettings):
     LANGFUSE_PUBLIC_KEY: str = ""
     LANGFUSE_SECRET_KEY: str = ""
     LANGFUSE_HOST: str = ""  # self-hosted base URL; empty = Langfuse Cloud
+    # Multi-tenant isolation: JSON map of tenant_id -> {public_key, secret_key}.
+    # When set, traces for a tenant with a configured key go to that tenant's
+    # Langfuse project; unmatched tenants fall back to LANGFUSE_PUBLIC_KEY.
+    LANGFUSE_TENANT_KEYS: str = ""
     # Hard cap for file-upload endpoints (all of them buffer the whole body
     # into memory before writing). Without it a single authenticated request
     # can exhaust the process (see P0 fix plan D3). Override via env if a
@@ -250,7 +257,6 @@ class Settings(BaseSettings):
 
     # Exa AI (Search API)
     EXA_API_KEY: str = ""
-
 
     # Sandbox configuration
     SANDBOX_TYPE: SandboxType = SandboxType.SUBPROCESS
@@ -296,8 +302,7 @@ class Settings(BaseSettings):
     def _claim_renewal_precedes_expiry(self) -> Self:
         if self.AGENT_RUNTIME_COMMAND_CLAIM_RENEW_SECONDS >= self.AGENT_RUNTIME_COMMAND_CLAIM_TTL_SECONDS:
             raise ValueError(
-                "AGENT_RUNTIME_COMMAND_CLAIM_RENEW_SECONDS must be less than "
-                "AGENT_RUNTIME_COMMAND_CLAIM_TTL_SECONDS"
+                "AGENT_RUNTIME_COMMAND_CLAIM_RENEW_SECONDS must be less than AGENT_RUNTIME_COMMAND_CLAIM_TTL_SECONDS"
             )
         return self
 
