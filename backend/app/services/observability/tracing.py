@@ -64,6 +64,18 @@ _SECRET_PATTERNS: tuple[re.Pattern[str], ...] = (
 _MAX_STRING_CHARS = 4000
 _UNSET = object()
 
+# Business control-flow exceptions that schedule a command retry rather than
+# failing the run (e.g. ToolExecutionReconciliationPending for safe-read lease
+# conflicts, RetryableCommandError). They are expected noise in traces, not
+# failures. Matched by class name to keep this facade framework-agnostic.
+_RETRY_CONTROL_FLOW_NAMES = frozenset(
+    {
+        "ToolExecutionReconciliationPending",
+        "GroupWorkspaceReconciliationPending",
+        "RetryableCommandError",
+    }
+)
+
 _client: Any = None
 _client_error: Exception | None = None
 _tenant_clients: dict[str, Any] = {}
@@ -177,6 +189,11 @@ def _get_client(tenant_id: str | None = None) -> Any:
     return _client
 
 
+def _is_retry_control_flow(exc: BaseException) -> bool:
+    """True when the exception schedules a command retry (not a run failure)."""
+    return type(exc).__name__ in _RETRY_CONTROL_FLOW_NAMES
+
+
 def _mask_string(value: str) -> str:
     result = value
     for pattern in _SECRET_PATTERNS:
@@ -253,6 +270,12 @@ class GenerationHandle:
         self._level = "ERROR"
         self._status = f"{type(exc).__name__}: {str(exc)[:400]}"
 
+    def mark_retry(self, exc: BaseException) -> None:
+        """Record a business retry-control-flow exit (not an error)."""
+        self._metadata["retry_pending"] = True
+        self._metadata["retry_type"] = type(exc).__name__
+        self._status = f"{type(exc).__name__}: {str(exc)[:400]}"
+
     def finalize(self, started: float) -> None:
         """Apply accumulated output/usage/error/latency in one span update."""
         self._metadata.setdefault("latency_ms", round((time.perf_counter() - started) * 1000, 2))
@@ -263,6 +286,9 @@ class GenerationHandle:
             update["usage_details"] = self._usage
         if self._level is not None:
             update["level"] = self._level
+            update["status_message"] = self._status
+        elif self._status is not None:
+            # retry control flow: keep DEFAULT level, surface the reason
             update["status_message"] = self._status
         try:
             self._span.update(**update)
@@ -315,6 +341,7 @@ def observe_generation(
 
     started = time.perf_counter()
     handle: GenerationHandle | None = None
+    _deferred_retry: BaseException | None = None
     with ExitStack() as stack:
         if prop_cm is not None:
             stack.enter_context(prop_cm)
@@ -324,10 +351,20 @@ def observe_generation(
             try:
                 yield handle
             except BaseException as exc:
-                handle.mark_error(exc)
-                raise
+                if _is_retry_control_flow(exc):
+                    # Re-raise AFTER the OTel span context exits: OTel's
+                    # start_as_current_span marks the span ERROR on any
+                    # exception inside the block, which would turn business
+                    # retry control flow into a false failure.
+                    handle.mark_retry(exc)
+                    _deferred_retry = exc
+                else:
+                    handle.mark_error(exc)
+                    raise
             finally:
                 handle.finalize(started)
+    if _deferred_retry is not None:
+        raise _deferred_retry
 
 
 @contextmanager
@@ -366,6 +403,7 @@ def _observe_span(
 
     started = time.perf_counter()
     handle: GenerationHandle | None = None
+    _deferred_retry: BaseException | None = None
     with ExitStack() as stack:
         if prop_cm is not None:
             stack.enter_context(prop_cm)
@@ -375,10 +413,16 @@ def _observe_span(
             try:
                 yield handle
             except BaseException as exc:
-                handle.mark_error(exc)
-                raise
+                if _is_retry_control_flow(exc):
+                    handle.mark_retry(exc)
+                    _deferred_retry = exc
+                else:
+                    handle.mark_error(exc)
+                    raise
             finally:
                 handle.finalize(started)
+    if _deferred_retry is not None:
+        raise _deferred_retry
 
 
 @contextmanager
@@ -454,12 +498,21 @@ class RunHandle:
         self._level = "ERROR"
         self._status = f"{type(exc).__name__}: {str(exc)[:400]}"
 
+    def mark_retry(self, exc: BaseException) -> None:
+        """Record a business retry-control-flow exit (not an error)."""
+        self._metadata["retry_pending"] = True
+        self._metadata["retry_type"] = type(exc).__name__
+        self._status = f"{type(exc).__name__}: {str(exc)[:400]}"
+
     def finalize(self, started: float) -> None:
         """Apply accumulated metadata/error/latency in one span update."""
         self._metadata.setdefault("latency_ms", round((time.perf_counter() - started) * 1000, 2))
         update: dict[str, Any] = {"metadata": self._metadata}
         if self._level is not None:
             update["level"] = self._level
+            update["status_message"] = self._status
+        elif self._status is not None:
+            # retry control flow: keep DEFAULT level, surface the reason
             update["status_message"] = self._status
         try:
             self._span.update(**update)
@@ -536,13 +589,20 @@ def observe_run(
             handle = RunHandle(span)
             handle.add_metadata(**meta)
             started = time.perf_counter()
+            _deferred_retry: BaseException | None = None
             try:
                 yield handle
             except BaseException as exc:
-                handle.mark_error(exc)
-                raise
+                if _is_retry_control_flow(exc):
+                    handle.mark_retry(exc)
+                    _deferred_retry = exc
+                else:
+                    handle.mark_error(exc)
+                    raise
             finally:
                 handle.finalize(started)
+        if _deferred_retry is not None:
+            raise _deferred_retry
 
 
 def flush() -> None:

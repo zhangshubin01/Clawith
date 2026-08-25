@@ -102,6 +102,43 @@ def test_observe_run_records_error_and_reraises(monkeypatch: pytest.MonkeyPatch)
     assert "Boom" in update["status_message"]
 
 
+def test_observe_run_retry_control_flow_not_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    span = _FakeSpan()
+    monkeypatch.setattr(tracing, "_get_client", lambda _tenant_id=None, _span=span: _FakeClient(span=_span))
+
+    # Business retry-control-flow exception (matched by class name, no import)
+    class ToolExecutionReconciliationPending(RuntimeError):
+        defer_without_attempt = True
+
+    with pytest.raises(ToolExecutionReconciliationPending):
+        with tracing.observe_run(run_id="r-1", command_id="c-1", tenant_id="t-1") as run_handle:
+            assert run_handle is not None
+            raise ToolExecutionReconciliationPending("A safe read attempt still owns the active receipt")
+
+    update = span.updates[-1]
+    assert "level" not in update  # stays DEFAULT, not ERROR
+    assert update["status_message"].startswith("ToolExecutionReconciliationPending")
+    assert update["metadata"]["retry_pending"] is True
+    assert update["metadata"]["retry_type"] == "ToolExecutionReconciliationPending"
+
+
+def test_observe_node_retry_control_flow_not_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    span = _FakeSpan()
+    monkeypatch.setattr(tracing, "_get_client", lambda _tenant_id=None, _span=span: _FakeClient(span=_span))
+
+    class RetryableCommandError(RuntimeError):
+        pass
+
+    with pytest.raises(RetryableCommandError):
+        with tracing.observe_node(node="tool") as node_handle:
+            assert node_handle is not None
+            raise RetryableCommandError("retry me")
+
+    update = span.updates[-1]
+    assert "level" not in update
+    assert update["metadata"]["retry_pending"] is True
+
+
 def test_observe_run_sets_identity_for_nested_generation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
