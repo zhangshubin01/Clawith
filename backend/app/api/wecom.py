@@ -1,4 +1,3 @@
-from typing import Any
 """WeCom (企业微信) Channel API routes.
 
 Provides Config CRUD and webhook-based message handling with AES encryption.

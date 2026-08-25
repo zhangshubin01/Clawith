@@ -1,7 +1,7 @@
 """Notification API — list, count, mark-read, and broadcast."""
 
 import uuid
-from typing import Any, Optional
+from typing import Optional
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from pydantic import BaseModel, Field

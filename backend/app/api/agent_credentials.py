@@ -1,4 +1,3 @@
-from typing import Any
 """Agent Credentials CRUD API routes.
 
 Provides endpoints for managing encrypted session cookies

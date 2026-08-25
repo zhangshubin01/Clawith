@@ -1,4 +1,3 @@
-from typing import Any
 """Public pages API — serves published HTML without authentication."""
 
 import uuid

@@ -1,4 +1,3 @@
-from typing import Any
 """Read-only agent directory API."""
 
 import uuid

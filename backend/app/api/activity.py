@@ -1,4 +1,3 @@
-from typing import Any
 """Activity log API — view agent work history."""
 
 import uuid

@@ -1,4 +1,3 @@
-from typing import Any
 """Messages API — inbox, unread count, mark as read.
 
 After the Participant abstraction migration, agent-to-agent messages are stored

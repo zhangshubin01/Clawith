@@ -1,4 +1,3 @@
-from typing import Any
 """Atlassian Rovo MCP Channel API routes.
 
 Provides per-agent Atlassian integration configuration.

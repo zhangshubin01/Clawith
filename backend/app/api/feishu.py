@@ -1,4 +1,3 @@
-from typing import Any
 """Feishu OAuth and Channel API routes."""
 
 import asyncio
@@ -7,6 +6,7 @@ import hmac
 import json
 import re
 import uuid
+from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import HTMLResponse, Response
@@ -35,6 +35,19 @@ _settings = get_settings()
 _FEISHU_BASE = _settings.FEISHU_DOMAIN
 
 router = APIRouter(tags=["feishu"])
+
+_FEISHU_GROUP_PASSIVE_INSTRUCTION = (
+    "You are passively listening in a Feishu group. A message directly addresses you if it "
+    "@mentions you, names you or your Agent name, asks you a question or gives you an "
+    "instruction, or explicitly asks you to reply. You must visibly answer every directly "
+    "addressed message even when it is outside your usual responsibilities. For messages "
+    "that do not directly address you, reply normally only when your responsibilities require "
+    "a visible response; otherwise your entire final response must be exactly NO_REPLY, with "
+    "no other text. Your final response is automatically delivered to the input Feishu group. "
+    "Never call send_channel_message to reply to the current conversation. Use that Tool only "
+    "when the user explicitly asks you to send a separate message to another person or group, "
+    "and then set cross_session_confirmed=true."
+)
 
 _USER_RESOLUTION_ERROR_TIP = (
     "抱歉，我暂时无法稳定识别你的飞书账号，已停止本次处理以避免重复创建账号。"
@@ -120,6 +133,27 @@ async def _cancel_active_feishu_run(
     )
     logger.info("[Feishu] interrupt_cancelled run_id={}", run.id)
     return "interrupted"
+_FEISHU_MENTION_PLACEHOLDER_RE = re.compile(r"@_user_\d+")
+
+
+def _feishu_mention_label(value: object) -> str:
+    if not isinstance(value, str):
+        return ""
+    return " ".join(value.split())[:100]
+
+
+def _restore_feishu_text_mentions(text: object, mentions: object) -> str:
+    """Restore provider placeholders to visible names before model intake."""
+    normalized = text if isinstance(text, str) else ""
+    if isinstance(mentions, list):
+        for mention in mentions:
+            if not isinstance(mention, dict):
+                continue
+            key = mention.get("key")
+            name = _feishu_mention_label(mention.get("name"))
+            if isinstance(key, str) and key and name:
+                normalized = normalized.replace(key, f"@{name}")
+    return _FEISHU_MENTION_PLACEHOLDER_RE.sub("", normalized).strip()
 
 
 def _verify_and_decode_feishu_callback(
@@ -592,10 +626,17 @@ async def _accept_feishu_runtime_message(
                     "[FEISHU-CARD] bridge_created run_id={}", pregenerated_run_id,
                 )
         _, model, _ = await _load_agent_and_model(db, agent_id)
-        sender_name = (user.display_name or "").strip()
-        executable_content = (
-            f"[发送者: {sender_name}] {content}" if sender_name else content
+        sender_name = (user.display_name or "").strip() or "未知用户"
+        sender_identity = " | ".join(
+            part
+            for part in (
+                f"飞书发送者: {sender_name}",
+                f"user_id: {sender_user_id.strip()}" if sender_user_id.strip() else "",
+                f"open_id: {sender_open_id.strip()}" if sender_open_id.strip() else "",
+            )
+            if part
         )
+        executable_content = f"[{sender_identity}] {content}"
         try:
             intake = await enqueue_channel_chat_runtime(
                 db,
@@ -605,6 +646,9 @@ async def _accept_feishu_runtime_message(
                 model=model,
                 content=executable_content,
                 display_content=display_content,
+                runtime_instruction=(
+                    _FEISHU_GROUP_PASSIVE_INSTRUCTION if is_group else ""
+                ),
                 source_channel="feishu",
                 run_id=pregenerated_run_id,
                 channel_delivery_target={
@@ -616,6 +660,11 @@ async def _accept_feishu_runtime_message(
                             "app_secret": config.app_secret or "",
                         }
                     } if card_mode else {}),
+                    **(
+                        {"source_message_id": external_event_id.strip()}
+                        if is_group and external_event_id and external_event_id.strip()
+                        else {}
+                    ),
                 },
                 message_id=channel_message_id(
                     agent_id,
@@ -707,11 +756,19 @@ async def process_feishu_event(agent_id: uuid.UUID, body: dict):
     if event_type == "im.message.receive_v1":
         message = event.get("message", {})
         sender = event.get("sender", {}).get("sender_id", {})
+        sender_type = event.get("sender", {}).get("sender_type", "")
         sender_open_id = sender.get("open_id", "")
         sender_user_id_from_event = sender.get("user_id", "")  # tenant-stable ID, available directly in event body
         msg_type = message.get("message_type", "text")
         chat_type = message.get("chat_type", "p2p")  # p2p or group
         chat_id = message.get("chat_id", "")
+
+        if chat_type == "group" and sender_type and sender_type != "user":
+            logger.info(
+                "[Feishu] Ignoring non-user group message sender_type={}",
+                sender_type,
+            )
+            return {"code": 0, "msg": "non-user group message ignored"}
 
         logger.info(f"[Feishu] Received {msg_type} message, chat_type={chat_type}, open_id={sender_open_id!r}, user_id_from_event={sender_user_id_from_event!r}")
 
@@ -740,6 +797,12 @@ async def process_feishu_event(agent_id: uuid.UUID, body: dict):
                         _href = _elem.get("href", "")
                         _link_text = _elem.get("text", "")
                         _line_parts.append(f"{_link_text} ({_href})" if _href else _link_text)
+                    elif _tag == "at":
+                        _mention_name = _feishu_mention_label(
+                            _elem.get("user_name") or _elem.get("name")
+                        )
+                        if _mention_name:
+                            _line_parts.append(f"@{_mention_name}")
                     elif _tag == "img":
                         _ik = _elem.get("image_key", "")
                         if _ik:
@@ -789,7 +852,7 @@ async def process_feishu_event(agent_id: uuid.UUID, body: dict):
                 sender_user_id=sender_user_id_from_event,
                 chat_type=chat_type,
                 chat_id=chat_id,
-                external_event_id=event_id or message.get("message_id"),
+                external_event_id=message.get("message_id") or event_id,
             )
             if attachment is not None:
                 if event_id:
@@ -801,11 +864,11 @@ async def process_feishu_event(agent_id: uuid.UUID, body: dict):
         if msg_type != "text":
             return {"code": 0, "msg": "unsupported message type"}
 
-        import json
-        import re
-
         content = json.loads(message.get("content", "{}"))
-        user_text = re.sub(r"@_user_\d+", "", content.get("text", "")).strip()
+        user_text = _restore_feishu_text_mentions(
+            content.get("text", ""),
+            message.get("mentions"),
+        )
         if not user_text:
             return {"code": 0, "msg": "empty message after stripping mentions"}
 
@@ -827,7 +890,7 @@ async def process_feishu_event(agent_id: uuid.UUID, body: dict):
                 chat_id=chat_id,
                 content=user_text,
                 display_content=display_content,
-                external_event_id=event_id or message.get("message_id"),
+                external_event_id=message.get("message_id") or event_id,
             )
         except Exception as exc:
             from app.services.channel_user_service import ChannelUserResolutionError

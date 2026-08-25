@@ -1,5 +1,6 @@
 """One-call LLM provider boundary tests for the durable Runtime."""
 
+import asyncio
 from types import SimpleNamespace
 import uuid
 
@@ -15,6 +16,7 @@ from app.services.llm.client import (
     extract_embedded_reasoning,
 )
 from app.services.llm import single_step
+from app.services.llm.utils import get_tool_params
 
 
 _TINY_PNG_DATA_URL = (
@@ -36,8 +38,54 @@ class _Client:
             raise self.response
         return self.response
 
+    async def stream(self, **kwargs):
+        self.calls.append(kwargs)
+        if isinstance(self.response, Exception):
+            raise self.response
+        on_chunk = kwargs.get("on_chunk")
+        if on_chunk is not None:
+            await on_chunk("Hello")
+            await on_chunk(" world")
+        return self.response
+
     async def close(self) -> None:
         self.closed = True
+
+
+def test_provider_parallel_capability_is_independent_from_tool_choice() -> None:
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "read_file",
+                "description": "Read a file.",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        }
+    ]
+    messages = [LLMMessage(role="user", content="Read it")]
+
+    serial_payload = OpenAICompatibleClient(
+        api_key="test",
+        model="serial-provider",
+        supports_tool_choice=True,
+        supports_parallel_tool_calls=False,
+    )._build_payload(messages, tools, 0.2, 256)
+    parallel_payload = OpenAICompatibleClient(
+        api_key="test",
+        model="parallel-provider",
+        supports_tool_choice=True,
+        supports_parallel_tool_calls=True,
+    )._build_payload(messages, tools, 0.2, 256)
+
+    assert serial_payload["tool_choice"] == "auto"
+    assert "parallel_tool_calls" not in serial_payload
+    assert parallel_payload["parallel_tool_calls"] is True
+    assert get_tool_params("deepseek") == {"tool_choice": "auto"}
+    assert get_tool_params("openai") == {
+        "tool_choice": "auto",
+        "parallel_tool_calls": True,
+    }
 
 
 def _model():
@@ -55,6 +103,141 @@ def _patch_client(monkeypatch, client: _Client) -> None:
     monkeypatch.setattr(single_step, "create_llm_client", lambda **kwargs: client)
     monkeypatch.setattr(single_step, "get_model_api_key", lambda model: "secret")
     monkeypatch.setattr(single_step, "get_max_tokens", lambda *args: 1024)
+
+
+@pytest.mark.asyncio
+async def test_visible_delta_callback_uses_provider_stream_and_keeps_final_authority(
+    monkeypatch,
+) -> None:
+    client = _Client(LLMResponse(content="Hello world", finish_reason="stop"))
+    _patch_client(monkeypatch, client)
+    deltas: list[str] = []
+
+    async def collect(delta: str) -> None:
+        deltas.append(delta)
+
+    result = await single_step.complete_llm_once(
+        _model(),
+        [LLMMessage(role="user", content="Say hello")],
+        on_visible_delta=collect,
+    )
+
+    assert "".join(deltas) == "Hello world"
+    assert result.content == "Hello world"
+    assert "on_chunk" in client.calls[0]
+    assert client.closed is True
+
+
+@pytest.mark.asyncio
+async def test_visible_delta_arrives_before_provider_completion(monkeypatch) -> None:
+    response = LLMResponse(content="A sufficiently long streamed answer", finish_reason="stop")
+    client = _Client(response)
+    delta_seen = asyncio.Event()
+    release_provider = asyncio.Event()
+
+    async def blocked_stream(**kwargs):
+        await kwargs["on_chunk"]("A sufficiently long streamed answer")
+        await release_provider.wait()
+        return response
+
+    client.stream = blocked_stream
+    _patch_client(monkeypatch, client)
+
+    async def collect(_delta: str) -> None:
+        delta_seen.set()
+
+    completion = asyncio.create_task(
+        single_step.complete_llm_once(
+            _model(),
+            [LLMMessage(role="user", content="Stream")],
+            on_visible_delta=collect,
+        )
+    )
+    await asyncio.wait_for(delta_seen.wait(), timeout=1)
+
+    assert completion.done() is False
+    release_provider.set()
+    result = await completion
+    assert result.content == response.content
+
+
+@pytest.mark.asyncio
+async def test_protocol_looking_stream_is_held_until_final_normalization(monkeypatch) -> None:
+    response = LLMResponse(
+        content='<tool_call>{"name":"read_file","arguments":{"path":"README.md"}}</tool_call>',
+        finish_reason="stop",
+    )
+    client = _Client(response)
+    published: list[bool | None] = []
+
+    async def protocol_stream(**kwargs):
+        client.calls.append(kwargs)
+        published.append(await kwargs["on_chunk"]("<tool_call>"))
+        published.append(
+            await kwargs["on_chunk"](
+                '{"name":"read_file","arguments":{"path":"README.md"}}'
+            )
+        )
+        published.append(await kwargs["on_chunk"]("</tool_call>"))
+        return response
+
+    client.stream = protocol_stream
+    _patch_client(monkeypatch, client)
+    deltas: list[str] = []
+
+    async def collect(delta: str) -> None:
+        deltas.append(delta)
+
+    result = await single_step.complete_llm_once(
+        _model(),
+        [LLMMessage(role="user", content="Read it")],
+        tools=[{"type": "function", "function": {"name": "read_file", "parameters": {"type": "object"}}}],
+        on_visible_delta=collect,
+    )
+
+    assert deltas == []
+    assert published == [False, False, False]
+    assert result.content == ""
+    assert result.tool_calls[0]["function"]["name"] == "read_file"
+
+
+@pytest.mark.asyncio
+async def test_mixed_textual_tool_protocol_never_streams_marker_or_arguments(monkeypatch) -> None:
+    response = LLMResponse(
+        content=(
+            'Let me check.\n<tool_call>{"name":"read_file",'
+            '"arguments":{"path":"private.md"}}</tool_call>'
+        ),
+        finish_reason="stop",
+    )
+    client = _Client(response)
+
+    async def mixed_stream(**kwargs):
+        await kwargs["on_chunk"]("Let me check.\n<tool_")
+        await kwargs["on_chunk"](
+            'call>{"name":"read_file","arguments":{"path":"private.md"}}</tool_call>'
+        )
+        return response
+
+    client.stream = mixed_stream
+    _patch_client(monkeypatch, client)
+    deltas: list[str] = []
+
+    async def collect(delta: str) -> None:
+        deltas.append(delta)
+
+    result = await single_step.complete_llm_once(
+        _model(),
+        [LLMMessage(role="user", content="Read it")],
+        tools=[{"type": "function", "function": {"name": "read_file", "parameters": {"type": "object"}}}],
+        on_visible_delta=collect,
+    )
+
+    streamed = "".join(deltas)
+    assert streamed == "Let me check.\n"
+    assert "tool_call" not in streamed
+    assert "private.md" not in streamed
+    assert result.retry_instruction is not None
 
 
 def test_native_gemini_preserves_dynamic_system_context_once() -> None:
@@ -80,6 +263,135 @@ def test_native_gemini_preserves_dynamic_system_context_once() -> None:
     assert payload["contents"] == [
         {"role": "user", "parts": [{"text": "Do the task"}]}
     ]
+
+
+def test_native_gemini_pairs_reused_tool_call_ids_with_their_assistant_turn() -> None:
+    client = GeminiClient(api_key="test", model="gemini-test")
+
+    payload = client._build_payload(
+        [
+            LLMMessage(role="user", content="Inspect and then update the record"),
+            LLMMessage(
+                role="assistant",
+                tool_calls=[
+                    {
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "lookup_record", "arguments": "{}"},
+                        "_gemini_extra": {"id": "provider-call-1"},
+                    },
+                    {
+                        "id": "call_2",
+                        "type": "function",
+                        "function": {"name": "read_policy", "arguments": "{}"},
+                        "_gemini_extra": {"id": "provider-call-2"},
+                    },
+                ],
+            ),
+            LLMMessage(role="tool", tool_call_id="call_1", content='{"record_id":"r1"}'),
+            LLMMessage(role="tool", tool_call_id="call_2", content='{"allowed":true}'),
+            LLMMessage(
+                role="assistant",
+                tool_calls=[
+                    {
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "update_record", "arguments": '{"id":"r1"}'},
+                        "_gemini_extra": {"id": "provider-call-1"},
+                    }
+                ],
+            ),
+            LLMMessage(role="tool", tool_call_id="call_1", content='{"updated":true}'),
+        ],
+        tools=None,
+        temperature=0.2,
+        max_tokens=1024,
+    )
+
+    function_response_names = [
+        content["parts"][0]["functionResponse"]["name"]
+        for content in payload["contents"]
+        if "functionResponse" in content["parts"][0]
+    ]
+    assert function_response_names == ["lookup_record", "read_policy", "update_record"]
+    function_call_ids = [
+        part["functionCall"]["id"]
+        for content in payload["contents"]
+        for part in content["parts"]
+        if "functionCall" in part
+    ]
+    assert function_call_ids == ["provider-call-1", "provider-call-2", "provider-call-1"]
+
+
+def test_tool_failure_uses_provider_native_error_signals() -> None:
+    tool_result = LLMMessage(
+        role="tool",
+        tool_call_id="call_1",
+        content="Tool failed: path is required",
+        is_error=True,
+    )
+
+    anthropic = tool_result.to_anthropic_format()
+    assert anthropic is not None
+    assert anthropic["content"][0]["is_error"] is True
+
+    gemini = GeminiClient(api_key="test", model="gemini-test")._build_payload(
+        [
+            LLMMessage(
+                role="assistant",
+                tool_calls=[
+                    {
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "write_file", "arguments": "{}"},
+                    }
+                ],
+            ),
+            tool_result,
+        ],
+        tools=None,
+        temperature=0.2,
+        max_tokens=1024,
+    )
+    response = gemini["contents"][-1]["parts"][0]["functionResponse"]["response"]
+    assert response == {"error": "Tool failed: path is required"}
+
+    gemini_success = GeminiClient(
+        api_key="test",
+        model="gemini-test",
+    )._build_payload(
+        [
+            LLMMessage(
+                role="assistant",
+                tool_calls=[
+                    {
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "read_file", "arguments": "{}"},
+                    }
+                ],
+            ),
+            LLMMessage(
+                role="tool",
+                tool_call_id="call_1",
+                content='{"path":"README.md"}',
+            ),
+        ],
+        tools=None,
+        temperature=0.2,
+        max_tokens=1024,
+    )
+    success_response = gemini_success["contents"][-1]["parts"][0][
+        "functionResponse"
+    ]["response"]
+    assert success_response == {"output": {"path": "README.md"}}
+
+    openai = tool_result.to_openai_format()
+    assert openai == {
+        "role": "tool",
+        "content": "Tool failed: path is required",
+        "tool_call_id": "call_1",
+    }
 
 
 def test_provider_payloads_preserve_static_and_dynamic_system_context_once() -> None:
@@ -259,6 +571,32 @@ async def test_complete_once_normalizes_tools_and_records_usage_without_executin
     assert client.closed is True
     assert recorded[0][0] == agent_id
     assert recorded[0][1].total_tokens == 25
+
+
+@pytest.mark.asyncio
+async def test_complete_once_uses_explicit_max_output_tokens_override(
+    monkeypatch,
+) -> None:
+    client = _Client(LLMResponse(content="bounded", finish_reason="stop"))
+    monkeypatch.setattr(single_step, "create_llm_client", lambda **kwargs: client)
+    monkeypatch.setattr(single_step, "get_model_api_key", lambda model: "secret")
+    observed_limits: list[int | None] = []
+
+    def resolve_max_tokens(_provider, _model, configured_limit):
+        observed_limits.append(configured_limit)
+        return configured_limit
+
+    monkeypatch.setattr(single_step, "get_max_tokens", resolve_max_tokens)
+
+    result = await single_step.complete_llm_once(
+        _model(),
+        [LLMMessage(role="user", content="Summarize")],
+        max_output_tokens=4096,
+    )
+
+    assert result.content == "bounded"
+    assert observed_limits == [4096]
+    assert client.calls[0]["max_tokens"] == 4096
 
 
 @pytest.mark.asyncio

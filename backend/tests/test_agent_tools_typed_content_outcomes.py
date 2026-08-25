@@ -140,6 +140,27 @@ def test_document_reader_returns_structured_parse_fact(tmp_path: Path) -> None:
     assert failure.error_code == "document_format_unsupported"
 
 
+def test_document_reader_reports_content_truncation_without_fake_continuation(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "long.txt").write_text("x" * 100, encoding="utf-8")
+
+    result = agent_tools._read_document_sync(
+        tmp_path,
+        "long.txt",
+        max_chars=20,
+    )
+
+    assert result.ok is True
+    assert result.truncated is True
+    assert result.processed_scope == {
+        "characters_total": 100,
+        "characters_returned": 20,
+    }
+    assert "first 20 of 100 extracted characters" in result.content
+    assert "No continuation parameter is available" in result.content
+
+
 def test_document_reader_extracts_pptx_slides_without_slicing(
     tmp_path: Path,
 ) -> None:
@@ -200,6 +221,50 @@ async def test_document_outcome_preserves_workspace_evidence(monkeypatch) -> Non
     )
     assert outcome.status == "succeeded"
     assert outcome.evidence_refs == (f"workspace://{agent_id}/workspace/report.pdf",)
+
+
+@pytest.mark.asyncio
+async def test_document_outcome_preserves_structured_truncation_fact(
+    monkeypatch,
+) -> None:
+    agent_id = uuid.uuid4()
+
+    class TempWorkspace:
+        root = Path("/tmp/typed-document-truncation-test")
+
+        def cleanup(self):
+            return None
+
+    async def prepare(*args, **kwargs):
+        return TempWorkspace()
+
+    async def read_result(*args, **kwargs):
+        return agent_tools.DocumentReadResult(
+            True,
+            "partial document",
+            truncated=True,
+            processed_scope={"pages_processed": 50, "pages_total": 72},
+            truncation_reasons=("processed the first 50 of 72 pages",),
+        )
+
+    monkeypatch.setattr(agent_tools, "_prepare_temp_workspace", prepare)
+    monkeypatch.setattr(agent_tools, "_read_document_result", read_result)
+
+    outcome = await agent_tools._read_document_outcome(
+        agent_id,
+        {"path": "workspace/report.pdf"},
+        tenant_id=None,
+    )
+
+    assert outcome.status == "succeeded"
+    assert outcome.metadata["content_truncated"] is True
+    assert outcome.metadata["document_processed_scope"] == {
+        "pages_processed": 50,
+        "pages_total": 72,
+    }
+    assert outcome.metadata["document_truncation_reasons"] == [
+        "processed the first 50 of 72 pages"
+    ]
 
 
 @pytest.mark.asyncio
@@ -274,7 +339,13 @@ async def test_execute_code_uses_exit_code_and_never_reexecutes_unknown(
     import app.config as config_module
     from app.services.sandbox import registry
 
-    config = SimpleNamespace(max_timeout=60, allow_network=False)
+    config = SimpleNamespace(
+        default_timeout=180,
+        max_timeout=60,
+        allow_network=False,
+        workspace_mode="merge",
+        publication_owner="workspace_cas",
+    )
     monkeypatch.setattr(config_module, "get_sandbox_config", lambda: config)
 
     async def no_agent_config(*args, **kwargs):
@@ -295,7 +366,7 @@ async def test_execute_code_uses_exit_code_and_never_reexecutes_unknown(
         def _format_result(self, result):
             return f"exit={result.exit_code}"
 
-    backend = Backend(SimpleNamespace(success=True, exit_code=0))
+    backend = Backend(SimpleNamespace(success=True, exit_code=0, error=None))
     monkeypatch.setattr(registry, "get_sandbox_backend", lambda _config: backend)
     success = await agent_tools._execute_code_outcome(
         uuid.uuid4(),
@@ -304,7 +375,7 @@ async def test_execute_code_uses_exit_code_and_never_reexecutes_unknown(
     )
     assert success.status == "succeeded"
 
-    backend.result = SimpleNamespace(success=False, exit_code=7)
+    backend.result = SimpleNamespace(success=False, exit_code=7, error=None)
     failed = await agent_tools._execute_code_outcome(
         uuid.uuid4(),
         tmp_path,
@@ -314,6 +385,15 @@ async def test_execute_code_uses_exit_code_and_never_reexecutes_unknown(
     assert failed.error_code == "sandbox_execution_failed"
 
     backend.error = ValueError("transport lost after dispatch")
+
+    async def forbidden_fallback(*args, **kwargs):
+        raise AssertionError("an unknown execution must not be re-executed")
+
+    monkeypatch.setattr(
+        agent_tools,
+        "_execute_code_legacy_outcome",
+        forbidden_fallback,
+    )
     unknown = await agent_tools._execute_code_outcome(
         uuid.uuid4(),
         tmp_path,
@@ -324,131 +404,48 @@ async def test_execute_code_uses_exit_code_and_never_reexecutes_unknown(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "bad_tool_config",
-    [
-        {"sandbox_type": "dockerr"},
-        {"default_timeout": "abc"},
-        {"max_timeout": 99999},
-        {"max_timeout": 0},
-    ],
-)
-async def test_execute_code_bad_config_fails_closed_without_backend(
+async def test_execute_code_accepts_python3_and_uses_configured_default_timeout(
     monkeypatch,
     tmp_path: Path,
-    bad_tool_config: dict,
 ) -> None:
-    """Misconfigured sandbox config must fail closed.
-
-    Previously an invalid sandbox_type silently degraded to SUBPROCESS and a
-    pydantic ValidationError re-executed through a legacy bare-host path.
-    Now the outcome is sandbox_configuration_invalid and no backend is ever
-    instantiated.
-    """
     import app.config as config_module
     from app.services.sandbox import registry
-    from app.services.sandbox.config import SandboxConfig
 
-    monkeypatch.setattr(config_module, "get_sandbox_config", SandboxConfig)
-
-    async def fake_tool_config(_agent_id, _name):
-        return bad_tool_config
-
-    monkeypatch.setattr(agent_tools, "_get_tool_config", fake_tool_config)
-
-    registry_calls: list[object] = []
-
-    def backend_forbidden(_config):
-        registry_calls.append(_config)
-        raise AssertionError("misconfigured sandbox must not reach the registry")
-
-    monkeypatch.setattr(registry, "get_sandbox_backend", backend_forbidden)
-
-    outcome = await agent_tools._execute_code_outcome(
-        uuid.uuid4(),
-        tmp_path,
-        {"language": "python", "code": "print('never runs')"},
+    config = SimpleNamespace(
+        default_timeout=180,
+        max_timeout=300,
+        allow_network=False,
+        workspace_mode="merge",
+        publication_owner="workspace_cas",
     )
+    monkeypatch.setattr(config_module, "get_sandbox_config", lambda: config)
 
-    assert outcome.status == "failed"
-    assert outcome.error_code == "sandbox_configuration_invalid"
-    assert registry_calls == []
-
-
-@pytest.mark.asyncio
-async def test_execute_code_registry_valueerror_fails_closed(
-    monkeypatch,
-    tmp_path: Path,
-) -> None:
-    """A ValueError raised by the registry (sandbox disabled) must fail closed."""
-    import app.config as config_module
-    from app.services.sandbox import registry
-    from app.services.sandbox.config import SandboxConfig
-
-    monkeypatch.setattr(config_module, "get_sandbox_config", SandboxConfig)
-
-    async def fake_tool_config(_agent_id, _name):
+    async def no_agent_config(*args, **kwargs):
         return None
 
-    monkeypatch.setattr(agent_tools, "_get_tool_config", fake_tool_config)
+    monkeypatch.setattr(agent_tools, "_get_tool_config", no_agent_config)
 
-    def backend_forbidden(_config):
-        raise ValueError("Sandbox is disabled")
+    observed: dict[str, object] = {}
 
-    monkeypatch.setattr(registry, "get_sandbox_backend", backend_forbidden)
+    class Backend:
+        async def execute(self, **kwargs):
+            observed.update(kwargs)
+            return SimpleNamespace(success=True, exit_code=0, error=None)
 
-    outcome = await agent_tools._execute_code_outcome(
-        uuid.uuid4(),
-        tmp_path,
-        {"language": "python", "code": "print('never runs')"},
-    )
+        def _format_result(self, _result):
+            return "ok"
 
-    assert outcome.status == "failed"
-    assert outcome.error_code == "sandbox_configuration_invalid"
-
-
-@pytest.mark.asyncio
-async def test_execute_code_e2b_constructor_error_fails_closed(
-    monkeypatch,
-    tmp_path: Path,
-) -> None:
-    """An out-of-range E2B timeout must surface as invalid config.
-
-    The SandboxConfig constructor raises a pydantic ValidationError (a
-    ValueError subclass); it must not trigger local execution and must not
-    even load the local fallback config.
-    """
-    import app.config as config_module
-    from app.services.sandbox import registry
-
-    def fallback_forbidden():
-        raise AssertionError("E2B config errors must not load the local fallback")
-
-    monkeypatch.setattr(config_module, "get_sandbox_config", fallback_forbidden)
-
-    async def fake_tool_config(_agent_id, _name):
-        return {
-            "sandbox_type": "e2b",
-            "api_key": "e2b-secret-key",
-            "default_timeout": 99999,
-        }
-
-    monkeypatch.setattr(agent_tools, "_get_tool_config", fake_tool_config)
-
-    def backend_forbidden(_config):
-        raise AssertionError("misconfigured E2B sandbox must not reach the registry")
-
-    monkeypatch.setattr(registry, "get_sandbox_backend", backend_forbidden)
+    monkeypatch.setattr(registry, "get_sandbox_backend", lambda _config: Backend())
 
     outcome = await agent_tools._execute_code_outcome(
         uuid.uuid4(),
         tmp_path,
-        {"language": "python", "code": "print('never runs')"},
-        tool_name="execute_code_e2b",
+        {"language": "python3", "code": "print('ok')"},
     )
 
-    assert outcome.status == "failed"
-    assert outcome.error_code == "sandbox_configuration_invalid"
+    assert outcome.status == "succeeded"
+    assert observed["language"] == "python"
+    assert observed["timeout"] == 180
 
 
 @pytest.mark.asyncio

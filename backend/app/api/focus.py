@@ -1,4 +1,3 @@
-from typing import Any
 """Structured Focus API for Aware."""
 
 import uuid

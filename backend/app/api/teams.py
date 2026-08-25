@@ -1,4 +1,3 @@
-from typing import Any
 """Microsoft Teams Bot Channel API routes."""
 
 import hmac

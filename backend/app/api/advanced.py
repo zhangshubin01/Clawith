@@ -1,4 +1,3 @@
-from typing import Any
 """Agent collaboration and template market API routes."""
 
 import uuid

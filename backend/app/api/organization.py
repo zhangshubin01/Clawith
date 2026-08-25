@@ -1,4 +1,3 @@
-from typing import Any
 """Organization management API routes (users only)."""
 
 import uuid

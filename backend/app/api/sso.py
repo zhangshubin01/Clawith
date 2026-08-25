@@ -1,4 +1,3 @@
-from typing import Any
 import uuid
 from datetime import datetime, timedelta, timezone
 from app.config import get_settings
@@ -51,7 +50,7 @@ async def create_sso_session(
 async def get_sso_session_status(
     sid: uuid.UUID,
     request: Request,
-    db: Any = None
+    db: AsyncSession = Depends(get_db)
 ):
     """Check the status of an SSO scan session."""
     if not is_valid_sso_browser_binding(sid, request.cookies.get(sso_browser_cookie_name(sid))):

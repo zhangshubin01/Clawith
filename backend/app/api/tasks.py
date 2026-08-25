@@ -1,4 +1,3 @@
-from typing import Any
 """Task management API routes."""
 
 import uuid

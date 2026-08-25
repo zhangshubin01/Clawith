@@ -1,4 +1,3 @@
-from typing import Any
 """Slack Bot Channel API routes."""
 
 import hashlib

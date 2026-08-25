@@ -1,7 +1,6 @@
 """WeChat iLink Bot channel API routes."""
 
 from __future__ import annotations
-from typing import Any
 
 import asyncio
 import uuid

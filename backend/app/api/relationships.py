@@ -1,4 +1,3 @@
-from typing import Any
 """Legacy agent relationship management API.
 
 These endpoints are retained for OKR, gateway, and historical compatibility.

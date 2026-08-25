@@ -1,4 +1,3 @@
-from typing import Any
 """Tool management API — CRUD for tools and per-agent assignments."""
 
 import uuid

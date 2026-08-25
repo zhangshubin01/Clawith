@@ -1,4 +1,3 @@
-from typing import Any
 """Google Workspace OAuth callback routes."""
 
 import uuid

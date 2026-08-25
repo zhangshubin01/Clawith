@@ -1,4 +1,3 @@
-from typing import Any
 """Discord Bot Channel API routes (slash command interactions)."""
 
 import uuid

@@ -10,7 +10,12 @@ import uuid
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings
 
-from app.services.sandbox.config import SandboxConfig, SandboxType
+from app.services.sandbox.config import (
+    CODE_EXECUTION_DEFAULT_TIMEOUT_SECONDS,
+    CODE_EXECUTION_MAX_TIMEOUT_SECONDS,
+    SandboxConfig,
+    SandboxType,
+)
 
 
 def _running_in_container() -> bool:
@@ -195,6 +200,7 @@ class Settings(BaseSettings):
     AGENT_RUNTIME_RUN_COMPACT_TOOL_RESULT_BYTES: int | None = Field(default=None, gt=0)
     AGENT_RUNTIME_VERIFY_REPAIR_COMPACT_ROUNDS: int | None = Field(default=None, gt=0)
     AGENT_RUNTIME_MODEL_CAPABILITY_REFRESH_SECONDS: int = Field(default=86400, gt=0)
+    AGENT_RUNTIME_WEB_STREAMING_ENABLED: bool = True
     AGENT_RUNTIME_FALLBACK_CONTEXT_WINDOW_TOKENS: int = Field(default=131072, gt=0)
     MULTI_AGENT_COMPACT_MODEL_ID: uuid.UUID | None = None
     MULTI_AGENT_PLANNING_MODEL_ID: uuid.UUID | None = None
@@ -254,8 +260,8 @@ class Settings(BaseSettings):
     SANDBOX_MEMORY_LIMIT: str = "256m"
     SANDBOX_ALLOW_NETWORK: bool = False
     SANDBOX_ALLOW_UNSAFE_FALLBACK_WHEN_BWRAP_MISSING: bool = _default_allow_unsafe_bwrap_fallback()
-    SANDBOX_DEFAULT_TIMEOUT: int = 30
-    SANDBOX_MAX_TIMEOUT: int = 60
+    SANDBOX_DEFAULT_TIMEOUT: int = CODE_EXECUTION_DEFAULT_TIMEOUT_SECONDS
+    SANDBOX_MAX_TIMEOUT: int = CODE_EXECUTION_MAX_TIMEOUT_SECONDS
     SANDBOX_HTTP_PROXY: str = ""
     SANDBOX_HTTPS_PROXY: str = ""
     SANDBOX_NO_PROXY: str = ""

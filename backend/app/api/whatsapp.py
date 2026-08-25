@@ -1,7 +1,6 @@
 """WhatsApp Cloud API channel routes."""
 
 from __future__ import annotations
-from typing import Any
 
 import hashlib
 import hmac

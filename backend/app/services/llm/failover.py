@@ -5,12 +5,13 @@ Provides error classification for failover decisions across all execution paths.
 
 from __future__ import annotations
 
+import re
 from enum import Enum
 import socket
 
 import httpx
 
-from .client import LLMError, LLMRequestShapeError
+from .client import LLMError, LLMRequestShapeError, LLMVisibleStreamInterrupted
 
 
 class FailoverErrorType(Enum):
@@ -68,6 +69,11 @@ def _error_chain(error: Exception) -> list[Exception]:
     return chain
 
 
+def is_retryable_classification(classification: FailoverErrorType) -> bool:
+    """Retry every provider failure that is not explicitly deterministic."""
+    return classification != FailoverErrorType.NON_RETRYABLE
+
+
 def classify_error(error: Exception) -> FailoverErrorType:
     """Classify an exception as retryable or non-retryable.
 
@@ -81,6 +87,7 @@ def classify_error(error: Exception) -> FailoverErrorType:
     Non-retryable errors:
     - Request-shape violations (LLMRequestShapeError)
     - Auth errors (401, 403)
+    - Payment and billing errors (402)
     - Validation errors (400, 422)
     - Schema errors
     - Content policy violations
@@ -92,6 +99,13 @@ def classify_error(error: Exception) -> FailoverErrorType:
         return FailoverErrorType.NON_RETRYABLE
 
     error_msg = str(error).lower()
+
+    if isinstance(error, LLMVisibleStreamInterrupted):
+        return FailoverErrorType.NON_RETRYABLE
+
+    # Non-retryable: an explicit HTTP payment status is deterministic.
+    if re.search(r"(?<!\d)402(?!\d)", error_msg):
+        return FailoverErrorType.NON_RETRYABLE
 
     # Non-retryable: authentication and authorization
     if any(kw in error_msg for kw in ["auth", "unauthorized", "forbidden", "invalid api key", "api key invalid"]):
@@ -125,6 +139,20 @@ def classify_error(error: Exception) -> FailoverErrorType:
     if any(kw in error_msg for kw in ["temporary", "transient", "unavailable", "overloaded", "busy"]):
         return FailoverErrorType.RETRYABLE
 
+    # Non-retryable: explicit provider balance and billing exhaustion. Keep this
+    # after transient checks so a failing billing service can still be retried.
+    if any(
+        kw in error_msg
+        for kw in [
+            "payment required",
+            "insufficient balance",
+            "insufficient credit",
+            "billing quota exhausted",
+            "billing quota exceeded",
+        ]
+    ):
+        return FailoverErrorType.NON_RETRYABLE
+
     # LLMError with specific patterns
     if isinstance(error, (LLMError, Exception)):
         # Check the error message for HTTP status codes
@@ -147,4 +175,5 @@ def classify_error(error: Exception) -> FailoverErrorType:
 __all__ = [
     "FailoverErrorType",
     "classify_error",
+    "is_retryable_classification",
 ]
