@@ -46,6 +46,86 @@ def test_observe_generation_is_noop_when_disabled(monkeypatch: pytest.MonkeyPatc
     assert captured == ["ran"]
 
 
+def test_observe_run_is_noop_when_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(tracing, "_get_client", lambda: None)
+    captured: list[str] = []
+
+    with tracing.observe_run(run_id="r-1", command_id="c-1", tenant_id="t-1") as run_handle:
+        assert run_handle is None
+        captured.append("ran")
+
+    assert captured == ["ran"]
+
+
+def test_observe_run_creates_root_span_with_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    span = _FakeSpan()
+    monkeypatch.setattr(tracing, "_get_client", lambda: _FakeClient(span=span))
+
+    with tracing.observe_run(
+        run_id="r-1",
+        command_id="c-1",
+        tenant_id="t-1",
+        agent_id="a-1",
+        session_id="s-1",
+        actor_user_id="u-1",
+        graph_name="clawith_agent_runtime",
+    ) as run_handle:
+        assert run_handle is not None
+
+    update = span.updates[-1]
+    assert update["metadata"]["run_id"] == "r-1"
+    assert update["metadata"]["command_id"] == "c-1"
+    assert update["metadata"]["tenant_id"] == "t-1"
+    assert update["metadata"]["agent_id"] == "a-1"
+    assert update["metadata"]["session_id"] == "s-1"
+    assert update["metadata"]["actor_user_id"] == "u-1"
+    assert update["metadata"]["graph_name"] == "clawith_agent_runtime"
+    assert "latency_ms" in update["metadata"]
+
+
+def test_observe_run_records_error_and_reraises(monkeypatch: pytest.MonkeyPatch) -> None:
+    span = _FakeSpan()
+    monkeypatch.setattr(tracing, "_get_client", lambda: _FakeClient(span=span))
+
+    class Boom(Exception):
+        pass
+
+    with pytest.raises(Boom):
+        with tracing.observe_run(run_id="r-1", command_id="c-1", tenant_id="t-1") as run_handle:
+            assert run_handle is not None
+            raise Boom("kaboom")
+
+    update = span.updates[-1]
+    assert update["level"] == "ERROR"
+    assert "Boom" in update["status_message"]
+
+
+def test_observe_run_sets_identity_for_nested_generation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    span = _FakeSpan()
+    monkeypatch.setattr(tracing, "_get_client", lambda: _FakeClient(span=span))
+
+    with tracing.observe_run(
+        run_id="r-9",
+        command_id="c-9",
+        tenant_id="t-9",
+        agent_id="a-9",
+        session_id="s-9",
+        actor_user_id="u-9",
+    ):
+        with tracing.observe_generation(name="llm") as gen:
+            assert gen is not None
+
+    # The nested generation inherits the ambient run identity (run metadata).
+    update = span.updates[-1]
+    assert update["metadata"]["run_id"] == "r-9"
+    assert update["metadata"]["session_id"] == "s-9"
+    assert update["metadata"]["tenant_id"] == "t-9"
+
+
 def test_observe_generation_swallows_span_start_failure(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(tracing, "_get_client", lambda: _FakeClient(raise_on_start=True))
     captured: list[str] = []

@@ -34,6 +34,7 @@ from app.services.agent_runtime.state import (
     RuntimeNodeExecutor,
 )
 from app.services.llm.multimodal_content import parse_multimodal_content
+from app.services.observability import observe_run
 
 
 _TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled"})
@@ -51,33 +52,17 @@ class RuntimeGraphRegistry:
         installed = tuple(graphs)
         if not installed:
             raise ValueError("at least one Runtime graph must be installed")
-        agent_graphs = tuple(
-            graph
-            for graph in installed
-            if not graph.identity.name.endswith("_group_planning")
-        )
-        planning_graphs = tuple(
-            graph
-            for graph in installed
-            if graph.identity.name.endswith("_group_planning")
-        )
+        agent_graphs = tuple(graph for graph in installed if not graph.identity.name.endswith("_group_planning"))
+        planning_graphs = tuple(graph for graph in installed if graph.identity.name.endswith("_group_planning"))
         if len(agent_graphs) > 1 or len(planning_graphs) > 1:
-            raise ValueError(
-                "install only the current graph for each Runtime topology"
-            )
+            raise ValueError("install only the current graph for each Runtime topology")
         self._agent_graph = agent_graphs[0] if agent_graphs else installed[0]
-        self._planning_graph = (
-            planning_graphs[0] if planning_graphs else self._agent_graph
-        )
+        self._planning_graph = planning_graphs[0] if planning_graphs else self._agent_graph
 
     def resolve(self, run: RuntimeRunRecord) -> AgentRuntimeGraph:
         # graph_name/version on AgentRun remain trace metadata. Compatible old
         # checkpoints always resume with the current deployed graph code.
-        return (
-            self._planning_graph
-            if run.system_role == "group_planning"
-            else self._agent_graph
-        )
+        return self._planning_graph if run.system_role == "group_planning" else self._agent_graph
 
 
 class RuntimeInputSnapshotFactory:
@@ -96,11 +81,7 @@ class RuntimeInputSnapshotFactory:
         if command.command_type != "start":
             raise ValueError("Runtime input snapshots can only be captured for start")
         session_id = uuid.UUID(run.session_id) if run.session_id is not None else None
-        initial_input = {
-            key: value
-            for key, value in command.payload.items()
-            if key != RUNTIME_COMMAND_METADATA_KEY
-        }
+        initial_input = {key: value for key, value in command.payload.items() if key != RUNTIME_COMMAND_METADATA_KEY}
         related = initial_input.get("related_run_summaries", [])
         if not isinstance(related, Sequence) or isinstance(related, (str, bytes, bytearray)):
             raise CommandExecutionRejected(
@@ -117,16 +98,10 @@ class RuntimeInputSnapshotFactory:
                 db,
                 tenant_id=run.tenant_id,
                 session_id=session_id,
-                agent_id=(
-                    uuid.UUID(run.agent_id)
-                    if run.agent_id is not None
-                    else None
-                ),
+                agent_id=(uuid.UUID(run.agent_id) if run.agent_id is not None else None),
                 source_type=run.source_type,
                 source_id=run.source_id,
-                scheduling_position_created_at=(
-                    run.scheduling_position_created_at
-                ),
+                scheduling_position_created_at=(run.scheduling_position_created_at),
                 scheduling_position_id=run.scheduling_position_id,
                 initial_input=initial_input,
                 related_run_summaries=cast(Sequence[Mapping[str, object]], related),
@@ -196,7 +171,7 @@ def _runtime_context(
     card_cfg = target.get("_card_config", {}) if isinstance(target, dict) else {}
     # receive_id / receive_id_type 在 delivery_target.channel_delivery.target 内,
     # 需要从嵌套路径读取（chat_intake 不提升到顶层）
-    delivery_route = (target.get("channel_delivery", {}) if isinstance(target, dict) else {})
+    delivery_route = target.get("channel_delivery", {}) if isinstance(target, dict) else {}
     delivery_target = delivery_route.get("target", {}) if isinstance(delivery_route, dict) else {}
     card_mode = bool(card_cfg.get("app_id"))
     return RuntimeContext(
@@ -399,15 +374,45 @@ class LangGraphRuntimeDriver:
     ) -> CheckpointObservation | None:
         """Read one stable checkpoint by Thread + checkpoint identity."""
         graph = self._graph_registry.resolve(run)
-        snapshot = await graph.compiled.aget_state(
-            runtime_thread_config(run.thread_id, checkpoint_id=checkpoint_id)
-        )
+        snapshot = await graph.compiled.aget_state(runtime_thread_config(run.thread_id, checkpoint_id=checkpoint_id))
         observation = observation_from_snapshot(snapshot)
         if observation is None or observation.checkpoint_id != checkpoint_id:
             return None
         return observation
 
     async def execute(
+        self,
+        *,
+        connection: AsyncConnection,
+        run: RuntimeRunRecord,
+        command: RuntimeCommandRecord,
+        checkpoint: CheckpointObservation | None,
+    ) -> None:
+        with observe_run(
+            run_id=run.run_id,
+            command_id=command.id,
+            tenant_id=run.tenant_id,
+            agent_id=run.agent_id,
+            session_id=run.session_id,
+            actor_user_id=command.actor_user_id,
+            goal=run.goal,
+            run_kind=run.run_kind,
+            source_type=run.source_type,
+            model_id=run.model_id,
+            graph_name=run.graph_name,
+            graph_version=run.graph_version,
+            parent_run_id=run.parent_run_id,
+            root_run_id=run.root_run_id,
+            thread_id=run.thread_id,
+        ):
+            await self._execute_inner(
+                connection=connection,
+                run=run,
+                command=command,
+                checkpoint=checkpoint,
+            )
+
+    async def _execute_inner(
         self,
         *,
         connection: AsyncConnection,
@@ -455,11 +460,7 @@ class LangGraphRuntimeDriver:
                 "messages": [_initial_thread_message(run, snapshots)],
                 "lifecycle": {
                     "status": "running",
-                    "next_route": (
-                        "model"
-                        if run.system_role == "group_planning"
-                        else "compact"
-                    ),
+                    "next_route": ("model" if run.system_role == "group_planning" else "compact"),
                     "model_step_count": 0,
                     "verification_attempt_count": 0,
                     "pending_tool_calls": [],

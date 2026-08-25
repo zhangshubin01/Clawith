@@ -15,7 +15,7 @@ import dataclasses
 import json
 import re
 import time
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from typing import Any, Iterator
 
 from loguru import logger
@@ -25,10 +25,12 @@ from app.services.token_tracker import TokenUsage, extract_token_usage
 
 __all__ = [
     "GenerationHandle",
+    "RunHandle",
     "flush",
     "is_enabled",
     "mask_text",
     "observe_generation",
+    "observe_run",
     "set_run_identity",
 ]
 
@@ -71,11 +73,7 @@ _run_identity: contextvars.ContextVar[dict[str, str]] = contextvars.ContextVar(
 def is_enabled() -> bool:
     """Whether trace export is configured (independent of SDK health)."""
     settings = get_settings()
-    return bool(
-        settings.OBSERVABILITY_ENABLED
-        and settings.LANGFUSE_PUBLIC_KEY
-        and settings.LANGFUSE_SECRET_KEY
-    )
+    return bool(settings.OBSERVABILITY_ENABLED and settings.LANGFUSE_PUBLIC_KEY and settings.LANGFUSE_SECRET_KEY)
 
 
 def set_run_identity(**identity: Any) -> None:
@@ -85,13 +83,7 @@ def set_run_identity(**identity: Any) -> None:
     inherits the same Run identity without threading it through signatures.
     Empty and ``None`` values are dropped to keep trace metadata clean.
     """
-    _run_identity.set(
-        {
-            key: str(value)
-            for key, value in identity.items()
-            if value is not None and value != ""
-        }
-    )
+    _run_identity.set({key: str(value) for key, value in identity.items() if value is not None and value != ""})
 
 
 def _get_client() -> Any:
@@ -241,6 +233,9 @@ def observe_generation(
 
     span_input = mask_text(input) if (capture_input and input is not None) else None
 
+    # Propagate native Langfuse user/session attributes so standalone
+    # generations (no enclosing ``observe_run``) still group by user/session.
+    prop_cm = _user_session_propagation(identity)
     try:
         start_cm = client.start_as_current_observation(
             as_type="generation",
@@ -255,16 +250,145 @@ def observe_generation(
 
     started = time.perf_counter()
     handle: GenerationHandle | None = None
-    with start_cm as span:
-        handle = GenerationHandle(span, mask=True)
-        handle.add_metadata(**identity)
+    with ExitStack() as stack:
+        if prop_cm is not None:
+            stack.enter_context(prop_cm)
+        with start_cm as span:
+            handle = GenerationHandle(span, mask=True)
+            handle.add_metadata(**identity)
+            try:
+                yield handle
+            except BaseException as exc:
+                handle.mark_error(exc)
+                raise
+            finally:
+                handle.finalize(started)
+
+
+def _user_session_propagation(identity: dict[str, Any]) -> Any | None:
+    """Build a Langfuse ``propagate_attributes`` CM for native session/user, or None."""
+    session_id = identity.get("session_id")
+    user_id = identity.get("actor_user_id")
+    if not session_id and not user_id:
+        return None
+    try:
+        from langfuse import propagate_attributes
+
+        return propagate_attributes(
+            user_id=str(user_id) if user_id is not None else None,
+            session_id=str(session_id) if session_id is not None else None,
+        )
+    except Exception:  # noqa: BLE001 — observability is best-effort
+        return None
+
+
+class RunHandle:
+    """Write-side of an in-flight run-level observation (root span). All writes are safe."""
+
+    __slots__ = ("_span", "_metadata", "_level", "_status")
+
+    def __init__(self, span: Any) -> None:
+        self._span = span
+        self._metadata: dict[str, Any] = {}
+        self._level: str | None = None
+        self._status: str | None = None
+
+    def add_metadata(self, **values: Any) -> None:
+        self._metadata.update({key: value for key, value in values.items() if value is not None})
+
+    def mark_error(self, exc: BaseException) -> None:
+        self._level = "ERROR"
+        self._status = f"{type(exc).__name__}: {str(exc)[:400]}"
+
+    def finalize(self, started: float) -> None:
+        """Apply accumulated metadata/error/latency in one span update."""
+        self._metadata.setdefault("latency_ms", round((time.perf_counter() - started) * 1000, 2))
+        update: dict[str, Any] = {"metadata": self._metadata}
+        if self._level is not None:
+            update["level"] = self._level
+            update["status_message"] = self._status
         try:
-            yield handle
-        except BaseException as exc:
-            handle.mark_error(exc)
-            raise
-        finally:
-            handle.finalize(started)
+            self._span.update(**update)
+        except Exception:  # noqa: BLE001 — tracing must never break the call path
+            pass
+
+
+@contextmanager
+def observe_run(
+    *,
+    run_id: Any,
+    command_id: Any,
+    tenant_id: Any,
+    agent_id: Any = None,
+    session_id: Any = None,
+    actor_user_id: Any = None,
+    **identity: Any,
+) -> Iterator[RunHandle | None]:
+    """Open the root trace for one Runtime command execution (no-op when disabled).
+
+    The root span becomes the Langfuse trace; user/session/trace-name attributes
+    are propagated to every nested observation so a Run renders as one trace
+    grouped by session/user. Exceptions inside the block are recorded as
+    ``level=ERROR`` and re-raised to the caller; observability-internal failures
+    are swallowed.
+    """
+    client = _get_client()
+    if client is None:
+        yield None
+        return
+
+    meta: dict[str, str] = {
+        "run_id": str(run_id),
+        "command_id": str(command_id),
+        "tenant_id": str(tenant_id),
+    }
+    for key, value in (
+        ("agent_id", agent_id),
+        ("session_id", session_id),
+        ("actor_user_id", actor_user_id),
+        *identity.items(),
+    ):
+        if value is not None:
+            meta[key] = str(value)
+    set_run_identity(**meta)
+
+    try:
+        from langfuse import propagate_attributes
+
+        prop_cm = propagate_attributes(
+            user_id=meta.get("actor_user_id"),
+            session_id=meta.get("session_id"),
+            trace_name=f"run:{run_id}",
+            metadata={key: meta[key] for key in ("tenant_id", "agent_id", "run_id", "command_id") if key in meta},
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[Observability] failed to start run trace: {}", exc)
+        yield None
+        return
+
+    with ExitStack() as stack:
+        stack.enter_context(prop_cm)
+        try:
+            start_cm = client.start_as_current_observation(
+                as_type="span",
+                name="run",
+                metadata=meta,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[Observability] failed to start run span: {}", exc)
+            yield None
+            return
+        with start_cm as span:
+            handle = RunHandle(span)
+            handle.add_metadata(**meta)
+            started = time.perf_counter()
+            try:
+                yield handle
+            except BaseException as exc:
+                handle.mark_error(exc)
+                raise
+            finally:
+                handle.finalize(started)
 
 
 def flush() -> None:
