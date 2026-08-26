@@ -16,10 +16,12 @@ from app.models.agent_run_command import AgentRunCommand
 from app.services.agent_runtime.command_worker import (
     CheckpointObservation,
     CommandExecutionRejected,
+    RetryableCommandError,
     RuntimeCommandRecord,
     RuntimeCommandWorker,
     RuntimeRunRecord,
 )
+from app.services.agent_runtime.run_state_reader import RunStateReadError
 from app.services.agent_runtime.state import (
     RunInputSnapshots,
     RunRegistrySnapshot,
@@ -1450,3 +1452,128 @@ async def test_driver_can_deterministically_reject_invalid_resume() -> None:
     assert result.status == "rejected"
     assert result.error_code == "invalid_resume"
     assert reject.await_args.kwargs["error_code"] == "invalid_resume"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "error_factory, expected_code",
+    [
+        (
+            lambda: RetryableCommandError(
+                "inconsistent_checkpoint",
+                "checkpoint values, next, tasks, and interrupts disagree",
+            ),
+            "inconsistent_checkpoint",
+        ),
+        (
+            lambda: RunStateReadError("inconsistent_checkpoint", "checkpoint cannot be trusted"),
+            "inconsistent_checkpoint",
+        ),
+        (lambda: RuntimeError("boom"), "reconciliation_required"),
+    ],
+    ids=["RetryableCommandError", "RunStateReadError", "no_code_fallback"],
+)
+async def test_exhausted_processing_terminalizes_instead_of_releasing(
+    _stub_business_attempt_boundary,
+    error_factory,
+    expected_code,
+) -> None:
+    """Regression (2026-08-26, run fe8d6e16): quarantine must never loop.
+
+    Once the claim threshold admits attempt == max, releasing a failure inside
+    the exhausted branch would re-enter the same branch forever (release keeps
+    attempt at max). Any failure during quarantine processing must reject the
+    command and notify the user instead.
+    """
+    timeline: list[str] = []
+    run = _run()
+    command = _command(run, "start")
+    command.attempt_count = 5
+    rejection_handler = _RejectionHandler()
+
+    class _ErrorReader(_Reader):
+        async def read_for_command(self, *, connection, run, command):
+            self.calls.append((connection, run))
+            raise error_factory()
+
+    with (
+        patch(
+            "app.services.agent_runtime.command_worker.claim_next_command",
+            new=AsyncMock(return_value=command),
+        ),
+        patch(
+            "app.services.agent_runtime.command_worker.mark_command_rejected",
+            new=AsyncMock(),
+        ) as rejected,
+        patch(
+            "app.services.agent_runtime.command_worker.release_command_claim",
+            new=AsyncMock(),
+        ) as released,
+    ):
+        result = await _worker(
+            timeline=timeline,
+            run=run,
+            reader=_ErrorReader(command=()),
+            executor=_Executor(timeline),
+            rejection_handler=rejection_handler,
+        ).run_once()
+
+    assert result.status == "rejected"
+    assert result.error_code == expected_code
+    rejected.assert_awaited_once()
+    released.assert_not_awaited()
+    assert len(rejection_handler.calls) == 1
+    _, rejected_run, rejected_command, error_code, _error_message = (
+        rejection_handler.calls[0]
+    )
+    assert rejected_run.run_id == run.id
+    assert rejected_command.id == command.id
+    assert error_code == expected_code
+
+
+@pytest.mark.asyncio
+async def test_exhausted_load_run_failure_rejects_instead_of_releasing(
+    _stub_business_attempt_boundary,
+) -> None:
+    """Regression: run-scope failures before quarantine also terminalize.
+
+    _load_run raising a RetryableCommandError (run_scope_mismatch etc.) happens
+    before the exhausted branch; the generic handler must not release it back
+    to pending, or the claim threshold would re-admit it forever.
+    """
+    timeline: list[str] = []
+    run = _run()
+    command = _command(run, "start")
+    command.attempt_count = 5
+
+    with (
+        patch(
+            "app.services.agent_runtime.command_worker.claim_next_command",
+            new=AsyncMock(return_value=command),
+        ),
+        patch.object(
+            RuntimeCommandWorker,
+            "_load_run",
+            new_callable=AsyncMock,
+            side_effect=RetryableCommandError("run_scope_mismatch", "run belongs to another scope"),
+        ),
+        patch(
+            "app.services.agent_runtime.command_worker.mark_command_rejected",
+            new=AsyncMock(),
+        ) as rejected,
+        patch(
+            "app.services.agent_runtime.command_worker.release_command_claim",
+            new=AsyncMock(),
+        ) as released,
+    ):
+        result = await _worker(
+            timeline=timeline,
+            run=run,
+            reader=_Reader(command=()),
+            executor=_Executor(timeline),
+        ).run_once()
+
+    assert result.status == "rejected"
+    assert result.error_code == "run_scope_mismatch"
+    rejected.assert_awaited_once()
+    released.assert_not_awaited()

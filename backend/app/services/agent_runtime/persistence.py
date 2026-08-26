@@ -636,7 +636,7 @@ def _claim_statement(now: datetime, *, max_attempts: int):
         select(AgentRunCommand)
         .join(candidate_run, candidate_run.id == AgentRunCommand.run_id)
         .where(
-            AgentRunCommand.attempt_count < max_attempts,
+            AgentRunCommand.attempt_count <= max_attempts,
             or_(
                 AgentRunCommand.status == "pending",
                 and_(

@@ -303,6 +303,18 @@ class CommandCheckpointNotObserved(RetryableCommandError):
         )
 
 
+def _terminal_error_code(exc: Exception) -> str:
+    """Map an exception to a stable, schema-safe rejection code.
+
+    Quarantine rejections surface an error_code, not free-form text, so a
+    missing/oversized code falls back to ``reconciliation_required``.
+    """
+    code = getattr(exc, "code", None)
+    if isinstance(code, str) and 0 < len(code) <= 100:
+        return code
+    return "reconciliation_required"
+
+
 @dataclass(frozen=True, slots=True)
 class CommandWorkResult:
     """One bounded worker iteration result for daemon metrics and retry policy."""
@@ -1074,13 +1086,40 @@ class RuntimeCommandWorker:
                         error_message=str(exc),
                         synchronize=False,
                     )
+                if exhausted:
+                    try:
+                        return await run_with_thread_lock(
+                            self._lock_engine,
+                            run.thread_id,
+                            lambda connection: self._process_exhausted_locked(
+                                connection, command, run
+                            ),
+                        )
+                    except ThreadLockNotAcquired:
+                        # Transient contention stays retryable; the outer
+                        # handler releases the claim and tries again.
+                        raise
+                    except Exception as exc:
+                        # Quarantine must terminalize, never loop: releasing a
+                        # failure here would keep attempt at max and re-enter
+                        # this branch forever (2026-08-26, run fe8d6e16). The
+                        # raw exception text stays in logs only — the rejection
+                        # surfaces the stable code through the standard
+                        # rejection message.
+                        logger.exception(
+                            "Runtime command quarantine failed, rejecting",
+                            extra={"command_id": command.id, "run_id": command.run_id},
+                        )
+                        return await self._reject(
+                            command,
+                            _terminal_error_code(exc),
+                            run=run,
+                        )
                 return await run_with_thread_lock(
                     self._lock_engine,
                     run.thread_id,
                     lambda connection: (
-                        self._process_exhausted_locked(connection, command, run)
-                        if exhausted
-                        else self._process_locked(connection, command, run)
+                        self._process_locked(connection, command, run)
                     ),
                 )
             except ThreadLockNotAcquired:
@@ -1113,6 +1152,15 @@ class RuntimeCommandWorker:
                     error_code=exc.code,
                 )
             except RetryableCommandError as exc:
+                if exhausted:
+                    # Attempt budget is spent (claim threshold now admits
+                    # attempt == max): terminalize instead of releasing — a
+                    # release would re-enter quarantine forever.
+                    return await self._reject(
+                        command,
+                        _terminal_error_code(exc),
+                        synchronize=False,
+                    )
                 await self._release_for_retry(command, exc.code)
                 return CommandWorkResult(
                     status="retry",
@@ -1120,7 +1168,17 @@ class RuntimeCommandWorker:
                     run_id=command.run_id,
                     error_code=exc.code,
                 )
-            except Exception:
+            except Exception as exc:
+                if exhausted:
+                    logger.exception(
+                        "Runtime command failed before quarantine, rejecting",
+                        extra={"command_id": command.id, "run_id": command.run_id},
+                    )
+                    return await self._reject(
+                        command,
+                        _terminal_error_code(exc),
+                        synchronize=False,
+                    )
                 await self._release_for_retry(command, "command_execution_failed")
                 raise
         finally:

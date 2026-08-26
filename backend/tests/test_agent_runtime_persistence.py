@@ -452,7 +452,7 @@ async def test_claim_uses_skip_locked_fifo_without_consuming_execution_attempt()
         "(previous_command.created_at, previous_command.id) < (agent_run_commands.created_at, agent_run_commands.id)"
     ) in sql
     assert "previous_command.status IN ('pending', 'claimed')" in sql
-    assert "agent_run_commands.attempt_count < 5" in sql
+    assert "agent_run_commands.attempt_count <= 5" in sql
 
 
 @pytest.mark.asyncio
