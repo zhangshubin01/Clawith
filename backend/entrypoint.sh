@@ -21,6 +21,23 @@ role_contains() {
     esac
 }
 
+# --- Fail-fast on placeholder secrets (2026-08-26 SECRET_KEY 事故) ---
+# Deploying without a real .env makes SECRET_KEY fall back to the compose
+# placeholder; api_key_encrypted then "decrypts" to garbage and every model
+# call fails with HTTP 401 "invalid key" (the key itself is fine). Refuse to
+# boot with an actionable message instead of failing 10 minutes later.
+if [ -z "${SECRET_KEY:-}" ] || [ "${SECRET_KEY}" = "change-me-in-production" ]; then
+    echo "[entrypoint] FATAL: SECRET_KEY is missing or the placeholder 'change-me-in-production'." >&2
+    echo "[entrypoint] The deploy directory has no .env (or it was not loaded)." >&2
+    echo "[entrypoint] Copy the repo-root .env into the deploy directory, then re-run compose." >&2
+    exit 1
+fi
+if [ -z "${JWT_SECRET_KEY:-}" ] || [ "${JWT_SECRET_KEY}" = "change-me-jwt-secret" ]; then
+    echo "[entrypoint] FATAL: JWT_SECRET_KEY is missing or the placeholder 'change-me-jwt-secret'." >&2
+    echo "[entrypoint] Copy the repo-root .env into the deploy directory, then re-run compose." >&2
+    exit 1
+fi
+
 # --- Permission fixing and privilege dropping ---
 if [ "$(id -u)" = '0' ]; then
     echo "[entrypoint] Detected root user, checking permissions..."
@@ -125,4 +142,31 @@ else
 fi
 
 echo "[entrypoint] Step 3: Starting uvicorn..."
-exec /bin/bash -lc "$START_COMMAND"
+
+# --- Clean shutdown for restart-policy self-heal (2026-08-26) ---
+# After an OrbStack/docker daemon restart, containers that shut down with a
+# non-zero exit code (e.g. 127: redis is already gone and lifespan teardown
+# fails) are NOT auto-recovered by restart: unless-stopped, while exit-0
+# containers are. Trap SIGTERM/SIGINT, forward it to the app, and exit 0
+# whenever the stop came from a signal, so backend/frontend come back by
+# themselves after daemon restarts exactly like postgres/redis do.
+TERM_FLAG=0
+_term_handler() {
+    TERM_FLAG=1
+    echo "[entrypoint] Received SIGTERM/SIGINT, forwarding to app (pid ${APP_PID:-unknown})..."
+    kill -TERM "${APP_PID}" 2>/dev/null || true
+}
+trap _term_handler TERM INT
+
+/bin/bash -lc "$START_COMMAND" &
+APP_PID=$!
+set +e
+wait "${APP_PID}"
+APP_EXIT=$?
+set -e
+if [ "${TERM_FLAG}" = "1" ]; then
+    echo "[entrypoint] App exited after signal; exiting 0 so restart: unless-stopped can recover us."
+    exit 0
+fi
+echo "[entrypoint] App exited with code ${APP_EXIT}."
+exit "${APP_EXIT}"

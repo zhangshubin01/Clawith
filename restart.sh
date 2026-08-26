@@ -337,6 +337,23 @@ run_docker_mode() {
         echo -e "  Allocated Frontend Port: ${GREEN}$FRONTEND_PORT${NC}"
         export FRONTEND_PORT
 
+        # --- Preflight: refuse to deploy with placeholder secrets (2026-08-26 SECRET_KEY 事故) ---
+        # Without a real .env, compose falls back to SECRET_KEY=change-me-in-production,
+        # api_key_encrypted decrypts to garbage and every model call 401s.
+        if [ ! -f "$ROOT/.env" ]; then
+            echo -e "${RED}❌ .env not found in $ROOT — compose would boot with placeholder secrets.${NC}" >&2
+            echo -e "${RED}   Copy a real .env into $ROOT first.${NC}" >&2
+            exit 1
+        fi
+        if grep -qE '^SECRET_KEY=change-me-in-production[[:space:]]*$' "$ROOT/.env"; then
+            echo -e "${RED}❌ SECRET_KEY in $ROOT/.env is still the placeholder 'change-me-in-production'.${NC}" >&2
+            exit 1
+        fi
+        if grep -qE '^JWT_SECRET_KEY=change-me-jwt-secret[[:space:]]*$' "$ROOT/.env"; then
+            echo -e "${RED}❌ JWT_SECRET_KEY in $ROOT/.env is still the placeholder 'change-me-jwt-secret'.${NC}" >&2
+            exit 1
+        fi
+
         docker compose down 2>/dev/null || docker-compose down 2>/dev/null || true
         docker compose up -d --build 2>/dev/null || docker-compose up -d --build
 
