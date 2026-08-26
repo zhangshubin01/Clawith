@@ -9,6 +9,7 @@ from typing import cast
 import uuid
 
 from langgraph.types import Command
+from loguru import logger
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession
 
 from app.config import get_settings
@@ -277,6 +278,23 @@ def _initial_thread_message(
     }
 
 
+def _is_exit_stub(snapshot: object) -> bool:
+    """Identify the synthetic empty checkpoint LangGraph writes at thread exit.
+
+    With ``durability="exit"`` a thread's first run persists a synthetic empty
+    checkpoint (``metadata["step"] == -2`` with no channel values) right before
+    the final checkpoint. A crash between the two leaves that stub as the
+    thread head; resuming from it would restart from an empty state, so
+    readers must flag it instead of silently treating the thread as not
+    started.
+    """
+    values = getattr(snapshot, "values", None)
+    if values:
+        return False
+    metadata = getattr(snapshot, "metadata", None)
+    return isinstance(metadata, Mapping) and metadata.get("step") == -2
+
+
 def observation_from_snapshot(snapshot: object) -> CheckpointObservation | None:
     values = getattr(snapshot, "values", None)
     if not values:
@@ -342,6 +360,15 @@ class LangGraphRuntimeDriver:
             filter={"clawith_run_id": str(run.run_id)},
             limit=1,
         ):
+            if _is_exit_stub(snapshot):
+                logger.warning(
+                    "Runtime checkpoint head is an exit stub for run {} (thread {}): "
+                    "the final checkpoint never landed, resume would restart from an "
+                    "empty state",
+                    run.run_id,
+                    run.thread_id,
+                )
+                return None
             return observation_from_snapshot(snapshot)
         return None
 

@@ -24,6 +24,7 @@ from app.services.agent_runtime.langgraph_driver import (
     RuntimeGraphRegistry,
     RuntimeInputSnapshotFactory,
     StaticRuntimeInputSnapshotFactory,
+    _is_exit_stub,
 )
 from app.services.agent_runtime.state import (
     JsonValue,
@@ -766,3 +767,66 @@ async def test_driver_labels_goal_when_run_has_no_durable_user_input(
     messages = runtime_messages_as_json(observed.state)
     assert messages[-1]["content"] == f"Current Run Directive:\n{goal}"
     assert messages[-1]["runtime_input"] == "current"
+
+
+def test_exit_stub_detection_identifies_the_synthetic_empty_head() -> None:
+    from types import SimpleNamespace
+
+    stub = SimpleNamespace(
+        values={},
+        metadata={"step": -2},
+        next=(),
+        tasks=(),
+        interrupts=(),
+        created_at=None,
+    )
+    assert _is_exit_stub(stub) is True
+
+    normal = SimpleNamespace(
+        values={"lifecycle": {"status": "completed"}},
+        metadata={"step": 12},
+        next=(),
+        tasks=(),
+        interrupts=(),
+        created_at=None,
+    )
+    assert _is_exit_stub(normal) is False
+    assert _is_exit_stub(SimpleNamespace(values={}, metadata={})) is False
+
+
+@pytest.mark.asyncio
+async def test_read_latest_warns_and_returns_none_on_exit_stub_head() -> None:
+    """A crash between the synthetic stub and the final checkpoint leaves the
+    stub as thread head; resume would restart from an empty state. read_latest
+    must flag it instead of silently treating the thread as not started."""
+    from types import SimpleNamespace
+
+    from loguru import logger
+
+    run = _run(uuid.uuid4())
+    driver = _driver(CompletingExecutor())
+    stub = SimpleNamespace(
+        values={},
+        metadata={"step": -2},
+        next=(),
+        tasks=(),
+        interrupts=(),
+        created_at=None,
+    )
+
+    async def _history(*_args, **_kwargs):
+        yield stub
+
+    driver._graph_registry = SimpleNamespace(  # type: ignore[attr-defined]
+        resolve=lambda _run: SimpleNamespace(compiled=SimpleNamespace(aget_state_history=_history)),
+    )
+
+    captured: list[str] = []
+    sink_id = logger.add(lambda message: captured.append(str(message)), level="WARNING")
+    try:
+        observed = await driver.read_latest(connection=_connection(), run=run)
+    finally:
+        logger.remove(sink_id)
+
+    assert observed is None
+    assert any("stub" in message for message in captured)
