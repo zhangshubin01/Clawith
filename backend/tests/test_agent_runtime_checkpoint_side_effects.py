@@ -249,9 +249,7 @@ async def test_waiting_checkpoint_projects_lifecycle_event() -> None:
         session_factory=sessions,  # type: ignore[arg-type]
     ).handle(run=run, command=command, checkpoint=checkpoint)
 
-    compiled = sessions.sessions[0].statements[0].compile(
-        dialect=postgresql.dialect()
-    )
+    compiled = sessions.sessions[0].statements[0].compile(dialect=postgresql.dialect())
     assert compiled.params["event_type"] == "waiting_started"
     assert compiled.params["payload"]["waiting_type"] == "external"
     assert compiled.params["payload"]["correlation_id"] == "poll-1"
@@ -269,13 +267,8 @@ async def test_resume_terminal_checkpoint_projects_resume_and_terminal_events() 
         session_factory=sessions,  # type: ignore[arg-type]
     ).handle(run=run, command=command, checkpoint=checkpoint)
 
-    compiled = [
-        statement.compile(dialect=postgresql.dialect()).params
-        for statement in sessions.sessions[0].statements
-    ]
-    assert [
-        params["event_type"] for params in compiled if "event_type" in params
-    ] == [
+    compiled = [statement.compile(dialect=postgresql.dialect()).params for statement in sessions.sessions[0].statements]
+    assert [params["event_type"] for params in compiled if "event_type" in params] == [
         "resumed",
         "run_completed",
     ]
@@ -331,10 +324,7 @@ async def test_checkpoint_projects_replayable_tool_activity_with_redacted_argume
         session_factory=sessions,  # type: ignore[arg-type]
     ).handle(run=run, command=command, checkpoint=checkpoint)
 
-    compiled = [
-        statement.compile(dialect=postgresql.dialect()).params
-        for statement in sessions.sessions[0].statements
-    ]
+    compiled = [statement.compile(dialect=postgresql.dialect()).params for statement in sessions.sessions[0].statements]
     activities = [
         params["payload"]
         for params in compiled
@@ -347,10 +337,7 @@ async def test_checkpoint_projects_replayable_tool_activity_with_redacted_argume
         "tool_call",
         "tool_call",
     ]
-    assert all(
-        activity["activity_type"] != "assistant_progress"
-        for activity in activities
-    )
+    assert all(activity["activity_type"] != "assistant_progress" for activity in activities)
     assert activities[1]["status"] == "running"
     assert activities[1]["call_instance_id"] == "call-1"
     assert activities[1]["provider_call_id"] == "provider-call-1"
@@ -364,9 +351,7 @@ async def test_checkpoint_projects_replayable_tool_activity_with_redacted_argume
     assert activities[2]["error_code"] == "tool_arguments_invalid"
     assert activities[2]["model_action"] == "repair_arguments"
     assert activities[2]["side_effect_state"] == "none"
-    assert activities[2]["safe_remediation"] == (
-        "Correct $.path and call the Tool again."
-    )
+    assert activities[2]["safe_remediation"] == ("Correct $.path and call the Tool again.")
     assert activities[1]["args"]["api_key"] == "[REDACTED]"
 
 
@@ -378,6 +363,9 @@ async def test_direct_tool_history_uses_all_durable_events_after_checkpoint_comp
     origin_user_id = uuid.uuid4()
     earlier = datetime(2026, 8, 14, 10, 0, tzinfo=UTC)
     later = datetime(2026, 8, 14, 11, 0, tzinfo=UTC)
+    # Real event shape: the durable "done" (succeeded) event carries no
+    # reasoning_content — it lives on the "running" event written when the
+    # tool step started. Regression guard for commit 95482edf.
     events = [
         SimpleNamespace(
             run_id=run.run_id,
@@ -391,7 +379,6 @@ async def test_direct_tool_history_uses_all_durable_events_after_checkpoint_comp
                 "args": {"path": "old.txt"},
                 "result": "old",
                 "execution_status": "succeeded",
-                "reasoning_content": "Read the earlier file",
             },
         ),
         SimpleNamespace(
@@ -406,9 +393,12 @@ async def test_direct_tool_history_uses_all_durable_events_after_checkpoint_comp
                 "args": {"path": "new.txt"},
                 "result": "saved",
                 "execution_status": "succeeded",
-                "reasoning_content": "Write the later file",
             },
         ),
+    ]
+    running_reasoning = [
+        ("call-before-compaction", "Read the earlier file"),
+        ("call-after-compaction", "Write the later file"),
     ]
 
     class _HistorySession:
@@ -417,6 +407,7 @@ async def test_direct_tool_history_uses_all_durable_events_after_checkpoint_comp
             self.results = [
                 _ScalarsResult([]),
                 _RowsResult([(event, origin_user_id) for event in events]),
+                _RowsResult(running_reasoning),
             ]
 
         async def execute(self, statement):
@@ -445,10 +436,14 @@ async def test_direct_tool_history_uses_all_durable_events_after_checkpoint_comp
     assert [payload["created_at"] for payload in inserts] == [earlier, later]
     assert [payload["tenant_id"] for payload in inserts] == [run.tenant_id] * 2
     assert [payload["conversation_id"] for payload in inserts] == [session_id] * 2
-    assert [
-        json.loads(payload["content"])["tool_call_id"]
-        for payload in inserts
-    ] == ["call-before-compaction", "call-after-compaction"]
+    assert [json.loads(payload["content"])["tool_call_id"] for payload in inserts] == [
+        "call-before-compaction",
+        "call-after-compaction",
+    ]
+    assert [json.loads(payload["content"])["reasoning_content"] for payload in inserts] == [
+        "Read the earlier file",
+        "Write the later file",
+    ]
 
 
 @pytest.mark.asyncio
@@ -568,9 +563,7 @@ async def test_rejected_start_projects_terminal_event_and_failure_delivery() -> 
     assert event["payload"] == {
         "status": "failed",
         "error_code": "reconciliation_required",
-        "error_message": (
-            "Runtime could not reconcile the command after repeated attempts."
-        ),
+        "error_message": ("Runtime could not reconcile the command after repeated attempts."),
         "stage": "execution",
         "command_id": str(command.id),
         "trace_id": "rejected-worker-trace",
@@ -654,9 +647,7 @@ async def test_cancel_before_start_releases_lane_without_fabricating_checkpoint(
     assert stored.lane_held is False
     assert stored.lane_claimed_at is None
     assert sessions.sessions[0].flush_count == 1
-    event = sessions.sessions[0].statements[-1].compile(
-        dialect=postgresql.dialect()
-    ).params
+    event = sessions.sessions[0].statements[-1].compile(dialect=postgresql.dialect()).params
     assert event["event_type"] == "run_cancelled"
 
 
@@ -674,10 +665,7 @@ async def test_cancel_after_rejected_start_does_not_append_second_terminal_event
 
     assert stored.lane_held is False
     assert stored.lane_claimed_at is None
-    assert not any(
-        "INSERT INTO agent_run_events" in str(statement)
-        for statement in session.statements
-    )
+    assert not any("INSERT INTO agent_run_events" in str(statement) for statement in session.statements)
 
 
 def test_waiting_delivery_uses_correlation_id_and_prompt() -> None:
@@ -738,9 +726,7 @@ async def test_failed_lifecycle_event_persists_the_worker_trace() -> None:
         session_factory=sessions,  # type: ignore[arg-type]
     ).handle(run=run, command=command, checkpoint=checkpoint)
 
-    event = sessions.sessions[0].statements[0].compile(
-        dialect=postgresql.dialect()
-    ).params
+    event = sessions.sessions[0].statements[0].compile(dialect=postgresql.dialect()).params
     assert event["event_type"] == "run_failed"
     assert event["payload"]["trace_id"] == "failure-worker-trace"
 

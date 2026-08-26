@@ -1294,7 +1294,7 @@ function AnalysisCard({
                                             <div style={{ fontSize: '13px', lineHeight: 1.5, color: 'var(--text-secondary)', whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
                                                 {itemPreview}
                                             </div>
-                                            {item.content.length > itemPreview.length && (
+                                            {item.content.length > 360 && (
                                                 <details style={{ marginTop: '8px' }}>
                                                     <summary style={{ cursor: 'pointer', color: 'var(--text-tertiary)', fontSize: '12px', listStyle: 'none' }}>
                                                         {t('agent.chat.showMore')}
@@ -1537,8 +1537,6 @@ function ThoughtDisclosure({
                         lineHeight: 1.5,
                         whiteSpace: 'pre-wrap',
                         wordBreak: 'break-word',
-                        maxHeight: '260px',
-                        overflow: 'auto',
                         minWidth: 0,
                     }}>
                         {text}

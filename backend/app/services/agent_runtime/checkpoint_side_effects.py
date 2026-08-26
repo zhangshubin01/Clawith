@@ -137,11 +137,7 @@ def _waiting_delivery(
             "waiting_user checkpoint requires a correlation ID",
         )
     content = next(
-        (
-            text
-            for field in ("question", "prompt", "reason")
-            if (text := _text_field(waiting.get(field))) is not None
-        ),
+        (text for field in ("question", "prompt", "reason") if (text := _text_field(waiting.get(field))) is not None),
         _WAITING_PROMPT,
     )
     return DeliveryRequest(
@@ -221,9 +217,10 @@ def delivery_from_checkpoint(
     """Derive a user-visible request without consulting a product projection."""
     status = checkpoint.state["lifecycle"]["status"]
     # 卡片模式: bridge 管理终态卡片替换，抑制 ChannelDelivery
-    target = getattr(run, 'delivery_target', None) or {}
+    target = getattr(run, "delivery_target", None) or {}
     if isinstance(target, dict) and target.get("_card_config", {}).get("app_id"):
         from app.services.agent_runtime.card_stream_bridge import get_bridge, unregister_bridge
+
         bridge = get_bridge(str(run.run_id))
         if bridge is not None:
             if status in _TERMINAL_STATUSES:
@@ -238,9 +235,7 @@ def delivery_from_checkpoint(
         return _waiting_delivery(run, checkpoint)
     if status not in _TERMINAL_STATUSES:
         return None
-    failure_code, failure_message = (
-        _failure_metadata(checkpoint) if status == "failed" else (None, None)
-    )
+    failure_code, failure_message = _failure_metadata(checkpoint) if status == "failed" else (None, None)
     return DeliveryRequest(
         tenant_id=run.tenant_id,
         run_id=run.run_id,
@@ -383,9 +378,7 @@ def _runtime_observation_events(
         if not isinstance(provider_call_ids, Mapping):
             additional_kwargs = message.get("additional_kwargs")
             provider_call_ids = (
-                additional_kwargs.get("provider_call_ids")
-                if isinstance(additional_kwargs, Mapping)
-                else {}
+                additional_kwargs.get("provider_call_ids") if isinstance(additional_kwargs, Mapping) else {}
             )
         if not isinstance(provider_call_ids, Mapping):
             provider_call_ids = {}
@@ -405,9 +398,7 @@ def _runtime_observation_events(
                 "reasoning_content": reasoning or "",
                 "assistant_message_id": message_id,
             }
-            provider_call_id = _text_field(
-                raw_call.get("provider_call_id") or provider_call_ids.get(call_id)
-            )
+            provider_call_id = _text_field(raw_call.get("provider_call_id") or provider_call_ids.get(call_id))
             if provider_call_id is not None:
                 detail["provider_call_id"] = provider_call_id
             calls[call_id] = detail
@@ -466,7 +457,14 @@ async def project_direct_tool_history(
     session_id: uuid.UUID,
     run_id: uuid.UUID | None = None,
 ) -> None:
-    """Project every settled direct-chat Tool event into durable chat history."""
+    """Project every settled direct-chat Tool event into durable chat history.
+
+    Contract: ``reasoning_content`` is recovered from the durable "running"
+    Tool event (the settled "done" event omits it, and the checkpoint-projected
+    "done" variant loses the idempotency race), falling back to the done event
+    payload for producers that embed it there. See commit 95482edf for the
+    regression this recovery guards against.
+    """
     existing_result = await db.execute(
         select(ChatMessage.id).where(
             ChatMessage.tenant_id == tenant_id,
@@ -481,8 +479,7 @@ async def project_direct_tool_history(
         select(AgentRunEvent, AgentRun.origin_user_id)
         .join(
             AgentRun,
-            (AgentRun.tenant_id == AgentRunEvent.tenant_id)
-            & (AgentRun.id == AgentRunEvent.run_id),
+            (AgentRun.tenant_id == AgentRunEvent.tenant_id) & (AgentRun.id == AgentRunEvent.run_id),
         )
         .where(
             AgentRunEvent.tenant_id == tenant_id,
@@ -497,16 +494,40 @@ async def project_direct_tool_history(
     if run_id is not None:
         event_query = event_query.where(AgentRunEvent.run_id == run_id)
     event_result = await db.execute(event_query)
-    for event, origin_user_id in event_result.all():
+    events = event_result.all()
+
+    # reasoning_content is written on the durable "running" tool event (the
+    # settled "done" event omits it), so recover it per call_id for the same
+    # Runs. Falls back to the done payload so a producer that embeds
+    # reasoning there keeps working.
+    run_ids = {event.run_id for event, _ in events}
+    reasoning_by_call: dict[str, str] = {}
+    if run_ids:
+        running_reasoning = await db.execute(
+            select(
+                AgentRunEvent.payload["call_id"].as_string(),
+                AgentRunEvent.payload["reasoning_content"].as_string(),
+            ).where(
+                AgentRunEvent.tenant_id == tenant_id,
+                AgentRunEvent.event_type == "status_changed",
+                AgentRunEvent.payload["activity_type"].as_string() == "tool_call",
+                AgentRunEvent.payload["status"].as_string() == "running",
+                AgentRunEvent.run_id.in_(run_ids),
+            )
+        )
+        for row in running_reasoning.all():
+            call_id = row[0]
+            reasoning = row[1]
+            if isinstance(call_id, str) and call_id and isinstance(reasoning, str) and reasoning.strip():
+                reasoning_by_call.setdefault(call_id, reasoning)
+
+    for event, origin_user_id in events:
         if origin_user_id is None:
             continue
         payload = event.payload
         if not isinstance(payload, Mapping):
             continue
-        if (
-            payload.get("activity_type") != "tool_call"
-            or payload.get("status") != "done"
-        ):
+        if payload.get("activity_type") != "tool_call" or payload.get("status") != "done":
             continue
         call_id = _text_field(payload.get("call_id"))
         tool_name = _text_field(payload.get("name"))
@@ -542,10 +563,8 @@ async def project_direct_tool_history(
                 "execution_status": execution_status,
                 "result": str(payload.get("result") or ""),
                 "tool_call_id": call_id,
-                "call_instance_id": (
-                    _text_field(payload.get("call_instance_id")) or call_id
-                ),
-                "reasoning_content": str(payload.get("reasoning_content") or ""),
+                "call_instance_id": (_text_field(payload.get("call_instance_id")) or call_id),
+                "reasoning_content": reasoning_by_call.get(call_id) or str(payload.get("reasoning_content") or ""),
                 **optional_fields,
             },
             ensure_ascii=False,
@@ -617,9 +636,7 @@ async def _record_lifecycle_events(
             .where(
                 AgentRunEvent.tenant_id == run.tenant_id,
                 AgentRunEvent.run_id == run.run_id,
-                AgentRunEvent.event_type.in_(
-                    ("run_completed", "run_failed", "run_cancelled")
-                ),
+                AgentRunEvent.event_type.in_(("run_completed", "run_failed", "run_cancelled")),
             )
             .limit(1)
         )
@@ -849,9 +866,7 @@ class RuntimeCheckpointSideEffects:
             lifecycle = product_checkpoint.state["lifecycle"]
             error = lifecycle.get("error")
             error_code = _text_field(error.get("code")) if isinstance(error, Mapping) else None
-            error_message = (
-                _text_field(error.get("message")) if isinstance(error, Mapping) else None
-            )
+            error_message = _text_field(error.get("message")) if isinstance(error, Mapping) else None
             logger.error(
                 "[RuntimeFailure] run_id={} agent_id={} command_id={} checkpoint_id={} "
                 "reason={} error_code={} error_message={!r}",
@@ -900,10 +915,7 @@ class RuntimeCheckpointSideEffects:
                 and isinstance(receipt.actual_session_id, uuid.UUID)
                 and isinstance(receipt.message_id, uuid.UUID)
             ):
-                if (
-                    delivery.kind == "terminal"
-                    and delivery.lifecycle_status == "completed"
-                ):
+                if delivery.kind == "terminal" and delivery.lifecycle_status == "completed":
                     try:
                         await record_experience_citations(
                             delivery.content,
@@ -912,9 +924,7 @@ class RuntimeCheckpointSideEffects:
                             message_id=receipt.message_id,
                         )
                     except Exception as exc:
-                        logger.warning(
-                            f"[Experience] Citation telemetry failed after delivery commit: {exc}"
-                        )
+                        logger.warning(f"[Experience] Citation telemetry failed after delivery commit: {exc}")
                 try:
                     await publish_stored_group_message(
                         self._session_factory,
