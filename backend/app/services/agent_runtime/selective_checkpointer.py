@@ -175,7 +175,10 @@ class SelectiveCheckpointSaver(BaseCheckpointSaver):
         return self._inner.list(config, *args, **kwargs)
 
     async def alist(self, config: dict[str, Any], *args: Any, **kwargs: Any) -> Any:
-        return await self._inner.alist(config, *args, **kwargs)
+        # alist is an async generator on AsyncPostgresSaver — forward yields,
+        # do not await (awaiting a generator is a TypeError at the call site).
+        async for item in self._inner.alist(config, *args, **kwargs):
+            yield item
 
     def put(self, config: dict[str, Any], checkpoint: Any, metadata: dict[str, Any], new_versions: Any) -> Any:
         return self._inner.put(config, checkpoint, metadata, new_versions)

@@ -38,7 +38,7 @@ class _RecordingSaver:
         self.writes.append((task_id, task_path))
 
     async def alist(self, config, **kwargs):
-        return [f"alist:{config}"]
+        yield f"alist:{config}"
 
     def get_tuple(self, config):
         return f"get_tuple:{config}"
@@ -201,5 +201,5 @@ async def test_base_class_defaults_do_not_shadow_delegation(
     __getattr__ after subclassing, so alist/aget_tuple hit the base class and
     raised instead of reaching the wrapped saver (broke /runtime-state 500s).
     """
-    assert await saver.alist({}) == ["alist:{}"]
+    assert [item async for item in saver.alist({})] == ["alist:{}"]
     assert saver.get_tuple({}) == "get_tuple:{}"
