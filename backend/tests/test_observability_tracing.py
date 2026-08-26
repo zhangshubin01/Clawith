@@ -450,8 +450,32 @@ def test_map_usage_anthropic_input_kept_uncached_semantics() -> None:
     assert usage == {
         "input": 10,
         "output": 10,
-        "total": 20,
+        "total": 24,
         "input_cache_read": 4,
+    }
+
+
+def test_map_usage_total_is_bucket_sum_not_provider_total() -> None:
+    """DeepSeek's total_tokens is a half-credit equivalent (miss + completion +
+    cache_hit/2), not the real token count. Langfuse requires `total` to equal the
+    sum of the detail buckets, otherwise it warns "Sum of provided non-total
+    usage_details buckets exceeds provided total" and token stats under-report.
+    """
+    usage = tracing._map_usage(
+        TokenUsage(
+            total_tokens=23955,  # provider equivalent: 3296 + 1587 + 38144/2
+            input_tokens=41440,  # prompt_tokens including cache hits
+            output_tokens=1587,
+            cache_read_tokens=38144,
+            cache_miss_tokens=3296,
+        ),
+        provider="deepseek",
+    )
+    assert usage == {
+        "input": 3296,
+        "output": 1587,
+        "total": 43027,  # bucket sum (3296 + 1587 + 38144), NOT 23955
+        "input_cache_read": 38144,
     }
 
 

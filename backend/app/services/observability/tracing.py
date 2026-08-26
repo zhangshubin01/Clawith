@@ -251,10 +251,18 @@ def _map_usage(
             usage.input_tokens - usage.cache_read_tokens - usage.cache_creation_tokens,
             0,
         )
+    # Langfuse requires `total` to equal the sum of the detail buckets (it
+    # validates this and warns "Sum of provided non-total usage_details buckets
+    # exceeds provided total" otherwise). Provider totals are not usable for
+    # that: DeepSeek's total_tokens is a half-credit equivalent
+    # (miss + completion + cache_hit/2), and Anthropic/Gemini totals exclude
+    # cache read/write. The detail buckets are the real token counts, so sum
+    # them instead of forwarding the provider total.
+    total_tokens = input_tokens + usage.output_tokens + usage.cache_read_tokens + usage.cache_creation_tokens
     details: dict[str, int] = {
         "input": input_tokens,
         "output": usage.output_tokens,
-        "total": usage.total_tokens,
+        "total": total_tokens,
     }
     if usage.cache_read_tokens:
         details["input_cache_read"] = usage.cache_read_tokens
