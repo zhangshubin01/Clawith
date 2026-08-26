@@ -225,14 +225,34 @@ def mask_text(value: Any) -> Any:
         return repr(value)[:_MAX_STRING_CHARS]
 
 
-def _map_usage(usage: TokenUsage | dict[str, int] | None) -> dict[str, int]:
-    """Map Clawith token accounting onto Langfuse/OTel GenAI usage units."""
+def _map_usage(
+    usage: TokenUsage | dict[str, int] | None,
+    *,
+    provider: str | None = None,
+) -> dict[str, int]:
+    """Map Clawith token accounting onto Langfuse/OTel GenAI usage units.
+
+    Langfuse prices every usage bucket independently and sums the per-bucket
+    costs with no subtraction, so an ``input`` bucket that still contains cache
+    hits would be billed at the (much higher) uncached input price on top of the
+    ``input_cache_read`` price — double-billing every hit token. OpenAI-compatible
+    providers (DeepSeek et al.) include cache hits in ``prompt_tokens``, so for
+    them ``input`` must be reported as the uncached remainder. Anthropic and
+    Gemini report ``input`` already excluding cache read/creation, so they keep
+    the raw value.
+    """
     if usage is None:
         return {}
     if not isinstance(usage, TokenUsage):
         usage = extract_token_usage(usage) or TokenUsage()
+    input_tokens = usage.input_tokens
+    if usage.cache_read_tokens and provider not in ("anthropic", "gemini"):
+        input_tokens = usage.cache_miss_tokens or max(
+            usage.input_tokens - usage.cache_read_tokens - usage.cache_creation_tokens,
+            0,
+        )
     details: dict[str, int] = {
-        "input": usage.input_tokens,
+        "input": input_tokens,
         "output": usage.output_tokens,
         "total": usage.total_tokens,
     }
@@ -246,11 +266,12 @@ def _map_usage(usage: TokenUsage | dict[str, int] | None) -> dict[str, int]:
 class GenerationHandle:
     """Write-side of an in-flight generation observation. All writes are safe."""
 
-    __slots__ = ("_span", "_mask", "_output", "_usage", "_metadata", "_level", "_status")
+    __slots__ = ("_span", "_mask", "_output", "_usage", "_metadata", "_level", "_status", "_provider")
 
-    def __init__(self, span: Any, *, mask: bool) -> None:
+    def __init__(self, span: Any, *, mask: bool, provider: str | None = None) -> None:
         self._span = span
         self._mask = mask
+        self._provider = provider
         self._output: Any = _UNSET
         self._usage: dict[str, int] = {}
         self._metadata: dict[str, Any] = {}
@@ -261,7 +282,7 @@ class GenerationHandle:
         self._output = output
 
     def set_usage(self, usage: TokenUsage | dict[str, int] | None) -> None:
-        self._usage = _map_usage(usage)
+        self._usage = _map_usage(usage, provider=self._provider)
 
     def add_metadata(self, **values: Any) -> None:
         self._metadata.update({key: value for key, value in values.items() if value is not None})
@@ -346,7 +367,7 @@ def observe_generation(
         if prop_cm is not None:
             stack.enter_context(prop_cm)
         with start_cm as span:
-            handle = GenerationHandle(span, mask=True)
+            handle = GenerationHandle(span, mask=True, provider=provider)
             handle.add_metadata(**identity)
             try:
                 yield handle

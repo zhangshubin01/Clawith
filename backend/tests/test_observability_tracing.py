@@ -337,11 +337,22 @@ def test_observe_generation_records_output_usage_and_identity(
     ) as gen:
         assert gen is not None
         gen.set_output("hello")
-        gen.set_usage(TokenUsage(total_tokens=7, input_tokens=3, output_tokens=4, cache_read_tokens=2))
+        # DeepSeek counts cache hits inside prompt_tokens: input=3 = hit 2 + miss 1.
+        # Langfuse prices buckets independently (no subtraction), so `input` must
+        # be reported as the uncached remainder to avoid double-billing hits.
+        gen.set_usage(
+            TokenUsage(
+                total_tokens=7,
+                input_tokens=3,
+                output_tokens=4,
+                cache_read_tokens=2,
+                cache_miss_tokens=1,
+            )
+        )
 
     update = span.updates[-1]
     assert update["output"] == "hello"
-    assert update["usage_details"] == {"input": 3, "output": 4, "total": 7, "input_cache_read": 2}
+    assert update["usage_details"] == {"input": 1, "output": 4, "total": 7, "input_cache_read": 2}
     assert update["metadata"]["agent_id"] == "a-1"
     assert update["metadata"]["provider"] == "deepseek"
     assert "latency_ms" in update["metadata"]
@@ -407,4 +418,46 @@ def test_mask_text_redacts_bearer_and_aws_keys() -> None:
 
 def test_map_usage_from_provider_dict() -> None:
     usage = tracing._map_usage({"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15})
+    assert usage == {"input": 10, "output": 5, "total": 15}
+
+
+def test_map_usage_deepseek_cache_hits_not_double_billed() -> None:
+    """DeepSeek reports hits inside prompt_tokens; input must be the miss only."""
+    usage = tracing._map_usage(
+        {
+            "prompt_tokens": 10,
+            "completion_tokens": 5,
+            "total_tokens": 15,
+            "prompt_cache_hit_tokens": 6,
+            "prompt_cache_miss_tokens": 4,
+        },
+        provider="deepseek",
+    )
+    assert usage == {
+        "input": 4,
+        "output": 5,
+        "total": 15,
+        "input_cache_read": 6,
+    }
+
+
+def test_map_usage_anthropic_input_kept_uncached_semantics() -> None:
+    """Anthropic's input_tokens already exclude cache read; keep it unchanged."""
+    usage = tracing._map_usage(
+        TokenUsage(total_tokens=20, input_tokens=10, output_tokens=10, cache_read_tokens=4),
+        provider="anthropic",
+    )
+    assert usage == {
+        "input": 10,
+        "output": 10,
+        "total": 20,
+        "input_cache_read": 4,
+    }
+
+
+def test_map_usage_no_cache_keeps_input_as_is() -> None:
+    usage = tracing._map_usage(
+        TokenUsage(total_tokens=15, input_tokens=10, output_tokens=5),
+        provider="deepseek",
+    )
     assert usage == {"input": 10, "output": 5, "total": 15}
