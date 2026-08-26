@@ -217,6 +217,16 @@ class Settings(BaseSettings):
     GROUP_CONTEXT_MEMORY_MAX_CHARS: int = Field(default=12000, gt=0)
     GROUP_CONTEXT_WORKSPACE_MAX_ENTRIES: int = Field(default=100, gt=0)
     AGENT_RUNTIME_CHECKPOINT_RETENTION_DAYS: int = Field(default=30, gt=0)
+    # Periodic runtime checkpoint recycling (L3 thread retention): reuses
+    # app.scripts.prune_runtime_checkpoints with the same safety rails
+    # (busy threads skipped, newest-checkpoint min-age guard, blob GC by
+    # channel-version reachability). First pass is delayed so a container
+    # start never races its own bootstrap; a failed pass never kills the
+    # loop. Set INTERVAL_SECONDS=0 to disable the background pass.
+    AGENT_RUNTIME_CHECKPOINT_RETENTION_INTERVAL_SECONDS: float = Field(default=86400.0, ge=0)
+    AGENT_RUNTIME_CHECKPOINT_RETENTION_FIRST_DELAY_SECONDS: float = Field(default=300.0, ge=0)
+    AGENT_RUNTIME_CHECKPOINT_RETENTION_KEEP_PER_THREAD: int = Field(default=3, ge=1)
+    AGENT_RUNTIME_CHECKPOINT_RETENTION_MIN_AGE_DAYS: int = Field(default=3, ge=0)
     AGENT_RUNTIME_EVENT_PAYLOAD_MAX_BYTES: int = Field(default=16384, gt=0)
     AGENT_RUNTIME_TOOL_RESULT_INLINE_MAX_BYTES: int = Field(default=8192, gt=0)
     MAX_AGENT_CYCLE_COUNT: int = Field(default=5, gt=0)
