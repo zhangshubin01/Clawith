@@ -1,8 +1,6 @@
-# ADR 0003: 部署锁与部署注册表（多会话部署避让）
+# ADR-0003: 部署锁与部署注册表（多会话部署避让）
 
-- **状态**: Accepted
-- **日期**: 2026-08-26
-- **决策者**: 用户（访谈逐条确认）+ 本会话
+- **状态**: 已接受（2026-08-26）
 
 ## 背景
 
@@ -28,13 +26,17 @@
 
 ## 实现形态
 
-- `scripts/deploy_guard.py`（stdlib only，~150 行）：
+- `scripts/deploy_guard.py`（stdlib only）：
   - `lock <state_dir> <timeout_seconds> <commit> <scope> -- <cmd...>`：`fcntl.flock` 排他锁（0.2s 轮询直至超时，超时 exit 9 + stderr 提示；timeout=0 即 --no-wait）→ 写注册表 `active` 条目 → 子进程跑 cmd（SIGTERM/SIGINT 转发）→ 结束后清 `active`、按成功/失败追加 `last_deploys`（保留 20 条）→ 以子进程退出码退出。锁在进程死亡时由内核自动释放。
-  - `check <state_dir> <target_commit>`：取注册表最近一次部署 commit，`git log --oneline <baseline>..<target>` 展示；有未部署提交 exit 1（供 `--strict` 中止），否则 exit 0。无基线时提示并 exit 0。
+  - `check <state_dir> <target_commit>`：取注册表最近一次**成功**部署 commit 为基线，`git log --oneline <baseline>..<target>` 展示；有未部署提交 exit 1（供 `--strict` 中止），否则 exit 0。无基线时提示并 exit 0。失败条目不参与基线（失败部署并未改变运行镜像）。
 - 注册表 JSON：`{"active": {pid, started_at, target_commit, scope} | null, "last_deploys": [{at, commit, image_sha, scope, success}]}`。
 - `deploy.sh`：解析参数后若未处于锁定态，则 `exec python3 scripts/deploy_guard.py lock ... -- "$0" "$@"` 整段重入；新增 `--no-wait` / `--strict` 标志；成功后镜像 sha 由 deploy.sh 写入 marker 供注册表记录。
 - `restart.sh` docker 分支：同样以 guard 锁包裹（轻量：等待 600s、不 strict）。
 - 回滚：skill 中固化为「回滚命令一律在 guard 锁下执行」的一行式。
+
+## 回滚
+
+机制本身无持久状态依赖：删除 `scripts/deploy_guard.py`、撤销 deploy.sh/restart.sh 的锁重入块、删除 `.clawith-deploy/`（gitignored）即可回到无锁部署。运行中的容器不受影响（锁仅作用于部署时机）。
 
 ## 后果
 

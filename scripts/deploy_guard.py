@@ -86,6 +86,7 @@ def _lock(args: argparse.Namespace) -> int:
             acquired = True
             break
         except OSError:
+            # 锁被他人持有（EAGAIN/EWOULDBLOCK）——唯一预期路径，继续轮询。
             if args.timeout == 0 or time.monotonic() >= deadline:
                 break
             time.sleep(0.2)
@@ -149,14 +150,18 @@ def _lock(args: argparse.Namespace) -> int:
     return rc
 
 
-def _check(args: argparse.Namespace) -> int:
+def _tip_check(args: argparse.Namespace) -> int:
     state_dir = Path(args.state_dir)
     entries = _load_registry(state_dir).get("last_deploys") or []
+    # 基线=最近一次**成功**部署；失败部署并未改变运行镜像，不能当基线
+    # （否则下一次 check 会漏报真正将上线的提交）。
     baseline = next(
         (
             entry["commit"]
             for entry in entries
-            if isinstance(entry.get("commit"), str) and entry["commit"]
+            if isinstance(entry.get("commit"), str)
+            and entry["commit"]
+            and entry.get("success") is True
         ),
         None,
     )
@@ -214,7 +219,7 @@ def main(argv: list[str] | None = None) -> int:
             print("[deploy-guard] lock 需要 -- <命令...>", file=sys.stderr)
             return 2
         return _lock(args)
-    return _check(args)
+    return _tip_check(args)
 
 
 if __name__ == "__main__":

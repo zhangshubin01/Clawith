@@ -36,7 +36,8 @@ NO_WAIT=0
 STRICT=0
 
 usage() {
-    sed -n '2,21p' "$0" | sed 's/^# \{0,1\}//'
+    # 打印两个 "=====" 围栏之间的头注释，避免行号与注释行数耦合。
+    awk '/^# =+$/{n++; next} n==1{print substr($0,3)} n==2{exit}' "$0"
     exit 0
 }
 
@@ -65,8 +66,10 @@ if [ "$NO_WAIT" = 1 ]; then LOCK_TIMEOUT=0; fi
 if [ "${CLAWITH_DEPLOY_LOCKED:-}" != "1" ]; then
     SCOPE="backend"
     if [ "$WITH_FRONTEND" = 1 ]; then SCOPE="backend+frontend"; fi
+    # 用绝对路径重入（$0 可能是相对路径，cd 后已失效）。
     CLAWITH_DEPLOY_LOCKED=1 exec "$PY" "$REPO_ROOT/scripts/deploy_guard.py" lock \
-        "$STATE_DIR" "$LOCK_TIMEOUT" "$(git rev-parse --short "$COMMIT")" "$SCOPE" -- "$0" "$@"
+        "$STATE_DIR" "$LOCK_TIMEOUT" "$(git rev-parse --short "$COMMIT")" "$SCOPE" -- \
+        "$REPO_ROOT/scripts/deploy.sh" "$@"
 fi
 
 # ── 0) 预检 ────────────────────────────────────────────────
