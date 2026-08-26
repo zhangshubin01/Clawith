@@ -80,10 +80,9 @@ if [ ! -e "$WORKTREE/ss-nodes.json" ]; then
     ln -s "$REPO_ROOT/ss-nodes.json" "$WORKTREE/ss-nodes.json"
 fi
 
-# ── 3) 稳定挂载源 + 部署态配置 ─────────────────────────────
+# ── 3) 稳定挂载源 ──────────────────────────────────────────
 export CLAWITH_SS_NODES_JSON="$REPO_ROOT/ss-nodes.json"
 export CLAWITH_NGINX_TEMPLATE="$REPO_ROOT/frontend/nginx.conf.template"
-export CHECKPOINT_SELECTIVE_ENABLED="${CHECKPOINT_SELECTIVE_ENABLED:-true}"
 
 # ── 4) 回滚标签（红线 3：build/up 之前立刻打）──────────────
 OLD_IMG=$(docker inspect "${COMPOSE_PROJECT}-backend-1" --format '{{.Image}}' 2>/dev/null || true)
@@ -98,10 +97,12 @@ else
     echo "⚠️  未找到运行中的 backend 容器，跳过回滚标签"
 fi
 
-# ── 5) 构建（默认）——清华 pip 源为必填 build-arg ───────────
+# ── 5) 构建（默认）——阿里云 pip 源为必填 build-arg ─────────
+# 阿里云 mirrors.aliyun.com：清华 tuna 对 aarch64 wheel 下载会卡 ~20min，
+# 阿里云秒过（2026-08-26 构建插曲教训）。
 if [ "$BUILD" = 1 ]; then
-    export CLAWITH_PIP_INDEX_URL="${CLAWITH_PIP_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple}"
-    export CLAWITH_PIP_TRUSTED_HOST="${CLAWITH_PIP_TRUSTED_HOST:-pypi.tuna.tsinghua.edu.cn}"
+    export CLAWITH_PIP_INDEX_URL="${CLAWITH_PIP_INDEX_URL:-https://mirrors.aliyun.com/pypi/simple/}"
+    export CLAWITH_PIP_TRUSTED_HOST="${CLAWITH_PIP_TRUSTED_HOST:-mirrors.aliyun.com}"
     echo "→ 构建 backend 镜像..."
     docker compose --env-file "$WORKTREE/.env" -p "$COMPOSE_PROJECT" -f docker-compose.yml build backend
 fi
