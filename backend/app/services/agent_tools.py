@@ -12,7 +12,7 @@ The agent reads/writes these files directly. No per-concept tools needed.
 """
 
 import asyncio
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
 import fnmatch
@@ -419,6 +419,69 @@ async def _get_tool_config(agent_id: Optional[uuid.UUID], tool_name: str) -> Opt
 channel_file_sender: ContextVar = ContextVar('channel_file_sender', default=None)
 # For web chat: agent_id needed to build download URL
 channel_web_agent_id: ContextVar = ContextVar('channel_web_agent_id', default=None)
+
+
+def _feishu_card_file_sender(context) -> Callable[[Path, str], Awaitable[None]]:
+    """Build the channel_file_sender for a Feishu card-mode Runtime run.
+
+    Delivers files to the conversation the run originated from — the group
+    that posted the task (receive_id_type=chat_id) or the p2p user. This is
+    what makes send_channel_file *without* target_member_id send the file
+    back to the same group the task came from.
+    """
+    from app.services.feishu_service import feishu_service
+
+    receive_id = getattr(context, "card_receive_id", "") or ""
+    receive_id_type = getattr(context, "card_receive_id_type", "") or "open_id"
+    card_app_id = getattr(context, "card_app_id", "") or ""
+    card_app_secret = getattr(context, "card_app_secret", "") or ""
+    agent_id = getattr(context, "agent_id", "") or ""
+
+    async def send(file_path: Path, accompany_msg: str = "") -> None:
+        if not receive_id:
+            raise RuntimeError(
+                "channel_file_sender: this run has no Feishu conversation target"
+            )
+        app_id, app_secret = card_app_id, card_app_secret
+        # chat_intake strips app_secret from the persisted delivery target,
+        # so fall back to the channel config like the card bridge does.
+        if not app_secret and app_id and agent_id:
+            from sqlalchemy import select
+
+            from app.database import async_session
+            from app.models.channel_config import ChannelConfig
+
+            async with async_session() as db:
+                result = await db.execute(
+                    select(ChannelConfig).where(
+                        ChannelConfig.agent_id == uuid.UUID(agent_id),
+                        ChannelConfig.channel_type == "feishu",
+                        ChannelConfig.app_id == app_id,
+                    )
+                )
+                cfg = result.scalars().first()
+                if cfg and cfg.app_secret:
+                    app_secret = cfg.app_secret
+        if not app_id or not app_secret:
+            raise RuntimeError(
+                "channel_file_sender: Feishu app credentials unavailable for this run"
+            )
+        result = await feishu_service.upload_and_send_file(
+            app_id,
+            app_secret,
+            receive_id,
+            str(file_path),
+            receive_id_type=receive_id_type,
+            accompany_msg=accompany_msg,
+        )
+        if isinstance(result, dict) and result.get("code") not in (None, 0):
+            raise RuntimeError(
+                f"Feishu file send failed: code={result.get('code')} msg={result.get('msg')}"
+            )
+
+    return send
+
+
 # Set by Feishu channel handler — open_id of the message sender so calendar tool
 # can auto-invite them as attendee when no explicit attendee list is given
 channel_feishu_sender_open_id: ContextVar = ContextVar('channel_feishu_sender_open_id', default=None)
@@ -7330,12 +7393,17 @@ async def _send_channel_file(agent_id: uuid.UUID, ws: Path, arguments: dict) -> 
             accompany_msg,
         )
 
-    # Priority 2: channel-initiated (ContextVar set by channel webhook handler)
+    # Priority 2: channel-initiated (ContextVar set by the runtime tool step
+    # for channel-sourced runs — the file goes back to the conversation the
+    # task came from, e.g. the Feishu group that posted it).
     sender = channel_file_sender.get()
     if sender is not None:
         try:
             await sender(file_path, accompany_msg)
-            return f"File '{file_path.name}' sent to user via channel."
+            return (
+                f"File '{file_path.name}' sent to the current conversation "
+                "via the channel it came from."
+            )
         except Exception as e:
             return f"Failed to send file: {e}"
 

@@ -1536,6 +1536,19 @@ class RuntimeToolStepService:
                 arguments=arguments,
             )
             executor_arguments["runtime_authorization"] = runtime_authorization
+        # Channel-sourced runs (Feishu card mode): arm the channel file
+        # sender so send_channel_file without target_member_id delivers back
+        # to the conversation the task came from (the posting group / user).
+        channel_token = None
+        if getattr(context, "card_mode", False) and getattr(context, "card_receive_id", ""):
+            from app.services.agent_tools import (
+                _feishu_card_file_sender,
+                channel_file_sender,
+            )
+
+            channel_token = channel_file_sender.set(
+                _feishu_card_file_sender(context)
+            )
         try:
             if accepted.entry.binding.kind == "mcp":
                 executor_arguments["execution_binding"] = accepted.entry.binding.to_json()
@@ -1551,6 +1564,8 @@ class RuntimeToolStepService:
                 )
             )
         finally:
+            if channel_token is not None:
+                channel_file_sender.reset(channel_token)
             if agentbay_run_token is not None:
                 agentbay_run_scope_id.reset(agentbay_run_token)
         cancel_task = asyncio.create_task(self._wait_for_tool_cancel(cancel_token))
