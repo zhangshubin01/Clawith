@@ -4541,6 +4541,44 @@ export default function AgentDetailPage() {
         dispatchChatMessage(activeSocket, activeRuntimeKey, payload);
     };
 
+    const handleRegenerateAnswer = () => {
+        // Network interruption after visible output: the run paused in
+        // waiting_user (reason=network_interrupted). Regenerate = resume with
+        // a fixed instruction so the model re-answers from the partial state
+        // instead of duplicating the published half-answer.
+        if (!id || !activeSession?.id) return;
+        const activeRuntimeKey = buildSessionRuntimeKey(id, String(activeSession.id));
+        const activeSocket = wsMapRef.current[activeRuntimeKey];
+        const currentRun = sessionActiveRunRef.current[activeRuntimeKey];
+        if (
+            currentRun?.status !== 'waiting_user'
+            || currentRun.waitingReason !== 'network_interrupted'
+            || !currentRun.canResume
+            || !currentRun.correlationId
+        ) {
+            return;
+        }
+        const regenMsg = t(
+            'agent.chat.regenerateAnswerMessage',
+            '（网络中断，回答未完成。请重新生成完整回答。）',
+        );
+        const pending: PendingChatMessage = {
+            runtimeKey: activeRuntimeKey,
+            contentForLLM: regenMsg,
+            userMsg: regenMsg,
+            fileName: '',
+            modelId: effectiveChatModelId,
+            resumeRunId: currentRun.runId,
+            resumeCorrelationId: currentRun.correlationId,
+        };
+        if (activeSocket?.readyState === WebSocket.OPEN) {
+            dispatchChatMessage(activeSocket, activeRuntimeKey, pending);
+        } else if (token) {
+            pendingChatSendRef.current = pending;
+            ensureSessionSocket(activeSession, id, token);
+        }
+    };
+
     const handleChatFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
         const files = Array.from(e.target.files || []);
         if (!files.length) return;
@@ -7281,6 +7319,21 @@ export default function AgentDetailPage() {
                                                                 </div>
                                                             </div>
                                                         ))}
+                                                    {selectedSessionActiveRun?.status === 'waiting_user'
+                                                        && selectedSessionActiveRun.waitingReason === 'network_interrupted'
+                                                        && selectedSessionActiveRun.canResume && (
+                                                        <div className="chat-network-interrupted">
+                                                            <IconAlertTriangle size={16} />
+                                                            <span>{t('agent.chat.networkInterrupted', '网络中断，回答未完成。可重新生成或输入新指令继续。')}</span>
+                                                            <button
+                                                                type="button"
+                                                                className="btn btn-primary"
+                                                                onClick={handleRegenerateAnswer}
+                                                            >
+                                                                {t('agent.chat.regenerateAnswer', '重新生成')}
+                                                            </button>
+                                                        </div>
+                                                    )}
                                                     {(chatUploadDrafts.length > 0 || attachedFiles.length > 0) && (
                                                         <div className="chat-composer-attachments">
                                                             {chatUploadDrafts.map((draft) => (

@@ -7323,6 +7323,25 @@ select:focus {
   font-size: 12px;
 }
 
+.chat-network-interrupted {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 8px;
+  padding: 10px;
+  border: 1px solid rgba(59, 130, 246, 0.35);
+  border-radius: 8px;
+  background: rgba(59, 130, 246, 0.08);
+  color: var(--text-primary);
+  font-size: 13px;
+}
+
+.chat-network-interrupted .btn {
+  margin-left: auto;
+  padding: 4px 12px;
+  font-size: 12px;
+}
+
 .analysis-tool-reconciliation__status {
   display: flex;
   align-items: center;
