@@ -7,16 +7,19 @@ const agentDetail = readFileSync(
   'utf8',
 );
 
-test('analysis thinking preview keeps its expand toggle aligned with truncation', () => {
-  // The "show more" toggle must mirror the 360-char truncation condition.
-  // Regression guard: when the toggle checked `itemPreview.length`, a
-  // 361-363 char thinking item was truncated without any way to expand it.
-  assert.match(
-    agentDetail,
-    /item\.content\.length > 360 \? item\.content\.slice\(0, 360\)\.trimEnd\(\) \+ '\.\.\.' : item\.content/,
+test('analysis thinking items render the full reasoning text', () => {
+  // Regression guard: thinking items used a 360-char preview plus a
+  // collapsible "show more"; long reasoning stages (up to tens of KB per
+  // model step) therefore always looked truncated in the analysis trace.
+  // The full content must render inline, with no preview slicing.
+  assert.doesNotMatch(agentDetail, /itemPreview/);
+  assert.doesNotMatch(agentDetail, /item\.content\.slice\(0, 360\)/);
+  assert.doesNotMatch(agentDetail, /item\.content\.length > 360/);
+  assert.doesNotMatch(agentDetail, /agent\.chat\.showMore/);
+  const thinkingRow = agentDetail.match(
+    /if \(item\.type === 'thinking'\) \{[\s\S]*?\{item\.content\}/,
   );
-  assert.match(agentDetail, /\{item\.content\.length > 360 && \(/);
-  assert.doesNotMatch(agentDetail, /item\.content\.length > itemPreview\.length/);
+  assert.ok(thinkingRow, 'thinking items must render {item.content}');
 });
 
 test('thought disclosure renders the full reasoning without a scroll clamp', () => {
