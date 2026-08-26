@@ -77,3 +77,13 @@ Clawith 执行模型：**一个 run = 一个 start command**（`langgraph_driver
 - LangGraph 官方：`docs.langchain.com/oss/python/langgraph/checkpointers.md`（super-step 边界、pending writes、durability modes、StateSnapshot/parent_config 语义）
 - 引擎源码（容器 1.2.11）：`pregel/_checkpoint.py`（delta snapshot/ancestor walk）、`pregel/_loop.py`（exit 模式 `_exit_delta_writes`）、`channels/delta.py`（`snapshot_frequency=1000`）
 - 官方 API 面：`AsyncPostgresSaver` 仅 `adelete_thread` 线程级删除，无单 checkpoint 删除——wrapper 层不存在「安全跳过」的空间。
+
+## 六、exit 模式的恢复重放语义（2026-08-26 补充，事故驱动）
+
+**事故**：run f7e7e5a0 执行中途（18 个工具已 succeeded，全部只在台账）后端容器被重建 → 中间零 checkpoint → 恢复（attempt 2）时模型重新生成相同内容的消息：`assistant_message_id`/`tool_call_id` 为确定性 uuid5（相同输入→相同 id），而 `provider_call_id`（DeepSeek 每次响应的 `call_00_xxx`）是新随机值 → `_require_exact_request` 将 provider_call_id 差异当「不可变输入冲突」raise `tool_call_idempotency_mismatch` → run 被杀。
+
+**修复（d6df1c11）**：provider_call_id 从幂等身份检查移除（它是 provider 相关性字段，非 runtime 身份——与 1dbad6d9 声明意图「separate Provider correlation from Runtime identity」一致，其实现当时存在偏差），差异降级为 warning；重放交给 `_decision_for_existing`：succeeded→复用结果、started→按 lease/attempt（blocked/reconcile/重试）、failed→prior_failure、unknown→reconciliation。其余身份字段（tool_name/assistant_message_id/arguments_hash/request_ref/contract_version/effect/retry_policy/sanitized_arguments）检查不变。
+
+**剩余边界（设计权衡，非缺陷）**：恢复后模型输出与 attempt 1 有实质差异（参数/工具名变化）时 `arguments_hash` mismatch 仍 fail-closed——刻意保留（参数不同可能是真不同请求），重放语义只覆盖「完全相同输入」。
+
+**How to apply**：exit 模式下任何中途被打断的 run 都会以「重放」恢复；台账（agent_tool_executions）是恢复正确性的权威，任何「确定性 id 重放」路径都必须幂等复用而非失败。

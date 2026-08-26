@@ -737,6 +737,38 @@ async def test_terminal_replay_with_different_provider_call_id_reuses_result():
     assert decision.reusable_result is not None
     assert decision.reusable_result.status == "succeeded"
     assert decision.reusable_result.result_summary == "delivered"
+    assert decision.reusable_result.result_ref == "result://1"
+
+
+@pytest.mark.asyncio
+async def test_concurrent_winner_replay_with_different_provider_call_id_reuses_result():
+    """IntegrityError path: a concurrent winner with a replayed provider call
+    id (recovery) must not fail closed either."""
+    tenant_id = uuid.uuid4()
+    run_id = uuid.uuid4()
+    winner = _execution(
+        tenant_id=tenant_id,
+        run_id=run_id,
+        status="succeeded",
+        result_summary="delivered",
+    )
+    winner.provider_call_id = "call_00_originalProviderCall"
+    conflict = IntegrityError(
+        statement="INSERT INTO agent_tool_executions",
+        params={},
+        orig=Exception("uq_agent_tool_executions_run_tool_call"),
+    )
+    db = _FakeSession(run_id, None, winner, flush_errors=(conflict,))
+
+    decision = await _reserve(
+        db,
+        tenant_id=tenant_id,
+        run_id=run_id,
+        provider_call_id="call_00_replayedProviderCall",
+    )
+
+    assert decision.reusable_result is not None
+    assert decision.reusable_result.status == "succeeded"
 
 
 @pytest.mark.asyncio

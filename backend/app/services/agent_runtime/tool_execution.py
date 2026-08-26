@@ -1006,14 +1006,15 @@ def _require_exact_request(
     # replay after a mid-run restart (durability="exit" drops intermediate
     # checkpoints) regenerates the same runtime identity with a fresh
     # provider_call_id; that is a legal idempotent hit, not a conflict. The
-    # request identity is fully covered by tool_name/assistant_message_id/
-    # arguments_hash/effect/retry_policy/sanitized_arguments above. Keep the
-    # divergence visible for audit but do not fail closed on it.
+    # request identity is fully covered by the tool_name/assistant_message_id/
+    # arguments_hash checks above plus the contract_version, effect,
+    # retry_policy and sanitized_arguments checks below. Keep the divergence
+    # visible for audit but do not fail closed on it.
     stored_provider_call_id = getattr(existing, "provider_call_id", None)
     if stored_provider_call_id is not None and stored_provider_call_id != provider_call_id:
         logger.warning(
             "[ToolExecution] provider_call_id drift on {}: stored={!r} incoming={!r} "
-            "(replay after recovery is expected; result reused by decision)",
+            "(replay after recovery is expected; outcome decided by execution state)",
             existing.tool_call_id,
             stored_provider_call_id,
             provider_call_id,
