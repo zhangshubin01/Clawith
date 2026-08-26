@@ -977,6 +977,7 @@ async def test_defer_without_attempt_stall_keeps_attempt_and_returns_fence_wait_
     assert command.attempt_count == 1
     assert command.deferred_until is None
     assert command.deferred_started_at is None
+    assert command.error_code == "tool_fence_wait_exhausted"
     defer.assert_not_awaited()
 
 
@@ -1015,6 +1016,48 @@ async def test_defer_without_attempt_without_lease_deadline_uses_jitter_window_o
     assert result == "safe_read_result_reconciliation_pending"
     deferred_until = defer.await_args.kwargs["deferred_until"]
     assert now <= deferred_until <= now + timedelta(seconds=5)
+
+
+@pytest.mark.asyncio
+async def test_stall_surfaces_tool_fence_wait_exhausted_without_raising(
+    _stub_business_attempt_boundary,
+) -> None:
+    timeline: list[str] = []
+    run = _run()
+    command = _command(run, "start")
+    worker = _worker(
+        timeline=timeline,
+        run=run,
+        reader=_Reader(command=(None,), latest=(None,)),
+        executor=_Executor(
+            timeline,
+            error=ToolExecutionReconciliationPending(
+                "safe_read_attempt_active",
+                "A safe read attempt still owns the active receipt",
+                defer_without_attempt=True,
+                lease_expires_at=datetime(2026, 7, 13, 12, 5, tzinfo=UTC),
+            ),
+        ),
+    )
+    # A fence that outlived the defer window is a stall: the worker reports
+    # it as a plain retry result instead of raising, so the run span exits
+    # cleanly (DEFAULT level, no ERROR observation).
+    worker._defer_without_attempt = AsyncMock(  # type: ignore[method-assign]
+        return_value="tool_fence_wait_exhausted"
+    )
+
+    with patch(
+        "app.services.agent_runtime.command_worker.claim_next_command",
+        new=AsyncMock(return_value=command),
+    ):
+        result = await worker.run_once()
+
+    assert result.status == "retry"
+    assert result.error_code == "tool_fence_wait_exhausted"
+    worker._defer_without_attempt.assert_awaited_once()  # type: ignore[attr-defined]
+    assert worker._defer_without_attempt.await_args.kwargs["lease_expires_at"] == datetime(  # type: ignore[attr-defined]
+        2026, 7, 13, 12, 5, tzinfo=UTC
+    )
 
 
 @pytest.mark.asyncio

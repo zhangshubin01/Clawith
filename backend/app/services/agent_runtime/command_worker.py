@@ -696,6 +696,7 @@ class RuntimeCommandWorker:
                 ):
                     released.deferred_until = None
                     released.deferred_started_at = None
+                    released.error_code = "tool_fence_wait_exhausted"
                     await db.flush()
                     return "tool_fence_wait_exhausted"
                 released.attempt_count -= 1
