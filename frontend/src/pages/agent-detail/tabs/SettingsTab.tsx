@@ -4,6 +4,7 @@ import { useTranslation } from 'react-i18next';
 
 import AgentCredentials from '../../../components/AgentCredentials';
 import ChannelConfig from '../../../components/ChannelConfig';
+import GitlabBinding from '../../../components/GitlabBinding';
 import OpenClawSettings from '../../OpenClawSettings';
 import { agentApi } from '../../../services/api';
 
@@ -402,6 +403,8 @@ export default function SettingsTab(props: Props) {
             <div style={{ marginBottom: '12px' }}>
                 <ChannelConfig mode="edit" agentId={agentId} canManage={canManage} />
             </div>
+
+            <GitlabBinding agentId={agentId} canManage={canManage} />
 
             {canManage && <div className="card" style={{ borderColor: 'var(--error)' }}>
                 <h4 style={{ color: 'var(--error)', marginBottom: '12px' }}>{t('agent.settings.danger.title')}</h4>

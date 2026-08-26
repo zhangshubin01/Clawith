@@ -61,6 +61,7 @@ from app.api.gateway import router as gateway_router
 from app.api.admin import router as admin_router
 from app.api.pages import router as pages_router, public_router as pages_public_router
 from app.api.agent_credentials import router as credentials_router
+from app.api.gitlab_binding import router as gitlab_binding_router
 from app.api.agentbay_control import router as agentbay_control_router
 from app.api.okr import router as okr_router
 from app.api.onboarding import router as onboarding_router
@@ -501,6 +502,7 @@ app.include_router(admin_router, prefix=settings.API_PREFIX)
 app.include_router(pages_router, prefix=settings.API_PREFIX)
 app.include_router(pages_public_router)  # Public endpoint for /p/{short_id}, no API prefix
 app.include_router(credentials_router, prefix=settings.API_PREFIX)
+app.include_router(gitlab_binding_router, prefix=settings.API_PREFIX)
 app.include_router(agentbay_control_router, prefix=settings.API_PREFIX)
 app.include_router(okr_router)  # OKR — self-prefixed at /api/okr
 app.include_router(onboarding_router, prefix=settings.API_PREFIX)

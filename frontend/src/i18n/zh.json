@@ -598,6 +598,24 @@
         "activeHoursDesc": "仅在这些时间触发心跳（HH:MM-HH:MM）",
         "lastRun": "上次心跳"
       },
+      "gitlab": {
+        "title": "GitLab 绑定",
+        "desc": "绑定后自动拉取/初始化代码仓库（纯 git 方式）。每个数字员工绑定一个 GitLab Token 与一个项目。",
+        "token": "GitLab Token",
+        "tokenPlaceholder": "glpat-…",
+        "tokenKeepHint": "已配置（留空则保留现有 Token）",
+        "tokenRequired": "首次绑定必须填写 GitLab Token",
+        "project": "项目路径",
+        "branch": "默认分支",
+        "statusInitializing": "初始化中…",
+        "statusDone": "✓ 仓库就绪",
+        "statusFailed": "✗ 失败",
+        "retry": "重试",
+        "unbind": "解绑",
+        "confirmUnbind": "确认解绑",
+        "confirmChangeProject": "项目路径变更需要手动清空工作区后重新保存才会重新初始化。继续保存？",
+        "unbindHint": "解绑后仓库文件保留，但数字员工无法再推送。"
+      },
       "perm": {
         "title": "访问权限",
         "description": "控制可见范围、Plaza 可用性，以及谁可以管理此数字员工。只有创建者或管理员可以更改此设置。",

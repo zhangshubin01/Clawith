@@ -146,6 +146,9 @@ class Settings(BaseSettings):
     S3_MAX_POOL_CONNECTIONS: int = 50
     S3_WRITE_WORKERS: int = 32
 
+    # GitLab agent binding (纯 git CLI 链路，见 docs/technical-plans/20260820-gitlab-agent-binding)
+    GITLAB_BASE_URL: str = "http://192.168.5.254"
+
     # Process role
     PROCESS_ROLE: str = "all"
     APP_WORKERS: int = 1

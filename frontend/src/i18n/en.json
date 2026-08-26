@@ -487,6 +487,24 @@
       "messages": "Messages"
     },
     "settings": {
+      "gitlab": {
+        "title": "GitLab Binding",
+        "desc": "Binds one GitLab token and one project to this agent; the workspace repo is initialized automatically (pure git).",
+        "token": "GitLab Token",
+        "tokenPlaceholder": "glpat-…",
+        "tokenKeepHint": "Configured (leave blank to keep the current token)",
+        "tokenRequired": "A GitLab token is required for the first binding",
+        "project": "Project path",
+        "branch": "Default branch",
+        "statusInitializing": "Initializing…",
+        "statusDone": "✓ Repository ready",
+        "statusFailed": "✗ Failed",
+        "retry": "Retry",
+        "unbind": "Unbind",
+        "confirmUnbind": "Confirm unbind",
+        "confirmChangeProject": "Changing the project path requires manually clearing the workspace and saving again. Continue?",
+        "unbindHint": "Unbinding keeps the repository files, but the agent can no longer push."
+      },
       "title": "Agent Settings",
       "modelConfig": "Model Config",
       "primaryModel": "Primary Model",
