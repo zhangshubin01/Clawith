@@ -29,3 +29,18 @@ safe read execution 处于 started 且 lease 未到期时，对同 call_id 的�
 lease 到期后对未 settle 的 execution 的兜底处理：探测真实结果、标记不可用，或关闭孤儿收据。
 
 _Avoid_: retry（defer 与 attempt 重试是两种机制，勿混用）、recovery、fencing
+
+## Deployment Coordination
+
+多会话共享同一宿主/仓库/compose project 时的部署协作词汇（机制见 ADR 0003）。
+
+**Deploy Lock（部署锁）**:
+仓库内 `.clawith-deploy/deploy.lock` 上的全局排他 fcntl 内核锁，串行化所有部署/回滚（deploy.sh、restart.sh docker 分支）。持有者进程死亡即自动释放；等待超时（默认 600s）或 `--no-wait` 时以固定退出码 9 失败。
+
+**Deploy Registry（部署注册表）**:
+`.clawith-deploy/registry.json`：记录当前持锁者（active）与最近 20 次部署（commit、镜像 sha、scope、成败）。部署前以「最近一次部署 commit → 目标 commit」的 git log 区间做 tip 对比，让部署者看见自己在带上/落下哪些提交。
+
+**Deploy Avoidance（部署避让）**:
+多会话下防止三类碰撞的协作纪律：A 同时部署（靠锁）、B 部署内容与分支 tip 错位（靠注册表 tip 对比 + `--strict` 阻塞）、C 共享 index 的提交窗口竞态（无法机制化，仅协议：提交前 `git diff --cached --stat` 复核、只用 pathspec 提交本任务文件）。
+
+_Avoid_: 锁≠注册表（一个串行化时机，一个提供信息）；Deploy Lock 勿与 Runtime 的 Lease/Fence 混用（前者在宿主部署层，后者在运行时工具执行层）。

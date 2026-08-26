@@ -307,6 +307,18 @@ run_docker_mode() {
         echo -e "${YELLOW}Detected running Docker containers. Starting in Docker mode...${NC}"
         echo -e "  ${YELLOW}Tip: use --source to force source (non-Docker) mode.${NC}"
 
+        # --- 部署锁（ADR 0003 多会话部署避让）：与 deploy.sh / 并行会话串行化 ---
+        # restart.sh 的 docker 分支含 compose down + up --build，必须与部署互斥。
+        # CLAWITH_DEPLOY_LOCKED 标记防重入；锁随进程死亡自动释放。
+        if [ "${CLAWITH_DEPLOY_LOCKED:-}" != "1" ]; then
+            PY="python3"
+            [ -x "$ROOT/backend/.venv/bin/python" ] && PY="$ROOT/backend/.venv/bin/python"
+            TARGET_COMMIT=$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo "unknown")
+            CLAWITH_DEPLOY_LOCKED=1 exec "$PY" "$ROOT/scripts/deploy_guard.py" lock \
+                "$ROOT/.clawith-deploy" "${CLAWITH_DEPLOY_LOCK_TIMEOUT:-600}" \
+                "$TARGET_COMMIT" "backend+frontend" -- "$0" "$@"
+        fi
+
         # 项目名：优先 .env 的 COMPOSE_PROJECT_NAME（load_env 已设置），否则从目录推导
         if [ -z "${COMPOSE_PROJECT_NAME:-}" ]; then
             DIR_NAME=$(basename "$(dirname "$ROOT")")
