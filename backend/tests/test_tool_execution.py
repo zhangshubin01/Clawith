@@ -705,6 +705,67 @@ async def test_terminal_poll_settles_only_same_run_operation_receipts() -> None:
 
 
 @pytest.mark.asyncio
+async def test_terminal_replay_with_different_provider_call_id_reuses_result():
+    """Runtime recovery replays the same tool call with a NEW provider call id.
+
+    provider_call_id is a per-call correlation id minted by the provider on
+    every response; deterministic replay after a mid-run restart (durability=
+    "exit" loses intermediate checkpoints) regenerates the same runtime
+    identity (tool_call_id/arguments) with a different provider_call_id.
+    A terminal (succeeded) receipt is a legal idempotent hit: reuse the result
+    instead of failing closed.
+    """
+    tenant_id = uuid.uuid4()
+    run_id = uuid.uuid4()
+    existing = _execution(
+        tenant_id=tenant_id,
+        run_id=run_id,
+        status="succeeded",
+        result_summary="delivered",
+    )
+    existing.provider_call_id = "call_00_originalProviderCall"
+    existing.result_ref = "result://1"
+    db = _FakeSession(run_id, existing)
+
+    decision = await _reserve(
+        db,
+        tenant_id=tenant_id,
+        run_id=run_id,
+        provider_call_id="call_00_replayedProviderCall",
+    )
+
+    assert decision.reusable_result is not None
+    assert decision.reusable_result.status == "succeeded"
+    assert decision.reusable_result.result_summary == "delivered"
+
+
+@pytest.mark.asyncio
+async def test_started_replay_with_different_provider_call_id_falls_to_decision():
+    """A started receipt replayed after recovery is decided by lease/attempt
+    state, not rejected as an identity mismatch."""
+    tenant_id = uuid.uuid4()
+    run_id = uuid.uuid4()
+    existing = _execution(
+        tenant_id=tenant_id,
+        run_id=run_id,
+        status="started",
+        lease_owner="worker-1",
+    )
+    existing.provider_call_id = "call_00_originalProviderCall"
+    db = _FakeSession(run_id, existing)
+
+    decision = await _reserve(
+        db,
+        tenant_id=tenant_id,
+        run_id=run_id,
+        provider_call_id="call_00_replayedProviderCall",
+    )
+
+    assert decision.reusable_result is None
+    assert decision.blocked is True  # lease still valid → not executed by replay
+
+
+@pytest.mark.asyncio
 async def test_idempotency_key_rejects_changed_arguments_or_execution_metadata():
     tenant_id = uuid.uuid4()
     run_id = uuid.uuid4()

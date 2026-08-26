@@ -23,6 +23,8 @@ from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from loguru import logger
+
 from app.models.agent_run import AgentRun
 from app.models.agent_run_command import AgentRunCommand
 from app.models.agent_tool_execution import AgentToolExecution
@@ -999,8 +1001,24 @@ def _require_exact_request(
         "request_ref": request_ref,
     }
     mismatched = [field for field, value in expected.items() if getattr(existing, field) != value]
+    # provider_call_id is a per-call correlation id minted by the provider on
+    # every response — NOT part of the runtime request identity. Deterministic
+    # replay after a mid-run restart (durability="exit" drops intermediate
+    # checkpoints) regenerates the same runtime identity with a fresh
+    # provider_call_id; that is a legal idempotent hit, not a conflict. The
+    # request identity is fully covered by tool_name/assistant_message_id/
+    # arguments_hash/effect/retry_policy/sanitized_arguments above. Keep the
+    # divergence visible for audit but do not fail closed on it.
+    stored_provider_call_id = getattr(existing, "provider_call_id", None)
+    if stored_provider_call_id is not None and stored_provider_call_id != provider_call_id:
+        logger.warning(
+            "[ToolExecution] provider_call_id drift on {}: stored={!r} incoming={!r} "
+            "(replay after recovery is expected; result reused by decision)",
+            existing.tool_call_id,
+            stored_provider_call_id,
+            provider_call_id,
+        )
     for identity_field, value in (
-        ("provider_call_id", provider_call_id),
         ("contract_version", contract_version),
     ):
         stored = getattr(existing, identity_field, None)
