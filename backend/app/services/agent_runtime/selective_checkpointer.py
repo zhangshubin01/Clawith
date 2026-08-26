@@ -35,6 +35,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from langgraph.checkpoint.base import BaseCheckpointSaver
+
 _CHECKPOINT_TASKS = frozenset({"__interrupt__"})
 _WAIT_STATUSES = frozenset({"waiting_user", "waiting_external", "waiting_agent"})
 _TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled"})
@@ -70,8 +72,14 @@ def _force_requested(metadata: Any) -> bool:
     return value is True or value == "true"
 
 
-class SelectiveCheckpointSaver:
-    """Wrapper that persists only essential checkpoints; everything else delegates."""
+class SelectiveCheckpointSaver(BaseCheckpointSaver):
+    """Wrapper that persists only essential checkpoints; everything else delegates.
+
+    Subclasses ``BaseCheckpointSaver`` so that langgraph's
+    ``ensure_valid_checkpointer`` accepts it at compile time; unhandled methods
+    (get_tuple/alist/delete_thread/...) delegate to the wrapped saver via
+    ``__getattr__``.
+    """
 
     def __init__(self, *, inner: Any, watermark: int = 5) -> None:
         if watermark < 1:

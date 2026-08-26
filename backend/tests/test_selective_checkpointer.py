@@ -171,3 +171,18 @@ async def test_eviction_bounds_tracked_threads() -> None:
     # Cap is large in production, but eviction logic keeps the dict bounded;
     # here we just assert the per-thread state is still consistent.
     assert len(tight._seen) == 5
+
+
+def test_is_accepted_by_langgraph_checkpointer_validation(
+    saver: SelectiveCheckpointSaver,
+) -> None:
+    """Regression: enabling CHECKPOINT_SELECTIVE_ENABLED once crashed startup.
+
+    langgraph's ensure_valid_checkpointer requires BaseCheckpointSaver; the
+    duck-typed wrapper must actually subclass it, not just delegate.
+    """
+    from langgraph.checkpoint.base import BaseCheckpointSaver
+    from langgraph.types import ensure_valid_checkpointer
+
+    assert isinstance(saver, BaseCheckpointSaver)
+    assert ensure_valid_checkpointer(saver) is saver
