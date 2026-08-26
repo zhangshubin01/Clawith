@@ -296,6 +296,12 @@ class CardStreamBridge:
         """
         if not self._streaming:
             return
+        if not content.strip():
+            # 空正文不得推送: CardKit 对空字符串返回 99992402
+            # (content min len is 1)。模型只输出推理、未输出正文时,
+            # 每步最终 flush 都会把空串推给 main_content, 且 MD5 去重
+            # 因推送失败无法落定, 每步重复失败形成错误风暴 — 直接跳过。
+            return
         await self._card_ready.wait()  # no-op once set by start()
         if not self.card_id:
             return
@@ -356,6 +362,10 @@ class CardStreamBridge:
         self._aux_flush.dispose()
         self._footer_flush.dispose()
 
+        # 模型只输出推理、未输出正文时 final_text 为空 — 终版卡片
+        # 不能留白, 否则用户看到一张没有正文的卡片。
+        display_text = (final_text or "").strip() or "✅ 任务已完成（本次未输出正文）"
+
         try:
             # Push terminal banner, then close streaming.
             await self._enqueue_push(
@@ -370,7 +380,7 @@ class CardStreamBridge:
 
             # Replace with terminal card.
             elapsed_ms = int((time.monotonic() - self._start_time) * 1000)
-            terminal_card = self._build_terminal_card(final_text, elapsed_ms)
+            terminal_card = self._build_terminal_card(display_text, elapsed_ms)
 
             self._sequence += 1
             await self._fs.update_cardkit_card(
@@ -385,7 +395,7 @@ class CardStreamBridge:
             )
         except Exception as exc:
             logger.error("[FEISHU-CARD] card_finalize_failed: {}", exc)
-            await self._fallback_to_text(final_text)
+            await self._fallback_to_text(display_text)
 
     async def abort(self, reason: str = "⏹ 回复已中断") -> None:
         """Interrupt — push banner, close streaming, replace with terminal card."""

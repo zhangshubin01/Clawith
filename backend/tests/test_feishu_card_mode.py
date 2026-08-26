@@ -177,6 +177,42 @@ class TestCardStreamBridge:
         assert fs.update_cardkit_card.await_count == call_count
 
     @pytest.mark.asyncio
+    async def test_push_text_skips_empty_and_whitespace_content(self):
+        """Empty pushes get rejected by CardKit (99992402) — never send them."""
+        fs = _make_fake_feishu_service()
+        b = CardStreamBridge(feishu_service=fs, app_id="aid", app_secret="sec",
+                            receive_id="ou", receive_id_type="open_id",
+                            agent_name="TestBot", run_id="run-empty-push")
+        await b.start()
+        fs.stream_card_content.reset_mock()
+
+        await b.push_text("")
+        await b.push_text("   \n  ")
+        fs.stream_card_content.assert_not_awaited()
+
+        await b.push_text("Real content")
+        assert fs.stream_card_content.await_count >= 1
+
+    @pytest.mark.asyncio
+    async def test_finalize_with_empty_answer_builds_non_blank_terminal_card(self):
+        """Reasoning-only turns must never leave the final card blank."""
+        fs = _make_fake_feishu_service()
+        b = CardStreamBridge(feishu_service=fs, app_id="aid", app_secret="sec",
+                            receive_id="ou", receive_id_type="open_id",
+                            agent_name="TestBot", run_id="run-empty-final")
+        await b.start()
+        await b.finalize("")
+
+        fs.update_cardkit_card.assert_awaited()
+        args = fs.update_cardkit_card.await_args.args
+        terminal_card = args[3]
+        body_elements = terminal_card["body"]["elements"]
+        text_element = next(
+            el for el in body_elements if el.get("tag") == "markdown" and el.get("text_align") is None
+        )
+        assert "任务已完成" in text_element["content"]
+
+    @pytest.mark.asyncio
     async def test_abort_delegates_to_finalize(self):
         fs = _make_fake_feishu_service()
         b = CardStreamBridge(feishu_service=fs, app_id="aid", app_secret="sec",
