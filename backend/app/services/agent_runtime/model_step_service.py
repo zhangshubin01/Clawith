@@ -2805,6 +2805,11 @@ class RuntimeModelStepService:
                     state=state,
                     context=context,
                 )
+            except LLMVisibleStreamInterrupted:
+                # Stream broke after visible output: never retry/failover here
+                # (would duplicate published text). Let it propagate to the
+                # execute-level branch that pauses in waiting_user.
+                raise
             except Exception as primary_error:
                 if _flush is not None:
                     _flush.dispose()
@@ -2906,6 +2911,8 @@ class RuntimeModelStepService:
                         state=state,
                         context=context,
                     )
+                except LLMVisibleStreamInterrupted:
+                    raise
                 except Exception as fallback_error:
                     if _flush is not None:
                         _flush.dispose()
@@ -3084,6 +3091,41 @@ class RuntimeModelStepService:
                 finally:
                     _flush.dispose()
             return result
+        except LLMVisibleStreamInterrupted as exc:
+            # A provider stream broke AFTER user-visible output was published.
+            # Retrying or failing over would duplicate the published partial
+            # text, so neither is attempted; the run pauses in waiting_user
+            # (reason=network_interrupted) and the user decides to regenerate
+            # (resume) or to continue with a new instruction. Partial output is
+            # preserved in the answer-stream events, not in graph state.
+            logger.warning(
+                "[RuntimeModelWait] run_id={} agent_id={} stream interrupted after "
+                "visible output published; entering waiting_user for regeneration "
+                "({})",
+                context.run_id,
+                context.agent_id,
+                exc,
+            )
+            return ModelStepResult(
+                intent="wait",
+                assistant_message=None,
+                waiting_request={
+                    "waiting_type": "user",
+                    "correlation_id": str(
+                        uuid.uuid5(
+                            uuid.UUID(context.run_id),
+                            "model-step:{}:network-interrupted".format(
+                                state["lifecycle"].get("model_step_count", 0) + 1
+                            ),
+                        )
+                    ),
+                    "reason": "network_interrupted",
+                    "question": (
+                        "网络中断，回答未完成。请点击「重新生成」让 Agent 重新生成"
+                        "回答，或直接输入新指令继续。"
+                    ),
+                },
+            )
         except (
             ContextBuildError,
             ModelCapabilityError,

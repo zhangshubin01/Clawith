@@ -3159,7 +3159,11 @@ async def test_unknown_primary_error_retries_on_same_model() -> None:
 
 
 @pytest.mark.asyncio
-async def test_visible_stream_failure_never_retries_or_calls_fallback(monkeypatch) -> None:
+async def test_visible_stream_failure_enters_waiting_user_for_regeneration(monkeypatch) -> None:
+    """A stream interruption AFTER visible output must pause for the user
+    (network_interrupted) instead of failing the run: the partial text is kept,
+    the user decides to regenerate, and the model step is never retried or
+    failed over automatically (that would duplicate published output)."""
     tenant_id = uuid.uuid4()
     model = _model(tenant_id)
     fallback = _model(tenant_id)
@@ -3186,6 +3190,47 @@ async def test_visible_stream_failure_never_retries_or_calls_fallback(monkeypatc
         calls += 1
         await kwargs["on_visible_delta"]("partial")
         raise RuntimeError("connection reset")
+
+    service = _failover_service(
+        model,
+        fallback,
+        agent,
+        _ContextBuilder(_build()),
+        complete,
+        answer_stream_enabled=True,
+    )
+
+    result = await service.complete_once(state, _context(state))
+
+    assert result.intent == "wait"
+    assert result.waiting_request is not None
+    assert result.waiting_request["waiting_type"] == "user"
+    assert result.waiting_request["reason"] == "network_interrupted"
+    assert result.waiting_request["correlation_id"]
+    assert calls == 1
+    assert result.error is None
+
+
+@pytest.mark.asyncio
+async def test_non_visible_failure_still_fails(monkeypatch) -> None:
+    """A non-retryable provider failure WITHOUT visible output keeps the plain
+    error path (network_interrupted waiting only applies to post-visible
+    stream breaks)."""
+    from app.services.llm.client import LLMRequestShapeError
+
+    tenant_id = uuid.uuid4()
+    model = _model(tenant_id)
+    fallback = _model(tenant_id)
+    fallback.model = "fallback-model"
+    agent = _agent(tenant_id)
+    agent.fallback_model_id = fallback.id
+    state = _state(tenant_id, model, agent)
+    calls = 0
+
+    async def complete(*_args, **kwargs):
+        nonlocal calls
+        calls += 1
+        raise LLMRequestShapeError("invalid request shape")
 
     service = _failover_service(
         model,
