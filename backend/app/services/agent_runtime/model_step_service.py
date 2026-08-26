@@ -710,14 +710,15 @@ def _log_provider_request_start(
 def _cache_fingerprints(
     messages: Sequence[LLMMessage],
     tools: Sequence[dict],
-) -> tuple[str, str, str]:
+) -> tuple[str, str, str, str]:
     """Stable fingerprints for provider prefix-cache diagnosis.
 
-    Returns (prefix_fp, full_fp, tools_fp). The prefix fingerprint covers
-    messages up to the first prefix_cache_break boundary — if it changes
-    between consecutive steps of one run, the provider KV cache must miss;
-    if it is stable while the provider still reports misses, the instability
-    lives outside the message prefix (tool schemas or provider-side state).
+    Returns (prefix_fp, full_fp, tools_fp, msg_chain):
+    - prefix_fp covers messages strictly BEFORE the first prefix_cache_break
+      boundary (the cacheable prefix);
+    - msg_chain is a compact per-message hash sequence (role:hash12,...) —
+      diffing it across consecutive steps shows exactly which early message
+      content changes and kills the provider KV cache.
     """
     import hashlib
 
@@ -729,21 +730,25 @@ def _cache_fingerprints(
     payloads: list[dict] = []
     prefix_payloads: list[dict] = []
     prefix_closed = False
+    chain_parts: list[str] = []
     for message in messages:
         record = asdict(message)
         # Provider-side volatile fields vary per call; content is the
         # cache-relevant payload.
         for volatile_key in ("tool_calls", "tool_call_id", "reasoning_content"):
             record.pop(volatile_key, None)
-        if isinstance(record.get("content"), list):
+        content = record.get("content")
+        if isinstance(content, list):
             record["content"] = json.dumps(
-                record["content"], ensure_ascii=False, default=str
+                content, ensure_ascii=False, default=str
             )
         if not prefix_closed:
-            prefix_payloads.append(record)
             if record.get("prefix_cache_break"):
                 prefix_closed = True
+            else:
+                prefix_payloads.append(record)
         payloads.append(record)
+        chain_parts.append(f"{str(record.get('role'))[0]}:{_digest(record)}")
     tool_signatures = sorted(
         f"{_tool_name(tool)}:{_digest(tool)}" for tool in tools
     )
@@ -751,6 +756,7 @@ def _cache_fingerprints(
         _digest(prefix_payloads),
         _digest(payloads),
         _digest(tool_signatures),
+        ",".join(chain_parts),
     )
 
 
@@ -2772,15 +2778,17 @@ class RuntimeModelStepService:
             if isinstance(prepared, ModelStepResult):
                 return prepared
 
-            prefix_fp, full_fp, tools_fp = _cache_fingerprints(prepared, tools)
+            prefix_fp, full_fp, tools_fp, msg_chain = _cache_fingerprints(
+                prepared, tools
+            )
             logger.info(
-                "[LLM-CacheFp] run_id={} step={} tokens={} prefix={} full={} tools={}",
+                "[LLM-CacheFp] run_id={} step={} tokens={} prefix={} tools={} chain={}",
                 context.run_id,
                 state["lifecycle"].get("model_step_count", 0),
                 _estimate_tokens(prepared),
                 prefix_fp,
-                full_fp,
                 tools_fp,
+                msg_chain,
             )
 
             actual_model = model

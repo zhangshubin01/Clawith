@@ -4341,8 +4341,9 @@ def test_cache_fingerprints_prefix_stable_across_turns() -> None:
     fp1 = _cache_fingerprints(step1, [])
     fp2 = _cache_fingerprints(step2, [])
 
-    assert fp1[0] == fp2[0]  # stable prefix
+    assert fp1[0] == fp2[0]  # stable prefix (before the cache-break boundary)
     assert fp1[1] != fp2[1]  # full payload differs (tail)
+    assert fp1[3].split(",")[:-1] == fp2[3].split(",")[:-1]  # chain identical except the final message
 
     step3 = [system, LLMMessage(role="user", content="hello"), *history, dynamic, final]
     fp3 = _cache_fingerprints(step3, [])
