@@ -440,7 +440,7 @@ class LangGraphRuntimeDriver:
                 None,
                 config,
                 context=context,
-                durability="sync",
+                durability="exit",
             )
             return
 
@@ -470,7 +470,7 @@ class LangGraphRuntimeDriver:
                 initial_state,
                 config,
                 context=context,
-                durability="sync",
+                durability="exit",
             )
             return
 
@@ -492,7 +492,7 @@ class LangGraphRuntimeDriver:
                 Command(resume=resume_value),
                 config,
                 context=context,
-                durability="sync",
+                durability="exit",
             )
             return
 

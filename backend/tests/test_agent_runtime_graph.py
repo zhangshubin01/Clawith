@@ -417,3 +417,71 @@ async def test_graph_drops_legacy_checkpoint_command_receipts() -> None:
     snapshot = await graph.compiled.aget_state(runtime_thread_config(run_id))
 
     assert "last_applied_command_ids" not in snapshot.values["lifecycle"]
+
+
+@pytest.mark.asyncio
+async def test_exit_durability_interrupt_checkpoint_rebuilds_complete_state() -> None:
+    """Regression guard for the selective-saver chain break (run 947a28ee).
+
+    Skipping intermediate checkpoints severed the parent chain so resumed state
+    lost ``snapshots`` and model steps raised KeyError. With durability="exit"
+    the interrupt checkpoint must rebuild a complete state — snapshots included —
+    when the run resumes.
+    """
+    run_id = uuid.uuid4()
+    executor = WaitingExecutor()
+    graph = build_agent_runtime_graph(
+        checkpointer=InMemorySaver(),
+        settings=_settings(),
+    )
+    config = runtime_thread_config(run_id)
+    initial = _state(
+        run_id,
+        status="waiting_user",
+        route="wait",
+        waiting_request={"waiting_type": "user", "reason": "confirm"},
+    )
+
+    await graph.compiled.ainvoke(
+        initial,
+        config,
+        context=_context(run_id, executor, command_id="command-start"),
+        durability="exit",
+    )
+    waiting_snapshot = await graph.compiled.aget_state(config)
+    assert waiting_snapshot.next == ("wait",)
+    assert "snapshots" in waiting_snapshot.values
+    assert waiting_snapshot.values["snapshots"].session_context_version == 3
+    assert waiting_snapshot.values["snapshots"].initial_input == {"message_id": "message-1"}
+
+    resumed = await graph.compiled.ainvoke(
+        Command(resume={"confirmed": True}),
+        config,
+        context=_context(run_id, executor, command_id="command-resume"),
+        durability="exit",
+    )
+    assert resumed["lifecycle"]["status"] == "completed"
+    final_snapshot = await graph.compiled.aget_state(config)
+    assert "snapshots" in final_snapshot.values
+    assert final_snapshot.values["snapshots"].session_context_version == 3
+
+
+@pytest.mark.asyncio
+async def test_exit_durability_terminal_checkpoint_keeps_state_complete() -> None:
+    run_id = uuid.uuid4()
+    graph = build_agent_runtime_graph(
+        checkpointer=InMemorySaver(),
+        settings=_settings(),
+    )
+    config = runtime_thread_config(run_id)
+
+    result = await graph.compiled.ainvoke(
+        _state(run_id),
+        config,
+        context=_context(run_id, CompletingExecutor(), command_id="command-1"),
+        durability="exit",
+    )
+    assert result["lifecycle"]["status"] == "completed"
+    snapshot = await graph.compiled.aget_state(config)
+    assert "snapshots" in snapshot.values
+    assert snapshot.values["snapshots"].session_context_version == 3

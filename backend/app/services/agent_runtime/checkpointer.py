@@ -105,9 +105,7 @@ def _to_psycopg_url(database_url: str) -> str:
             existing_options.append(unquote(encoded_value) if separator else "")
         elif key == "ssl":
             if not separator or not encoded_value:
-                raise CheckpointerConfigurationError(
-                    "Checkpoint database ssl query parameter must not be blank"
-                )
+                raise CheckpointerConfigurationError("Checkpoint database ssl query parameter must not be blank")
             value = unquote(encoded_value).strip().lower()
             asyncpg_sslmode = {
                 "true": "require",
@@ -117,9 +115,7 @@ def _to_psycopg_url(database_url: str) -> str:
             }.get(value, value)
         elif key == "sslmode":
             if not separator or not encoded_value:
-                raise CheckpointerConfigurationError(
-                    "Checkpoint database sslmode query parameter must not be blank"
-                )
+                raise CheckpointerConfigurationError("Checkpoint database sslmode query parameter must not be blank")
             explicit_sslmode = unquote(encoded_value).strip().lower()
             other_query_parts.append(query_part)
         else:
@@ -129,9 +125,7 @@ def _to_psycopg_url(database_url: str) -> str:
 
     if asyncpg_sslmode is not None:
         if explicit_sslmode is not None and explicit_sslmode != asyncpg_sslmode:
-            raise CheckpointerConfigurationError(
-                "Checkpoint database URL contains conflicting ssl and sslmode values"
-            )
+            raise CheckpointerConfigurationError("Checkpoint database URL contains conflicting ssl and sslmode values")
         if explicit_sslmode is None:
             other_query_parts.append(f"sslmode={quote(asyncpg_sslmode, safe='')}")
 
@@ -184,9 +178,13 @@ async def create_checkpointer(
     Closing the pool once at application shutdown is handled by
     ``close_checkpointer_pool``.
 
-    When ``CHECKPOINT_SELECTIVE_ENABLED`` is on, the saver is wrapped in
-    ``SelectiveCheckpointSaver`` so only essential boundaries are persisted
-    (root-cause control of checkpoint table growth; see that module).
+    Checkpoint volume is controlled at the engine level with
+    ``durability="exit"`` (one full checkpoint per Run boundary) — never by
+    wrapping the saver. LangGraph's checkpoints are incremental: channel values
+    are reconstructed by walking the parent chain and replaying writes, so any
+    wrapper that skips checkpoints or swallows writes severs that chain and
+    corrupts resumed state (see docs/technical-plans/
+    20260826-checkpoint-persistence-root-fix.md).
     """
     runtime_settings = settings or get_settings()
     pool = await get_shared_checkpoint_pool(runtime_settings)
@@ -194,15 +192,6 @@ async def create_checkpointer(
         conn=pool,
         serde=checkpoint_serializer(runtime_settings),
     )
-    if runtime_settings.CHECKPOINT_SELECTIVE_ENABLED:
-        from app.services.agent_runtime.selective_checkpointer import (
-            SelectiveCheckpointSaver,
-        )
-
-        saver = SelectiveCheckpointSaver(
-            inner=saver,
-            watermark=runtime_settings.CHECKPOINT_WATERMARK_STEPS,
-        )
     yield saver
 
 
