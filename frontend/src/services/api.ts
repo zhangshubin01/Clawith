@@ -390,6 +390,18 @@ export const channelApi = {
         request<{ webhook_url: string }>(`/agents/${agentId}/channel/webhook-url`).catch(() => null),
 };
 
+// ─── GitLab agent binding ────────────────────────────────
+export const gitlabBindingApi = {
+    get: (agentId: string) =>
+        request<any>(`/agents/${agentId}/gitlab-binding`).catch(() => null),
+
+    put: (agentId: string, data: any) =>
+        request<any>(`/agents/${agentId}/gitlab-binding`, { method: 'PUT', body: JSON.stringify(data) }),
+
+    del: (agentId: string) =>
+        request<void>(`/agents/${agentId}/gitlab-binding`, { method: 'DELETE' }),
+};
+
 // ─── Enterprise ───────────────────────────────────────
 export const enterpriseApi = {
     llmModels: () => {
