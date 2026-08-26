@@ -665,3 +665,122 @@ async def test_send_channel_file_uses_target_member_id_for_feishu(tmp_path):
     mock_send.assert_awaited_once()
     assert mock_send.await_args.args[4] == "ou_1"
     assert mock_send.await_args.args[5] == "user_id"
+
+
+# ---------------------------------------------------------------------------
+# send_channel_file — 当前会话回发 (Feishu card-mode runs)
+# ---------------------------------------------------------------------------
+
+
+class _Scalars:
+    def __init__(self, value) -> None:
+        self.value = value
+
+    def scalars(self):
+        return self
+
+    def first(self):
+        return self.value
+
+
+class _FallbackSession:
+    def __init__(self, cfg) -> None:
+        self.cfg = cfg
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *args):
+        return False
+
+    async def execute(self, _statement):
+        return _Scalars(self.cfg)
+
+
+async def test_feishu_card_file_sender_targets_the_posting_group(monkeypatch):
+    from pathlib import Path
+
+    from app.services.feishu_service import feishu_service
+
+    calls = []
+
+    async def fake_upload(app_id, app_secret, receive_id, file_path,
+                          receive_id_type="open_id", accompany_msg=""):
+        calls.append((app_id, app_secret, receive_id, file_path,
+                      receive_id_type, accompany_msg))
+        return {"code": 0}
+
+    monkeypatch.setattr(feishu_service, "upload_and_send_file", fake_upload)
+
+    context = SimpleNamespace(
+        card_receive_id="oc_group_123",
+        card_receive_id_type="chat_id",
+        card_app_id="app-1",
+        card_app_secret="secret-1",
+        agent_id="",
+    )
+    sender = agent_tools._feishu_card_file_sender(context)
+    await sender(Path("/tmp/app-debug.apk"), "here is the APK")
+
+    assert calls == [
+        ("app-1", "secret-1", "oc_group_123", "/tmp/app-debug.apk",
+         "chat_id", "here is the APK"),
+    ]
+
+
+async def test_feishu_card_file_sender_recovers_stripped_secret_from_db(monkeypatch):
+    from pathlib import Path
+
+    from app.services.feishu_service import feishu_service
+
+    calls = []
+
+    async def fake_upload(app_id, app_secret, receive_id, file_path,
+                          receive_id_type="open_id", accompany_msg=""):
+        calls.append((app_id, app_secret, receive_id))
+        return {"code": 0}
+
+    monkeypatch.setattr(feishu_service, "upload_and_send_file", fake_upload)
+
+    class _Cfg:
+        app_secret = "db-secret"
+
+    import app.database as database_module
+    monkeypatch.setattr(database_module, "async_session", lambda: _FallbackSession(_Cfg()))
+
+    context = SimpleNamespace(
+        card_receive_id="oc_group_123",
+        card_receive_id_type="chat_id",
+        card_app_id="app-1",
+        card_app_secret="",  # chat_intake strips it before persistence
+        agent_id="aaaaaaaa-1111-2222-3333-444444444444",
+    )
+    sender = agent_tools._feishu_card_file_sender(context)
+    await sender(Path("/tmp/app-debug.apk"))
+
+    assert calls == [("app-1", "db-secret", "oc_group_123")]
+
+
+async def test_send_channel_file_without_target_uses_current_conversation(monkeypatch, tmp_path):
+    from pathlib import Path
+
+    sent = []
+
+    async def fake_sender(file_path: Path, accompany_msg: str) -> None:
+        sent.append((str(file_path), accompany_msg))
+
+    token = agent_tools.channel_file_sender.set(fake_sender)
+    try:
+        apk = tmp_path / "app-debug.apk"
+        apk.write_bytes(b"fake-apk-bytes")
+
+        result = await agent_tools._send_channel_file(
+            uuid.uuid4(),
+            tmp_path,
+            {"file_path": "app-debug.apk", "message": "你好，这是 APK"},
+        )
+
+        assert "current conversation" in result
+        assert sent == [(str(apk.resolve()), "你好，这是 APK")]
+    finally:
+        agent_tools.channel_file_sender.reset(token)

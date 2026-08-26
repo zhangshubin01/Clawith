@@ -490,7 +490,14 @@ _BUILTIN_TOOL_SOURCE = [
     {
         "name": "send_channel_file",
         "display_name": "Send File",
-        "description": "Send a file to a human from query_directory or back to the current conversation. Use query_directory(member_type='human') first, then pass target_member_id.",
+        "description": (
+            "Send a file to a human from query_directory, or back to the current conversation "
+            "(the chat or group that posted the current task). "
+            "To send into the CURRENT conversation — e.g. the group the user asked in — "
+            "omit target_member_id entirely; the file goes to that conversation automatically. "
+            "Pass target_member_id only when sending to a specific person: use "
+            "query_directory(member_type='human') first, then pass their target_member_id."
+        ),
         "category": "communication",
         "icon": "📎",
         "is_default": True,
