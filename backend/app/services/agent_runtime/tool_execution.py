@@ -270,10 +270,12 @@ class ToolExecutionReconciliationPending(RuntimeError):
         message: str,
         *,
         defer_without_attempt: bool = False,
+        lease_expires_at: datetime | None = None,
     ) -> None:
         super().__init__(message)
         self.code = code
         self.defer_without_attempt = defer_without_attempt
+        self.lease_expires_at = lease_expires_at
 
 
 def _sensitive_key(value: object) -> bool:

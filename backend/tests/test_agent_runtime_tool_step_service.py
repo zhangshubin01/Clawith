@@ -2,6 +2,7 @@
 
 import asyncio
 import uuid
+from datetime import UTC, datetime
 from collections import deque
 from contextlib import asynccontextmanager
 
@@ -4335,6 +4336,7 @@ async def test_active_safe_read_receipt_defers_command_without_provider_replay(
         "read_file",
     )
     execution.attempt_count = 2
+    execution.lease_expires_at = datetime(2026, 8, 25, 9, 8, 56, tzinfo=UTC)
 
     async def reserve(db, **kwargs):
         del db, kwargs
@@ -4358,6 +4360,7 @@ async def test_active_safe_read_receipt_defers_command_without_provider_replay(
 
     assert exc_info.value.code == "safe_read_attempt_active"
     assert exc_info.value.defer_without_attempt is True
+    assert exc_info.value.lease_expires_at == execution.lease_expires_at
 
 
 @pytest.mark.asyncio

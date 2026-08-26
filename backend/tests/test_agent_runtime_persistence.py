@@ -456,6 +456,71 @@ async def test_claim_uses_skip_locked_fifo_without_consuming_execution_attempt()
 
 
 @pytest.mark.asyncio
+async def test_claim_excludes_commands_deferred_until_future():
+    now = datetime(2026, 7, 13, 12, 0, tzinfo=UTC)
+    command = _command(tenant_id=uuid.uuid4(), run_id=uuid.uuid4())
+    db = _FakeSession(command)
+
+    claimed = await persistence.claim_next_command(
+        db,
+        claimant="worker-1",
+        claim_ttl_seconds=60,
+        max_attempts=5,
+        clock=lambda: now,
+    )
+
+    assert claimed is command
+    sql = str(
+        db.statements[0].compile(
+            dialect=postgresql.dialect(),
+            compile_kwargs={"literal_binds": True},
+        )
+    )
+    assert "agent_run_commands.deferred_until IS NULL" in sql
+    assert "agent_run_commands.deferred_until <=" in sql
+    assert "agent_run_commands.deferred_until <= '2026-07-13 12:00:00+00:00'" in sql
+
+
+@pytest.mark.asyncio
+async def test_defer_command_sets_deferred_until_and_frozen_started_at():
+    now = datetime(2026, 7, 13, 12, 0, tzinfo=UTC)
+    command = _command(tenant_id=uuid.uuid4(), run_id=uuid.uuid4())
+    db = _FakeSession(command)
+
+    await persistence.defer_command(
+        db,
+        tenant_id=command.tenant_id,
+        command_id=command.id,
+        deferred_until=datetime(2026, 7, 13, 12, 5, tzinfo=UTC),
+        clock=lambda: now,
+    )
+
+    assert command.deferred_until == datetime(2026, 7, 13, 12, 5, tzinfo=UTC)
+    assert command.deferred_started_at == now
+    assert db.flush_count == 1
+
+
+@pytest.mark.asyncio
+async def test_defer_command_preserves_frozen_started_at_on_later_fences():
+    now = datetime(2026, 7, 13, 12, 0, tzinfo=UTC)
+    command = _command(tenant_id=uuid.uuid4(), run_id=uuid.uuid4())
+    command.deferred_started_at = datetime(2026, 7, 13, 11, 50, tzinfo=UTC)
+    db = _FakeSession(command)
+
+    await persistence.defer_command(
+        db,
+        tenant_id=command.tenant_id,
+        command_id=command.id,
+        deferred_until=datetime(2026, 7, 13, 12, 10, tzinfo=UTC),
+        clock=lambda: now,
+    )
+
+    assert command.deferred_until == datetime(2026, 7, 13, 12, 10, tzinfo=UTC)
+    assert command.deferred_started_at == datetime(2026, 7, 13, 11, 50, tzinfo=UTC)
+    assert db.flush_count == 1
+
+
+@pytest.mark.asyncio
 async def test_start_claim_acquires_only_the_earliest_free_scheduling_lane():
     now = datetime(2026, 7, 13, 12, 0, tzinfo=UTC)
     tenant_id = uuid.uuid4()

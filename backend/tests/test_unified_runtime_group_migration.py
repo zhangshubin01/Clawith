@@ -97,6 +97,7 @@ DURABLE_GUARDED_TABLES = (
 )
 POST_UNIFIED_COLUMNS_BY_TABLE = {
     "agent_tool_executions": {"provider_call_id", "contract_version"},
+    "agent_run_commands": {"deferred_until", "deferred_started_at"},
 }
 
 

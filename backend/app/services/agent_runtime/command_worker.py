@@ -5,9 +5,10 @@ from __future__ import annotations
 from contextlib import AbstractAsyncContextManager
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 import asyncio
 import logging
+import random
 from typing import Callable, Literal, Protocol, cast
 import uuid
 
@@ -22,6 +23,7 @@ from app.models.agent_tool_execution import AgentToolExecution
 from app.services.agent_runtime.persistence import (
     begin_command_attempt,
     claim_next_command,
+    defer_command,
     mark_command_applied,
     mark_command_product_synced,
     mark_command_rejected,
@@ -364,6 +366,8 @@ class RuntimeCommandWorker:
         claim_renew_seconds: float | None = None,
         max_attempts: int | None = None,
         max_heartbeat_failures: int | None = None,
+        fence_defer_max_seconds: int | None = None,
+        fence_defer_jitter_seconds: float | None = None,
     ) -> None:
         runtime_settings = settings or get_settings()
         self._session_factory = session_factory
@@ -392,6 +396,16 @@ class RuntimeCommandWorker:
             if max_heartbeat_failures is not None
             else runtime_settings.AGENT_RUNTIME_COMMAND_HEARTBEAT_MAX_FAILURES
         )
+        self._fence_defer_max_seconds = (
+            fence_defer_max_seconds
+            if fence_defer_max_seconds is not None
+            else runtime_settings.AGENT_RUNTIME_COMMAND_FENCE_DEFER_MAX_SECONDS
+        )
+        self._fence_defer_jitter_seconds = (
+            fence_defer_jitter_seconds
+            if fence_defer_jitter_seconds is not None
+            else runtime_settings.AGENT_RUNTIME_COMMAND_FENCE_DEFER_JITTER_SECONDS
+        )
         if not claimant.strip():
             raise ValueError("claimant must not be blank")
         if self._claim_ttl_seconds <= 0 or self._claim_renew_seconds <= 0:
@@ -402,6 +416,10 @@ class RuntimeCommandWorker:
             raise ValueError("max_attempts must be positive")
         if self._max_heartbeat_failures < 0:
             raise ValueError("max_heartbeat_failures must be non-negative")
+        if self._fence_defer_max_seconds <= 0:
+            raise ValueError("fence defer max seconds must be positive")
+        if self._fence_defer_jitter_seconds < 0:
+            raise ValueError("fence defer jitter seconds must be non-negative")
 
     async def _claim(self) -> RuntimeCommandRecord | None:
         async with self._session_factory() as db:
@@ -642,8 +660,20 @@ class RuntimeCommandWorker:
         self,
         command: RuntimeCommandRecord,
         error_code: str,
-    ) -> None:
-        """Release active-owner contention and refund this business attempt."""
+        *,
+        lease_expires_at: datetime | None = None,
+        clock: Callable[[], datetime] | None = None,
+    ) -> str:
+        """Release active-owner contention and refund this business attempt.
+
+        The released Command becomes reclaimable only after the fence lease
+        expires (plus jitter) via ``defer_command``. When the fence keeps
+        moving (a live executor renews its lease) the wait extends; when the
+        total wait outlives ``_fence_defer_max_seconds`` the defer becomes a
+        stall: the attempt stays consumed, the defer window and its start
+        marker are cleared, and the caller reports ``tool_fence_wait_exhausted``
+        instead of looping.
+        """
         async with self._session_factory() as db:
             async with db.begin():
                 released = await release_command_claim(
@@ -658,8 +688,32 @@ class RuntimeCommandWorker:
                         "invalid_command_attempt",
                         "deferred command has no consumed attempt to refund",
                     )
+                now = (clock or (lambda: datetime.now(UTC)))()
+                if (
+                    released.deferred_started_at is not None
+                    and now - released.deferred_started_at
+                    > timedelta(seconds=self._fence_defer_max_seconds)
+                ):
+                    released.deferred_until = None
+                    released.deferred_started_at = None
+                    await db.flush()
+                    return "tool_fence_wait_exhausted"
                 released.attempt_count -= 1
+                # A fence without a usable lease deadline (e.g. reconciliation
+                # still settling) retries shortly with jitter instead of
+                # waiting out a whole lease window.
+                effective_lease = lease_expires_at
+                if effective_lease is None or effective_lease <= now:
+                    effective_lease = now
+                jitter = random.uniform(0, self._fence_defer_jitter_seconds)
+                await defer_command(
+                    db,
+                    tenant_id=command.tenant_id,
+                    command_id=command.id,
+                    deferred_until=effective_lease + timedelta(seconds=jitter),
+                )
                 await db.flush()
+                return error_code
 
     @staticmethod
     def _validate_checkpoint(
@@ -1142,14 +1196,19 @@ class RuntimeCommandWorker:
                 )
             except ToolExecutionReconciliationPending as exc:
                 if exc.defer_without_attempt:
-                    await self._defer_without_attempt(command, exc.code)
+                    defer_error_code = await self._defer_without_attempt(
+                        command,
+                        exc.code,
+                        lease_expires_at=exc.lease_expires_at,
+                    )
                 else:
                     await self._release_for_retry(command, exc.code)
+                    defer_error_code = exc.code
                 return CommandWorkResult(
                     status="retry",
                     command_id=command.id,
                     run_id=command.run_id,
-                    error_code=exc.code,
+                    error_code=defer_error_code,
                 )
             except RetryableCommandError as exc:
                 if exhausted:

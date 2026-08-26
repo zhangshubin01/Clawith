@@ -646,6 +646,10 @@ def _claim_statement(now: datetime, *, max_attempts: int):
             ),
             ~earlier_unfinished,
             or_(
+                AgentRunCommand.deferred_until.is_(None),
+                AgentRunCommand.deferred_until <= now,
+            ),
+            or_(
                 candidate_run.scheduling_lane_key.is_(None),
                 AgentRunCommand.command_type != "start",
                 candidate_run.lane_held.is_(True),
@@ -780,6 +784,33 @@ async def _get_locked_command(
             "command_not_found",
             f"command {command_id} does not exist in tenant {tenant_id}",
         )
+    return command
+
+
+async def defer_command(
+    db: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    command_id: uuid.UUID,
+    deferred_until: datetime,
+    clock: Callable[[], datetime] | None = None,
+) -> AgentRunCommand:
+    """Push a released Command's reclaim eligibility past a Tool fence lease.
+
+    ``deferred_until`` moves forward on every fence collision (the fence lease
+    may be renewed by a live executor); ``deferred_started_at`` freezes on the
+    first defer so callers can measure the total wait and break a stall.
+    """
+    command = await _get_locked_command(
+        db,
+        tenant_id=tenant_id,
+        command_id=command_id,
+    )
+    now = (clock or (lambda: datetime.now(UTC)))()
+    command.deferred_until = deferred_until
+    if command.deferred_started_at is None:
+        command.deferred_started_at = now
+    await db.flush()
     return command
 
 

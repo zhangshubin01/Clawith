@@ -94,6 +94,8 @@ class AgentRunCommand(Base):
     )
     claimed_by: Mapped[str | None] = mapped_column(String(128), nullable=True)
     claim_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    deferred_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    deferred_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default=text("0"))
     applied_checkpoint_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     error_code: Mapped[str | None] = mapped_column(String(100), nullable=True)

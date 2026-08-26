@@ -157,6 +157,8 @@ def test_agent_run_command_model_captures_reliable_input_contract():
         "status",
         "claimed_by",
         "claim_expires_at",
+        "deferred_until",
+        "deferred_started_at",
         "attempt_count",
         "applied_checkpoint_id",
         "error_code",

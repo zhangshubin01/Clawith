@@ -2337,6 +2337,7 @@ class RuntimeToolStepService:
                             "safe_read_attempt_active",
                             "A safe read attempt still owns the active receipt",
                             defer_without_attempt=True,
+                            lease_expires_at=reservation.execution.lease_expires_at,
                         )
                     if (
                         _is_group_workspace_mutation_call(

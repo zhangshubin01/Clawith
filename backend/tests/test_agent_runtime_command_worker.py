@@ -2,7 +2,7 @@
 
 from collections import deque
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 import asyncio
 import inspect
 from unittest.mock import AsyncMock, patch
@@ -883,7 +883,9 @@ async def test_active_tool_fence_defer_refunds_business_attempt_and_releases_cla
             ),
         ),
     )
-    worker._defer_without_attempt = AsyncMock()  # type: ignore[method-assign]
+    worker._defer_without_attempt = AsyncMock(  # type: ignore[method-assign]
+        return_value="group_workspace_active_lease"
+    )
 
     with patch(
         "app.services.agent_runtime.command_worker.claim_next_command",
@@ -895,6 +897,124 @@ async def test_active_tool_fence_defer_refunds_business_attempt_and_releases_cla
     assert result.error_code == "group_workspace_active_lease"
     _stub_business_attempt_boundary.assert_awaited_once()
     worker._defer_without_attempt.assert_awaited_once()  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_defer_without_attempt_pushes_reclaim_past_fence_lease(
+    _stub_business_attempt_boundary,
+) -> None:
+    timeline: list[str] = []
+    run = _run()
+    command = _command(run, "start")
+    worker = _worker(
+        timeline=timeline,
+        run=run,
+        reader=_Reader(),
+        executor=_Executor(timeline),
+    )
+    now = datetime(2026, 7, 13, 12, 0, tzinfo=UTC)
+    fence_lease = datetime(2026, 7, 13, 12, 5, tzinfo=UTC)
+
+    with (
+        patch(
+            "app.services.agent_runtime.command_worker.release_command_claim",
+            new=AsyncMock(return_value=command),
+        ),
+        patch(
+            "app.services.agent_runtime.command_worker.defer_command",
+            new=AsyncMock(),
+        ) as defer,
+    ):
+        result = await worker._defer_without_attempt(
+            command,
+            "safe_read_attempt_active",
+            lease_expires_at=fence_lease,
+            clock=lambda: now,
+        )
+
+    assert result == "safe_read_attempt_active"
+    assert command.attempt_count == 0
+    defer.assert_awaited_once()
+    deferred_until = defer.await_args.kwargs["deferred_until"]
+    assert fence_lease <= deferred_until <= fence_lease + timedelta(seconds=5)
+
+
+@pytest.mark.asyncio
+async def test_defer_without_attempt_stall_keeps_attempt_and_returns_fence_wait_exhausted(
+    _stub_business_attempt_boundary,
+) -> None:
+    timeline: list[str] = []
+    run = _run()
+    command = _command(run, "start")
+    worker = _worker(
+        timeline=timeline,
+        run=run,
+        reader=_Reader(),
+        executor=_Executor(timeline),
+    )
+    now = datetime(2026, 7, 13, 12, 0, tzinfo=UTC)
+    fence_lease = datetime(2026, 7, 13, 12, 5, tzinfo=UTC)
+    command.deferred_started_at = now - timedelta(seconds=901)
+
+    with (
+        patch(
+            "app.services.agent_runtime.command_worker.release_command_claim",
+            new=AsyncMock(return_value=command),
+        ),
+        patch(
+            "app.services.agent_runtime.command_worker.defer_command",
+            new=AsyncMock(),
+        ) as defer,
+    ):
+        result = await worker._defer_without_attempt(
+            command,
+            "safe_read_attempt_active",
+            lease_expires_at=fence_lease,
+            clock=lambda: now,
+        )
+
+    assert result == "tool_fence_wait_exhausted"
+    assert command.attempt_count == 1
+    assert command.deferred_until is None
+    assert command.deferred_started_at is None
+    defer.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_defer_without_attempt_without_lease_deadline_uses_jitter_window_only(
+    _stub_business_attempt_boundary,
+) -> None:
+    timeline: list[str] = []
+    run = _run()
+    command = _command(run, "start")
+    worker = _worker(
+        timeline=timeline,
+        run=run,
+        reader=_Reader(),
+        executor=_Executor(timeline),
+    )
+    now = datetime(2026, 7, 13, 12, 0, tzinfo=UTC)
+
+    with (
+        patch(
+            "app.services.agent_runtime.command_worker.release_command_claim",
+            new=AsyncMock(return_value=command),
+        ),
+        patch(
+            "app.services.agent_runtime.command_worker.defer_command",
+            new=AsyncMock(),
+        ) as defer,
+    ):
+        result = await worker._defer_without_attempt(
+            command,
+            "safe_read_result_reconciliation_pending",
+            lease_expires_at=None,
+            clock=lambda: now,
+        )
+
+    assert result == "safe_read_result_reconciliation_pending"
+    deferred_until = defer.await_args.kwargs["deferred_until"]
+    assert now <= deferred_until <= now + timedelta(seconds=5)
 
 
 @pytest.mark.asyncio
@@ -910,11 +1030,17 @@ async def test_defer_release_atomically_refunds_the_consumed_attempt() -> None:
         executor=_Executor(timeline),
     )
 
-    with patch(
-        "app.services.agent_runtime.command_worker.release_command_claim",
-        new=AsyncMock(return_value=command),
-    ) as release:
-        await worker._defer_without_attempt(
+    with (
+        patch(
+            "app.services.agent_runtime.command_worker.release_command_claim",
+            new=AsyncMock(return_value=command),
+        ) as release,
+        patch(
+            "app.services.agent_runtime.command_worker.defer_command",
+            new=AsyncMock(),
+        ) as defer,
+    ):
+        result = await worker._defer_without_attempt(
             RuntimeCommandRecord(
                 id=command.id,
                 tenant_id=command.tenant_id,
@@ -926,10 +1052,13 @@ async def test_defer_release_atomically_refunds_the_consumed_attempt() -> None:
                 attempt_count=command.attempt_count,
             ),
             "group_workspace_active_lease",
+            lease_expires_at=datetime(2026, 7, 13, 12, 5, tzinfo=UTC),
         )
 
+    assert result == "group_workspace_active_lease"
     assert command.attempt_count == 2
     release.assert_awaited_once()
+    defer.assert_awaited_once()
     assert "flush" in timeline
 
 

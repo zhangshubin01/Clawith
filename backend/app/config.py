@@ -184,6 +184,17 @@ class Settings(BaseSettings):
     # AGENT_RUNTIME_RECURSION_LIMIT when a tenant needs more headroom.
     AGENT_RUNTIME_RECURSION_LIMIT: int = Field(default=200, gt=0)
     AGENT_RUNTIME_COMMAND_MAX_ATTEMPTS: int = Field(default=5, gt=0)
+    # Safe-read fence defer: a Command that hits an active Tool fence is
+    # released and becomes reclaimable only after the fence lease expires.
+    # MAX = total defer window before the wait is declared a stall. It is
+    # pinned to 3x the Tool lease TTL, which is the RuntimeToolStepService
+    # constant 300s — change both together if the lease TTL ever moves.
+    # JITTER = random spread so concurrent daemons do not wake together when
+    # several commands share one lease deadline. A fence without a usable
+    # lease deadline (e.g. reconciliation still settling) retries with
+    # jitter alone, never the full MAX window.
+    AGENT_RUNTIME_COMMAND_FENCE_DEFER_MAX_SECONDS: int = Field(default=900, gt=0)
+    AGENT_RUNTIME_COMMAND_FENCE_DEFER_JITTER_SECONDS: float = Field(default=5.0, ge=0)
     AGENT_RUNTIME_ASYNC_TOOL_POLL_SCAN_SECONDS: float = Field(default=0.25, gt=0)
     AGENT_RUNTIME_TOOL_LEASE_RECONCILE_SCAN_SECONDS: float = Field(default=1.0, gt=0)
     AGENT_RUNTIME_CHANNEL_DELIVERY_CLAIM_TTL_SECONDS: int = Field(default=120, gt=0)
