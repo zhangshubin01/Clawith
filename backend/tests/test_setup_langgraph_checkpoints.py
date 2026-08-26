@@ -272,6 +272,10 @@ def _run_backend_entrypoint(
         "PROCESS_ROLE": process_role,
         "PYTHON_EXIT": str(python_exit),
         "START_COMMAND": str(start_command),
+        # 418f6c16 fail-fast guard: entrypoint refuses to boot without real
+        # secrets; the tests exercise bootstrap ordering, not the guard.
+        "SECRET_KEY": "test-secret-key-not-a-placeholder",
+        "JWT_SECRET_KEY": "test-jwt-secret-key-not-a-placeholder",
     }
     result = subprocess.run(
         ["bash", str(backend_dir / "entrypoint.sh")],

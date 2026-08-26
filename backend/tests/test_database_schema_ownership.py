@@ -52,7 +52,7 @@ def test_official_startup_paths_bootstrap_checkpoints_after_alembic():
 
     assert entrypoint_source.index("alembic upgrade head") < entrypoint_source.index(
         entrypoint_checkpoint_command
-    ) < entrypoint_source.index('exec /bin/bash -lc "$START_COMMAND"')
+    ) < entrypoint_source.index('/bin/bash -lc "$START_COMMAND" &')
     assert restart_source.index(".venv/bin/alembic upgrade head") < restart_source.index(
         f".venv/bin/{restart_checkpoint_command}"
     ) < restart_source.index(".venv/bin/uvicorn app.main:app")
