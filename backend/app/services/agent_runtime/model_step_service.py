@@ -707,6 +707,53 @@ def _log_provider_request_start(
     )
 
 
+def _cache_fingerprints(
+    messages: Sequence[LLMMessage],
+    tools: Sequence[dict],
+) -> tuple[str, str, str]:
+    """Stable fingerprints for provider prefix-cache diagnosis.
+
+    Returns (prefix_fp, full_fp, tools_fp). The prefix fingerprint covers
+    messages up to the first prefix_cache_break boundary — if it changes
+    between consecutive steps of one run, the provider KV cache must miss;
+    if it is stable while the provider still reports misses, the instability
+    lives outside the message prefix (tool schemas or provider-side state).
+    """
+    import hashlib
+
+    def _digest(value: object) -> str:
+        return hashlib.sha256(
+            json.dumps(value, ensure_ascii=False, sort_keys=True, default=str).encode()
+        ).hexdigest()[:12]
+
+    payloads: list[dict] = []
+    prefix_payloads: list[dict] = []
+    prefix_closed = False
+    for message in messages:
+        record = asdict(message)
+        # Provider-side volatile fields vary per call; content is the
+        # cache-relevant payload.
+        for volatile_key in ("tool_calls", "tool_call_id", "reasoning_content"):
+            record.pop(volatile_key, None)
+        if isinstance(record.get("content"), list):
+            record["content"] = json.dumps(
+                record["content"], ensure_ascii=False, default=str
+            )
+        if not prefix_closed:
+            prefix_payloads.append(record)
+            if record.get("prefix_cache_break"):
+                prefix_closed = True
+        payloads.append(record)
+    tool_signatures = sorted(
+        f"{_tool_name(tool)}:{_digest(tool)}" for tool in tools
+    )
+    return (
+        _digest(prefix_payloads),
+        _digest(payloads),
+        _digest(tool_signatures),
+    )
+
+
 def _tool_name(tool: Mapping[str, object]) -> str | None:
     function = tool.get("function")
     if not isinstance(function, Mapping):
@@ -2724,6 +2771,17 @@ class RuntimeModelStepService:
             )
             if isinstance(prepared, ModelStepResult):
                 return prepared
+
+            prefix_fp, full_fp, tools_fp = _cache_fingerprints(prepared, tools)
+            logger.info(
+                "[LLM-CacheFp] run_id={} step={} tokens={} prefix={} full={} tools={}",
+                context.run_id,
+                state["lifecycle"].get("model_step_count", 0),
+                _estimate_tokens(prepared),
+                prefix_fp,
+                full_fp,
+                tools_fp,
+            )
 
             actual_model = model
             failed_over_from: LLMModel | None = None

@@ -4275,3 +4275,44 @@ async def test_success_loop_error_carries_recent_outcome_and_audits(
         "tool_name": "android_compile",
         "count": 5,
     }
+
+
+def test_cache_fingerprints_prefix_stable_across_turns() -> None:
+    from app.services.agent_runtime.model_step_service import _cache_fingerprints
+    from app.services.llm.client import LLMMessage
+
+    system = LLMMessage(role="system", content="static system prompt")
+    history = [
+        LLMMessage(role="user", content="hello"),
+        LLMMessage(role="assistant", content="hi", tool_calls=[]),
+        LLMMessage(role="tool", content="result", tool_call_id="call-1"),
+    ]
+    dynamic = LLMMessage(role="user", content="turn-1 dynamic", prefix_cache_break=True)
+    final = LLMMessage(role="user", content="current input")
+
+    step1 = [system, *history, dynamic, final]
+    step2 = [system, *history, dynamic, LLMMessage(role="user", content="current input (same)")]
+
+    fp1 = _cache_fingerprints(step1, [])
+    fp2 = _cache_fingerprints(step2, [])
+
+    assert fp1[0] == fp2[0]  # stable prefix
+    assert fp1[1] != fp2[1]  # full payload differs (tail)
+
+    step3 = [system, LLMMessage(role="user", content="hello"), *history, dynamic, final]
+    fp3 = _cache_fingerprints(step3, [])
+    assert fp3[0] != fp1[0]  # reordered history breaks the prefix
+
+
+def test_cache_fingerprints_tools_order_independent() -> None:
+    from app.services.agent_runtime.model_step_service import _cache_fingerprints
+    from app.services.llm.client import LLMMessage
+
+    messages = [LLMMessage(role="system", content="s")]
+    tool_a = {"function": {"name": "alpha", "description": "a"}}
+    tool_b = {"function": {"name": "beta", "description": "b"}}
+
+    fp_ab = _cache_fingerprints(messages, [tool_a, tool_b])
+    fp_ba = _cache_fingerprints(messages, [tool_b, tool_a])
+
+    assert fp_ab[2] == fp_ba[2]
