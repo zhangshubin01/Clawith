@@ -158,3 +158,54 @@ class SelectiveCheckpointSaver(BaseCheckpointSaver):
             # makes its own aput essential, clearing the skip flag first.
             return None
         return await self._inner.aput_writes(config, writes, task_id, task_path)
+
+    # ── Explicit delegation over the BaseCheckpointSaver surface ──────────────
+    # Subclassing BaseCheckpointSaver shadows __getattr__: every method the base
+    # class defines (most raising NotImplementedError) now resolves to the base
+    # implementation instead of delegating. Override them all so calls reach the
+    # wrapped saver exactly as they did before the inheritance.
+
+    def get_tuple(self, config: dict[str, Any], *args: Any, **kwargs: Any) -> Any:
+        return self._inner.get_tuple(config, *args, **kwargs)
+
+    async def aget_tuple(self, config: dict[str, Any], *args: Any, **kwargs: Any) -> Any:
+        return await self._inner.aget_tuple(config, *args, **kwargs)
+
+    def list(self, config: dict[str, Any], *args: Any, **kwargs: Any) -> Any:
+        return self._inner.list(config, *args, **kwargs)
+
+    async def alist(self, config: dict[str, Any], *args: Any, **kwargs: Any) -> Any:
+        return await self._inner.alist(config, *args, **kwargs)
+
+    def put(self, config: dict[str, Any], checkpoint: Any, metadata: dict[str, Any], new_versions: Any) -> Any:
+        return self._inner.put(config, checkpoint, metadata, new_versions)
+
+    def put_writes(self, config: dict[str, Any], writes: Any, task_id: str, task_path: str = "") -> Any:
+        return self._inner.put_writes(config, writes, task_id, task_path)
+
+    def delete_thread(self, thread_id: str) -> Any:
+        return self._inner.delete_thread(thread_id)
+
+    async def adelete_thread(self, thread_id: str) -> Any:
+        return await self._inner.adelete_thread(thread_id)
+
+    def copy_thread(self, *args: Any, **kwargs: Any) -> Any:
+        return self._inner.copy_thread(*args, **kwargs)
+
+    async def acopy_thread(self, *args: Any, **kwargs: Any) -> Any:
+        return await self._inner.acopy_thread(*args, **kwargs)
+
+    def delete_for_runs(self, *args: Any, **kwargs: Any) -> Any:
+        return self._inner.delete_for_runs(*args, **kwargs)
+
+    async def adelete_for_runs(self, *args: Any, **kwargs: Any) -> Any:
+        return await self._inner.adelete_for_runs(*args, **kwargs)
+
+    def prune(self, *args: Any, **kwargs: Any) -> Any:
+        return self._inner.prune(*args, **kwargs)
+
+    async def aprune(self, *args: Any, **kwargs: Any) -> Any:
+        return await self._inner.aprune(*args, **kwargs)
+
+    def get_next_version(self, *args: Any, **kwargs: Any) -> Any:
+        return self._inner.get_next_version(*args, **kwargs)

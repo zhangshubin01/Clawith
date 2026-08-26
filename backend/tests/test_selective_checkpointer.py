@@ -37,6 +37,12 @@ class _RecordingSaver:
     async def aput_writes(self, config, writes, task_id, task_path=""):
         self.writes.append((task_id, task_path))
 
+    async def alist(self, config, **kwargs):
+        return [f"alist:{config}"]
+
+    def get_tuple(self, config):
+        return f"get_tuple:{config}"
+
     def custom_method(self) -> str:
         return "delegated"
 
@@ -186,3 +192,14 @@ def test_is_accepted_by_langgraph_checkpointer_validation(
 
     assert isinstance(saver, BaseCheckpointSaver)
     assert ensure_valid_checkpointer(saver) is saver
+
+
+async def test_base_class_defaults_do_not_shadow_delegation(
+    saver: SelectiveCheckpointSaver,
+) -> None:
+    """Regression: BaseCheckpointSaver's NotImplementedError defaults shadowed
+    __getattr__ after subclassing, so alist/aget_tuple hit the base class and
+    raised instead of reaching the wrapped saver (broke /runtime-state 500s).
+    """
+    assert await saver.alist({}) == ["alist:{}"]
+    assert saver.get_tuple({}) == "get_tuple:{}"
