@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Callable, Literal, cast
+from typing import Callable, Literal, Mapping, cast
 import uuid
 
 from sqlalchemy import select
@@ -90,7 +90,18 @@ class DeliveryRequest:
     @property
     def idempotency_key(self) -> str:
         if self.kind == "waiting":
-            return f"run:{self.run_id}:waiting:{self.interrupt_id}"
+            # Each waiting boundary is a distinct user-visible episode. A Run
+            # can legitimately wait twice under the same correlation (e.g. a
+            # deterministic approval gate re-entered after resume), so the
+            # checkpoint pins the key to one boundary while crash replays of
+            # the same checkpoint still deduplicate. _validate_request already
+            # requires a checkpoint for every deliverable request.
+            if not self.checkpoint_id:
+                raise DeliveryServiceError(
+                    "invalid_delivery_request",
+                    "waiting delivery idempotency requires a checkpoint_id",
+                )
+            return f"run:{self.run_id}:waiting:{self.interrupt_id}:{self.checkpoint_id}"
         return f"run:{self.run_id}:terminal:{self.lifecycle_status}"
 
 
@@ -109,6 +120,23 @@ class DeliveryReceipt:
     actual_session_id: uuid.UUID | None
     fallback_reason: str | None
     error_code: str | None
+
+
+_WAITING_FALLBACK_CONTENT = "需要你的确认或补充信息后才能继续。"
+
+
+def waiting_content(request: Mapping[str, object]) -> str:
+    """Visible text for one waiting boundary.
+
+    Mirrors the question/prompt/reason precedence of waiting deliveries so
+    both the durable delivery (checkpoint_side_effects) and the Web Chat
+    stream fallback (chat_stream) render the same user-visible content.
+    """
+    for field in ("question", "prompt", "reason"):
+        text = request.get(field)
+        if isinstance(text, str) and text.strip():
+            return text.strip()
+    return _WAITING_FALLBACK_CONTENT
 
 
 @dataclass(frozen=True, slots=True)
@@ -988,4 +1016,5 @@ __all__ = [
     "DeliveryReceipt",
     "DeliveryServiceError",
     "deliver_runtime_message",
+    "waiting_content",
 ]

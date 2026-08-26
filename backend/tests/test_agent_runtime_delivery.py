@@ -228,8 +228,101 @@ def test_waiting_and_cancelled_deliveries_share_checkpoint_with_distinct_keys() 
     )
 
     assert waiting.checkpoint_id == terminal.checkpoint_id
-    assert waiting.idempotency_key == f"run:{run_id}:waiting:interrupt-7"
+    assert waiting.idempotency_key == f"run:{run_id}:waiting:interrupt-7:{checkpoint_id}"
     assert terminal.idempotency_key == f"run:{run_id}:terminal:cancelled"
+
+
+def test_waiting_idempotency_key_pins_each_boundary_to_its_checkpoint() -> None:
+    run_id = uuid.uuid4()
+    tenant_id = uuid.uuid4()
+
+    def waiting(checkpoint_id: str, content: str) -> DeliveryRequest:
+        return DeliveryRequest(
+            tenant_id=tenant_id,
+            run_id=run_id,
+            kind="waiting",
+            content=content,
+            checkpoint_id=checkpoint_id,
+            lifecycle_status="waiting_user",
+            interrupt_id="approval-shared",
+        )
+
+    first = waiting("checkpoint-1", "First question")
+    replay = waiting("checkpoint-1", "First question")
+    second = waiting("checkpoint-2", "Second question")
+
+    # A crash replay of the same boundary stays deduplicated...
+    assert first.idempotency_key == replay.idempotency_key
+    # ...but a second waiting boundary under the same correlation is a new
+    # user-visible episode and must produce a distinct key.
+    assert first.idempotency_key != second.idempotency_key
+    assert second.idempotency_key == f"run:{run_id}:waiting:approval-shared:checkpoint-2"
+
+
+@pytest.mark.asyncio
+async def test_second_waiting_under_same_correlation_delivers_a_distinct_message_and_event() -> None:
+    tenant_id = uuid.uuid4()
+    agent_id = uuid.uuid4()
+    user_id = uuid.uuid4()
+    session = _session(
+        tenant_id=tenant_id,
+        agent_id=agent_id,
+        user_id=user_id,
+    )
+    run = _run(tenant_id=tenant_id, session=session, agent_id=agent_id)
+    run.runtime_thread_id = str(session.id)
+    participant = _participant(agent_id)
+
+    def waiting(checkpoint_id: str, content: str) -> DeliveryRequest:
+        return DeliveryRequest(
+            tenant_id=tenant_id,
+            run_id=run.id,
+            kind="waiting",
+            content=content,
+            checkpoint_id=checkpoint_id,
+            lifecycle_status="waiting_user",
+            interrupt_id="approval-shared",
+        )
+
+    first_db = _RecordingDB(
+        run,
+        None,
+        session,
+        _agent(tenant_id, agent_id),
+        participant,
+        _user(tenant_id, user_id),
+    )
+    first = await deliver_runtime_message(
+        first_db,
+        waiting("checkpoint-1", "First question"),
+        clock=lambda: NOW,
+    )
+    assert first.status == "delivered"
+    first_event = _added(first_db, AgentRunEvent)[0]
+    assert first_event.idempotency_key == f"run:{run.id}:waiting:approval-shared:checkpoint-1"
+    assert len(_added(first_db, ChatMessage)) == 1
+
+    # The same deterministic correlation re-enters waiting at a new checkpoint
+    # boundary (e.g. an approval gate re-triggered after resume). The second
+    # delivery must not be deduplicated against the first.
+    second_db = _RecordingDB(
+        run,
+        None,
+        session,
+        _agent(tenant_id, agent_id),
+        participant,
+        _user(tenant_id, user_id),
+    )
+    second = await deliver_runtime_message(
+        second_db,
+        waiting("checkpoint-2", "Second question"),
+        clock=lambda: NOW,
+    )
+    assert second.status == "delivered"
+    assert second.message_id != first.message_id
+    second_event = _added(second_db, AgentRunEvent)[0]
+    assert second_event.idempotency_key == f"run:{run.id}:waiting:approval-shared:checkpoint-2"
+    assert len(_added(second_db, ChatMessage)) == 1
 
 
 @pytest.mark.asyncio

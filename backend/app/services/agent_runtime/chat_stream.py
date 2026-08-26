@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
+import time
 from typing import Literal, Protocol
 import uuid
 
@@ -16,11 +18,23 @@ from app.services.agent_runtime.contracts import (
     RuntimeEvent,
     RuntimeEventCursor,
 )
+from app.services.agent_runtime.delivery import waiting_content
 from app.services.agent_runtime.event_stream import DatabaseRuntimeEventStream
 
 
 ChatStreamStatus = Literal["completed", "failed", "cancelled", "waiting_user"]
 PacketSender = Callable[[dict], Awaitable[None]]
+
+# How long a waiting boundary may stay delivery-less before the stream
+# attachment ends at the boundary itself instead of hanging until the event
+# stream's 120s idle kill. Normal deliveries arrive in the same settled
+# checkpoint batch, so this window only ever fires on abnormal paths.
+_WAITING_GRACE_SECONDS = 1.5
+
+# When the grace window is exhausted, drain whatever the source already
+# buffered before ending the stream, so a delivery event that arrived in the
+# same poll batch is never skipped.
+_DRAIN_BUFFERED_TIMEOUT_SECONDS = 0.05
 
 
 class RuntimeEventSource(Protocol):
@@ -108,6 +122,55 @@ def _error_context(
     }
 
 
+async def _close_iterator_quietly(iterator: AsyncIterator[RuntimeEvent]) -> None:
+    """Best-effort close of an abandoned event iterator.
+
+    Only cleanup depends on this: a short-lived poll session inside
+    ``DatabaseRuntimeEventStream`` may still be open when the stream
+    attachment ends, and an explicit close lets it release promptly. Failure
+    to close is harmless — Python finalizes abandoned async generators
+    anyway, so the narrow ignore cannot affect any user-visible outcome.
+    """
+    close = getattr(iterator, "aclose", None)
+    if close is None:
+        return
+    try:
+        await close()
+    except Exception:
+        pass
+
+
+async def _next_stream_event(
+    iterator: AsyncIterator[RuntimeEvent],
+    *,
+    grace_deadline: float | None,
+) -> RuntimeEvent | None:
+    """Pull the next event, or None when the stream attachment must end.
+
+    With no grace deadline this blocks until the source yields or ends.
+    Inside a waiting grace window it returns None once the window expires —
+    after one final best-effort drain of already-buffered events, so a
+    delivery event that arrived in the same poll batch is never skipped —
+    letting the caller end the attachment at the waiting boundary instead of
+    hanging until the event stream's 120s idle kill.
+    """
+    if grace_deadline is None:
+        try:
+            return await anext(iterator)
+        except StopAsyncIteration:
+            return None
+    remaining = grace_deadline - time.monotonic()
+    timeout = (
+        _DRAIN_BUFFERED_TIMEOUT_SECONDS
+        if remaining <= 0
+        else remaining
+    )
+    try:
+        return await asyncio.wait_for(anext(iterator), timeout=timeout)
+    except (TimeoutError, StopAsyncIteration):
+        return None
+
+
 async def stream_web_chat_run(
     *,
     handle: RunHandle,
@@ -119,6 +182,7 @@ async def stream_web_chat_run(
     after: RuntimeEventCursor | None = None,
     event_source: RuntimeEventSource | None = None,
     trace_id: str | None = None,
+    waiting_grace_seconds: float = _WAITING_GRACE_SECONDS,
 ) -> ChatRuntimeStreamOutcome:
     """Stream one start/resume attachment until terminal or waiting-user delivery."""
     source = event_source or DatabaseRuntimeEventStream(
@@ -130,8 +194,17 @@ async def stream_web_chat_run(
     latest_cursor = after
     terminal_error_code: str | None = None
     terminal_trace_id: str | None = None
+    waiting_text = waiting_content({})
+    grace_deadline: float | None = None
 
-    async for event in source.stream_run(handle, after=after):
+    iterator = source.stream_run(handle, after=after)
+    while True:
+        event = await _next_stream_event(
+            iterator,
+            grace_deadline=grace_deadline,
+        )
+        if event is None:
+            break
         latest_cursor = _cursor(event)
         payload = event.payload
 
@@ -231,10 +304,13 @@ async def stream_web_chat_run(
                     "runtime_wait_correlation_missing",
                     "waiting_user Runtime event has no resume correlation",
                 )
+            waiting_text = waiting_content(payload)
+            grace_deadline = time.monotonic() + waiting_grace_seconds
             terminal_status = "waiting_user"
         elif event.event_type == "resumed":
             waiting_correlation_id = None
             terminal_status = None
+            grace_deadline = None
         elif event.event_type == "run_completed":
             terminal_status = "completed"
         elif event.event_type == "run_failed":
@@ -379,6 +455,21 @@ async def stream_web_chat_run(
         return ChatRuntimeStreamOutcome(
             status=status,
             content=message.content,
+            cursor=latest_cursor,
+            correlation_id=waiting_correlation_id,
+        )
+
+    await _close_iterator_quietly(iterator)
+
+    if terminal_status == "waiting_user" and latest_cursor is not None:
+        # The waiting boundary is a legitimate end state: the Run is parked
+        # awaiting user input. A delivery receipt can be missing (e.g. it was
+        # idempotently deduplicated when the same correlation waited earlier
+        # in this Run); end the stream attachment at the boundary itself
+        # instead of stranding it until the event stream's 120s idle kill.
+        return ChatRuntimeStreamOutcome(
+            status="waiting_user",
+            content=waiting_text,
             cursor=latest_cursor,
             correlation_id=waiting_correlation_id,
         )

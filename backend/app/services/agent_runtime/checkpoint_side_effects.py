@@ -30,6 +30,7 @@ from app.services.agent_runtime.delivery import (
     DeliveryReceipt,
     DeliveryRequest,
     deliver_runtime_message,
+    waiting_content,
 )
 from app.services.agent_runtime.state import runtime_messages_as_json
 from app.services.agent_runtime.tool_execution import (
@@ -41,7 +42,6 @@ from app.services.experience_retrieval import record_experience_citations
 from app.services.group_realtime import publish_stored_group_message
 
 _TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled"})
-_WAITING_PROMPT = "需要你的确认或补充信息后才能继续。"
 _MODEL_ACTIONS = frozenset(
     {
         "continue",
@@ -136,10 +136,7 @@ def _waiting_delivery(
             "invalid_waiting_request",
             "waiting_user checkpoint requires a correlation ID",
         )
-    content = next(
-        (text for field in ("question", "prompt", "reason") if (text := _text_field(waiting.get(field))) is not None),
-        _WAITING_PROMPT,
-    )
+    content = waiting_content(waiting)
     return DeliveryRequest(
         tenant_id=run.tenant_id,
         run_id=run.run_id,

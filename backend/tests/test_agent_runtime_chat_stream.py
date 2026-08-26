@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections import deque
 from datetime import UTC, datetime, timedelta
 import uuid
@@ -9,7 +10,10 @@ import uuid
 import pytest
 
 from app.models.audit import ChatMessage
-from app.services.agent_runtime.chat_stream import stream_web_chat_run
+from app.services.agent_runtime.chat_stream import (
+    ChatRuntimeStreamError,
+    stream_web_chat_run,
+)
 from app.services.agent_runtime.contracts import (
     RunHandle,
     RuntimeEvent,
@@ -48,8 +52,13 @@ class _SessionFactory:
 
 
 class _EventSource:
-    def __init__(self, events: list[RuntimeEvent]) -> None:
+    """Fixed event source; with ``hang=True`` it never yields again after the
+    given events (like a Run whose delivery event was idempotently
+    deduplicated away)."""
+
+    def __init__(self, events: list[RuntimeEvent], *, hang: bool = False) -> None:
         self.events = events
+        self.hang = hang
         self.after: RuntimeEventCursor | None = None
 
     async def stream_run(self, handle, *, after=None):
@@ -57,6 +66,8 @@ class _EventSource:
         self.after = after
         for event in self.events:
             yield event
+        if self.hang:
+            await asyncio.Event().wait()
 
 
 def _handle() -> RunHandle:
@@ -373,6 +384,152 @@ async def test_waiting_delivery_returns_resume_identity_and_honors_cursor() -> N
     assert packets[-1]["run_id"] == str(handle.run_id)
     assert packets[-1]["correlation_id"] == "publish-confirmation"
     assert packets[-1]["runtime_status"] == "waiting_user"
+
+
+def _waiting_started_event(
+    handle: RunHandle,
+    *,
+    position: int = 2,
+    correlation_id: str = "publish-confirmation",
+) -> RuntimeEvent:
+    return _event(
+        handle,
+        "waiting_started",
+        position=position,
+        payload={
+            "status": "waiting_user",
+            "waiting_type": "user",
+            "correlation_id": correlation_id,
+            "question": "Should I publish it?",
+        },
+    )
+
+
+@pytest.mark.asyncio
+async def test_waiting_boundary_without_delivery_returns_gracefully_instead_of_hanging() -> None:
+    """A deduplicated waiting delivery must not strand the stream until the
+    120s idle kill: the stream ends at the waiting boundary itself."""
+    handle = _handle()
+    waiting = _waiting_started_event(handle)
+    packets: list[dict] = []
+
+    async def send(packet: dict) -> None:
+        packets.append(packet)
+
+    outcome = await asyncio.wait_for(
+        stream_web_chat_run(
+            handle=handle,
+            session_factory=_SessionFactory(),  # type: ignore[arg-type]
+            send_packet=send,
+            agent_id=uuid.uuid4(),
+            session_id=uuid.uuid4(),
+            user_id=uuid.uuid4(),
+            event_source=_EventSource([waiting], hang=True),
+            waiting_grace_seconds=0.05,
+        ),
+        timeout=1.0,
+    )
+
+    assert outcome.status == "waiting_user"
+    assert outcome.correlation_id == "publish-confirmation"
+    assert outcome.content == "Should I publish it?"
+    assert outcome.cursor.event_id == waiting.event_id
+    # No delivery happened, so no done packet may be fabricated.
+    assert [packet["type"] for packet in packets] == ["runtime_status"]
+
+
+@pytest.mark.asyncio
+async def test_waiting_grace_window_continues_across_interleaved_events() -> None:
+    """Events arriving inside the grace window are streamed normally and do
+    not restart the window; the boundary still ends the stream."""
+    handle = _handle()
+    waiting = _waiting_started_event(handle)
+    thinking = _event(
+        handle,
+        "status_changed",
+        position=3,
+        payload={"activity_type": "thinking", "content": "last thought"},
+    )
+    packets: list[dict] = []
+
+    async def send(packet: dict) -> None:
+        packets.append(packet)
+
+    outcome = await asyncio.wait_for(
+        stream_web_chat_run(
+            handle=handle,
+            session_factory=_SessionFactory(),  # type: ignore[arg-type]
+            send_packet=send,
+            agent_id=uuid.uuid4(),
+            session_id=uuid.uuid4(),
+            user_id=uuid.uuid4(),
+            event_source=_EventSource([waiting, thinking], hang=True),
+            waiting_grace_seconds=0.1,
+        ),
+        timeout=1.0,
+    )
+
+    assert outcome.status == "waiting_user"
+    assert [packet["type"] for packet in packets] == ["runtime_status", "thinking"]
+
+
+@pytest.mark.asyncio
+async def test_waiting_boundary_returns_gracefully_when_event_source_ends() -> None:
+    handle = _handle()
+    waiting = _waiting_started_event(handle)
+    packets: list[dict] = []
+
+    async def send(packet: dict) -> None:
+        packets.append(packet)
+
+    outcome = await stream_web_chat_run(
+        handle=handle,
+        session_factory=_SessionFactory(),  # type: ignore[arg-type]
+        send_packet=send,
+        agent_id=uuid.uuid4(),
+        session_id=uuid.uuid4(),
+        user_id=uuid.uuid4(),
+        event_source=_EventSource([waiting]),
+        waiting_grace_seconds=0.05,
+    )
+
+    assert outcome.status == "waiting_user"
+    assert outcome.correlation_id == "publish-confirmation"
+    assert [packet["type"] for packet in packets] == ["runtime_status"]
+
+
+@pytest.mark.asyncio
+async def test_resumed_clears_the_waiting_boundary() -> None:
+    """A resumed Run is no longer parked at a waiting boundary: an event
+    source that ends there must still fail loudly instead of returning a
+    fabricated waiting outcome."""
+    handle = _handle()
+    waiting = _waiting_started_event(handle)
+    resumed = _event(
+        handle,
+        "resumed",
+        position=3,
+        payload={"status": "running"},
+    )
+    packets: list[dict] = []
+
+    async def send(packet: dict) -> None:
+        packets.append(packet)
+
+    with pytest.raises(ChatRuntimeStreamError) as exc_info:
+        await stream_web_chat_run(
+            handle=handle,
+            session_factory=_SessionFactory(),  # type: ignore[arg-type]
+            send_packet=send,
+            agent_id=uuid.uuid4(),
+            session_id=uuid.uuid4(),
+            user_id=uuid.uuid4(),
+            event_source=_EventSource([waiting, resumed]),
+            waiting_grace_seconds=0.05,
+        )
+
+    assert exc_info.value.code == "runtime_stream_ended_without_delivery"
+    assert [packet["type"] for packet in packets] == ["runtime_status", "runtime_status"]
 
 
 @pytest.mark.asyncio
