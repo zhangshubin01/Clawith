@@ -1,0 +1,134 @@
+#!/bin/bash
+# ============================================================
+# Clawith 部署脚本 — 从干净 worktree 部署 backend（可选 frontend）
+#
+# 用法:
+#   scripts/deploy.sh                 # 部署 backend（默认，构建镜像）
+#   scripts/deploy.sh --frontend      # 同时重建 frontend 容器
+#   scripts/deploy.sh --no-build      # 跳过镜像构建（代码未变时省 ~3 分钟）
+#   scripts/deploy.sh --commit <ref>  # 部署指定 commit（默认 HEAD）
+#
+# 流程: 预检 → worktree → .env 校验 → 回滚标签 → build → up → 验证
+#
+# 红线（2026-08-26 事故教训固化的）:
+#   1. worktree 目录是运行容器的 bind-mount 源，绝不删除 /tmp/clawith-deploy-*
+#   2. up 前必须确认 .env 存在且 SECRET_KEY/JWT_SECRET_KEY 非占位符
+#      （占位符会让 api_key_encrypted 解出垃圾 → 全模型 401）
+#   3. 回滚标签必须在 build/up 之前立刻打——运行中镜像随时可能被并行会话 prune
+#   4. 挂载源用绝对路径（CLAWITH_SS_NODES_JSON / CLAWITH_NGINX_TEMPLATE），
+#      脱离 worktree 存活依赖
+# ============================================================
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+COMPOSE_PROJECT="clawith-agent"
+BACKEND_PORT="${BACKEND_PORT:-8008}"
+FRONTEND_PORT="${FRONTEND_PORT:-3008}"
+COMMIT="HEAD"
+BUILD=1
+WITH_FRONTEND=0
+
+usage() {
+    sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'
+    exit 0
+}
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --frontend) WITH_FRONTEND=1; shift ;;
+        --no-build) BUILD=0; shift ;;
+        --commit) COMMIT="$2"; shift 2 ;;
+        -h|--help) usage ;;
+        *) echo "未知参数: $1"; usage; exit 1 ;;
+    esac
+done
+
+cd "$REPO_ROOT"
+
+# ── 0) 预检 ────────────────────────────────────────────────
+UNCOMMITTED=$(git status --porcelain | wc -l | tr -d ' ')
+if [ "$UNCOMMITTED" -gt 0 ]; then
+    echo "⚠️  工作区有 ${UNCOMMITTED} 个未提交改动（可能属并行会话）——只部署已提交内容，绝不带入工作区脏文件"
+fi
+
+# ── 1) 提交解析 + worktree ─────────────────────────────────
+SHORT=$(git rev-parse --short "$COMMIT")
+WORKTREE="/tmp/clawith-deploy-${SHORT}"
+if [ -d "$WORKTREE" ]; then
+    echo "→ worktree 已存在: $WORKTREE"
+else
+    echo "→ 创建 worktree: $WORKTREE"
+    git worktree add "$WORKTREE" "$SHORT"
+fi
+cd "$WORKTREE"
+
+# ── 2) .env 准备与校验（红线 2）────────────────────────────
+if [ ! -f "$WORKTREE/.env" ]; then
+    cp "$REPO_ROOT/.env" "$WORKTREE/.env"
+    echo "→ 已从仓库根复制 .env"
+fi
+if grep -qE '^SECRET_KEY=change-me-in-production[[:space:]]*$' "$WORKTREE/.env"; then
+    echo "❌ SECRET_KEY 仍是占位符 'change-me-in-production'，拒绝部署" >&2
+    exit 1
+fi
+if grep -qE '^JWT_SECRET_KEY=change-me-jwt-secret[[:space:]]*$' "$WORKTREE/.env"; then
+    echo "❌ JWT_SECRET_KEY 仍是占位符 'change-me-jwt-secret'，拒绝部署" >&2
+    exit 1
+fi
+# 兼容默认相对路径：worktree 内 ss-nodes.json 符号链接到仓库根
+if [ ! -e "$WORKTREE/ss-nodes.json" ]; then
+    ln -s "$REPO_ROOT/ss-nodes.json" "$WORKTREE/ss-nodes.json"
+fi
+
+# ── 3) 稳定挂载源 + 部署态配置 ─────────────────────────────
+export CLAWITH_SS_NODES_JSON="$REPO_ROOT/ss-nodes.json"
+export CLAWITH_NGINX_TEMPLATE="$REPO_ROOT/frontend/nginx.conf.template"
+export CHECKPOINT_SELECTIVE_ENABLED="${CHECKPOINT_SELECTIVE_ENABLED:-true}"
+
+# ── 4) 回滚标签（红线 3：build/up 之前立刻打）──────────────
+OLD_IMG=$(docker inspect "${COMPOSE_PROJECT}-backend-1" --format '{{.Image}}' 2>/dev/null || true)
+if [ -n "$OLD_IMG" ]; then
+    ROLLBACK_TAG="clawith-agent-backend:pre-${SHORT}-${OLD_IMG:7:12}"
+    if docker tag "$OLD_IMG" "$ROLLBACK_TAG" 2>/dev/null; then
+        echo "→ 回滚标签: ${ROLLBACK_TAG}"
+    else
+        echo "⚠️  无法给当前运行镜像打回滚标签（镜像可能已被并行会话清理）——回滚=从旧 worktree 重建"
+    fi
+else
+    echo "⚠️  未找到运行中的 backend 容器，跳过回滚标签"
+fi
+
+# ── 5) 构建（默认）——清华 pip 源为必填 build-arg ───────────
+if [ "$BUILD" = 1 ]; then
+    export CLAWITH_PIP_INDEX_URL="${CLAWITH_PIP_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple}"
+    export CLAWITH_PIP_TRUSTED_HOST="${CLAWITH_PIP_TRUSTED_HOST:-pypi.tuna.tsinghua.edu.cn}"
+    echo "→ 构建 backend 镜像..."
+    docker compose --env-file "$WORKTREE/.env" -p "$COMPOSE_PROJECT" -f docker-compose.yml build backend
+fi
+
+# ── 6) up ──────────────────────────────────────────────────
+echo "→ 重建 backend 容器..."
+docker compose --env-file "$WORKTREE/.env" -p "$COMPOSE_PROJECT" -f docker-compose.yml up -d --no-deps backend
+if [ "$WITH_FRONTEND" = 1 ]; then
+    echo "→ 重建 frontend 容器..."
+    docker compose --env-file "$WORKTREE/.env" -p "$COMPOSE_PROJECT" -f docker-compose.yml up -d --no-deps frontend
+fi
+
+# ── 7) 验证 ────────────────────────────────────────────────
+sleep 12
+HEALTH=$(curl -s -m 3 "http://localhost:${BACKEND_PORT}/api/health" || true)
+case "$HEALTH" in
+    *'"status":"ok"'*) echo "✅ /api/health 200" ;;
+    *) echo "❌ /api/health 异常: ${HEALTH}" >&2; exit 1 ;;
+esac
+docker exec "${COMPOSE_PROJECT}-backend-1" sh -c \
+    '[ "$SECRET_KEY" = "change-me-in-production" ] && echo "❌ SECRET_KEY 是占位符" || echo "✅ SECRET_KEY 非占位符"'
+docker exec "${COMPOSE_PROJECT}-backend-1" grep -q 'TERM_FLAG' /app/entrypoint.sh \
+    && echo "✅ entrypoint 守卫在镜像内" || echo "❌ entrypoint 守卫缺失" >&2
+docker logs --tail 200 "${COMPOSE_PROJECT}-backend-1" 2>&1 | grep -q "Alembic migrations completed" \
+    && echo "✅ alembic 迁移成功" || echo "⚠️  未在日志中找到 alembic 成功标记（PROCESS_ROLE 非 bootstrap 时正常）"
+if [ "$WITH_FRONTEND" = 1 ]; then
+    curl -s -o /dev/null -w "✅ frontend ${FRONTEND_PORT}=%{http_code}\n" -m 3 "http://localhost:${FRONTEND_PORT}"
+fi
+echo ""
+echo "✅ 部署完成。当前部署 worktree=${WORKTREE}（红线：勿删）"

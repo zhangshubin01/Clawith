@@ -105,7 +105,9 @@ services:
     volumes:
       - agentdata:/data/agents
       - /var/run/docker.sock:/var/run/docker.sock
-      - ./ss-nodes.json:/data/ss-nodes.json:ro
+      # 挂载源可用 CLAWITH_SS_NODES_JSON 指到稳定绝对路径（scripts/deploy.sh 会导出），
+      # 避免依赖 /tmp/clawith-deploy-* worktree 存活（worktree 被删即挂载损坏）。
+      - ${CLAWITH_SS_NODES_JSON:-./ss-nodes.json}:/data/ss-nodes.json:ro
     # P2 最小权限收紧（2026-08-16 实测）：去 privileged，仅保留 bwrap 沙箱所需。
     # SYS_ADMIN：命名空间与 pivot_root；NET_ADMIN+SYS_PTRACE：bwrap 0.11 set_required_caps
     # 硬性要求且不在 Docker 默认 caps 内（缺失时 setuid bwrap 报 "capset failed"）。
@@ -143,7 +145,8 @@ services:
       API_UPSTREAM: ${API_UPSTREAM:-backend:8000}
       MINIO_UPSTREAM: ${MINIO_UPSTREAM:-minio:9000}
     volumes:
-      - ./frontend/nginx.conf.template:/etc/nginx/templates/default.conf.template:ro
+      # 同 backend：CLAWITH_NGINX_TEMPLATE 指稳定绝对路径，摆脱 worktree 依赖。
+      - ${CLAWITH_NGINX_TEMPLATE:-./frontend/nginx.conf.template}:/etc/nginx/templates/default.conf.template:ro
     networks:
       - default
     depends_on:
