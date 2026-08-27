@@ -177,7 +177,19 @@ class CardStreamBridge:
         "footer_note": "footer_note",
     }
 
+    # 终版卡片思考面板的字符上限。思考原文逐轮累积无界增长（reasoning
+    # 回放协议下历史大头即思考），超限只保留尾部（最新几轮），沿袭实时面板
+    # [-2000:] 尾窗的展示思路；否则长 run 会打爆 CardKit 载荷上限，finalize
+    # 失败导致整卡（含正文）降级为纯文本。取值依据见
+    # docs/technical-plans/20260827-feishu-card-thinking-panel-truncation.md。
+    _THINKING_TERMINAL_MAX_CHARS = 8_000
+
     # ---- helpers ------------------------------------------------------------
+
+    @staticmethod
+    def _quote_lines(text: str) -> str:
+        """整段引用为 Markdown blockquote（每行 `> ` 前缀）."""
+        return "\n".join(f"> {line}" for line in text.split("\n"))
 
     @staticmethod
     def _fmt_elapsed(seconds: float) -> str:
@@ -631,7 +643,22 @@ class CardStreamBridge:
     def _build_thinking_blockquote(self) -> str:
         if not self._thinking_text.strip():
             return ""
-        return "\n".join(f"> {line}" for line in self._thinking_text.split("\n"))
+        text = self._thinking_text
+        truncated = False
+        if len(text) > self._THINKING_TERMINAL_MAX_CHARS:
+            # 保留尾部（最新几轮思考），在行边界裁剪，避免首行拦腰截断。
+            # 退化场景：单条思考增量本身就是无换行、>上限的超长行时，
+            # 上限优先于行边界（两者物理冲突，无法两全）。
+            tail = text[-self._THINKING_TERMINAL_MAX_CHARS:]
+            first_newline = tail.find("\n")
+            if first_newline != -1:
+                tail = tail[first_newline + 1:]
+            text = tail
+            truncated = True
+        quoted = self._quote_lines(text)
+        if truncated:
+            quoted = "> ⚠️ 思考内容过长，仅展示最后一段\n" + quoted
+        return quoted
 
     async def _push_footer(self) -> None:
         """独立推送 footer 计时器，不受辅刷新间隔限制."""
@@ -680,7 +707,7 @@ class CardStreamBridge:
                     logger.debug("[FEISHU-CARD] thinking_panel_add_failed", exc_info=True)
             if self._thinking_panel_added:
                 text = self._thinking_text[-2000:]
-                quoted = "\n".join(f"> {line}" for line in text.split("\n"))
+                quoted = self._quote_lines(text)
                 try:
                     await self._enqueue_push(
                         "thinking_live_md", quoted, "_last_thinking_hash",

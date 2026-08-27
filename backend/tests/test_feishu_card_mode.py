@@ -49,6 +49,16 @@ def _make_fake_feishu_service():
     return fs
 
 
+def _thinking_panel_content(terminal_card: dict) -> str:
+    """Extract the 「💭 思考过程」 panel markdown content from a terminal card."""
+    panel = next(
+        el for el in terminal_card["body"]["elements"]
+        if el.get("tag") == "collapsible_panel"
+        and "思考过程" in (el.get("header") or {}).get("title", {}).get("content", "")
+    )
+    return panel["elements"][0]["content"]
+
+
 # ---------------------------------------------------------------------------
 # Bridge registry
 # ---------------------------------------------------------------------------
@@ -276,6 +286,71 @@ class TestCardStreamBridge:
         assert fs.set_card_streaming_mode.await_count >= 1
         # stream_card_content should have been called at least twice (fail + retry)
         assert fs.stream_card_content.await_count >= 2
+
+    @pytest.mark.asyncio
+    async def test_thinking_panel_truncates_long_tail_with_note(self):
+        """超长思考原文只保留尾部完整行并标注截断，防打爆 CardKit 载荷上限."""
+        fs = _make_fake_feishu_service()
+        b = CardStreamBridge(feishu_service=fs, app_id="aid", app_secret="sec",
+                             receive_id="ou", receive_id_type="open_id",
+                             agent_name="TestBot", run_id="run-think-long")
+        await b.start()
+        lines = ["开头第一行-不应出现在终版卡片"] + [
+            f"第{i}轮思考-完整行内容" for i in range(900)
+        ]
+        thinking = "\n".join(lines)
+        assert len(thinking) > 8_000  # 前置条件：确为超长内容
+        await b.push_thinking(thinking)
+        await b.finalize("终版答案")
+
+        terminal_card = fs.update_cardkit_card.await_args.args[3]
+        content = _thinking_panel_content(terminal_card)
+        kept_lines = content.split("\n")
+
+        # 截断提示在，且保留的是尾部（最新几轮）完整行
+        assert kept_lines[0] == "> ⚠️ 思考内容过长，仅展示最后一段"
+        assert "> 第899轮思考-完整行内容" in kept_lines
+        assert "开头第一行" not in content
+        # 保留的每一行都是原文的完整行（非拦腰截断的碎片）
+        original_quoted = {f"> {line}" for line in lines}
+        assert set(kept_lines[1:]) <= original_quoted
+        # 原文保留上限 8000；quote 后整块载荷仍有界（上限+行前缀+提示行）
+        raw_kept = "\n".join(line[2:] for line in kept_lines[1:])
+        assert len(raw_kept) <= 8_000
+        assert len(content) <= 12_000
+
+    @pytest.mark.asyncio
+    async def test_thinking_panel_short_content_no_truncation(self):
+        """未超限的思考原文完整展示，不标注截断."""
+        fs = _make_fake_feishu_service()
+        b = CardStreamBridge(feishu_service=fs, app_id="aid", app_secret="sec",
+                             receive_id="ou", receive_id_type="open_id",
+                             agent_name="TestBot", run_id="run-think-short")
+        await b.start()
+        await b.push_thinking("简短思考")
+        await b.finalize("终版答案")
+
+        terminal_card = fs.update_cardkit_card.await_args.args[3]
+        content = _thinking_panel_content(terminal_card)
+        assert content == "> 简短思考"
+        assert "截断" not in content
+
+    @pytest.mark.asyncio
+    async def test_thinking_panel_at_limit_no_truncation(self):
+        """恰好 8000 字符的思考原文不截断（below/at/above 三点覆盖）."""
+        fs = _make_fake_feishu_service()
+        b = CardStreamBridge(feishu_service=fs, app_id="aid", app_secret="sec",
+                             receive_id="ou", receive_id_type="open_id",
+                             agent_name="TestBot", run_id="run-think-limit")
+        await b.start()
+        at_limit = "思" * 8_000
+        await b.push_thinking(at_limit)
+        await b.finalize("终版答案")
+
+        terminal_card = fs.update_cardkit_card.await_args.args[3]
+        content = _thinking_panel_content(terminal_card)
+        assert content == "> " + at_limit
+        assert "截断" not in content
 
 
 # ---------------------------------------------------------------------------
