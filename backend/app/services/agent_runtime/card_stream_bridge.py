@@ -245,8 +245,9 @@ class CardStreamBridge:
 
         # 辅助面板统一节流器 — thinking + tools + banner
         self._aux_flush = FlushController(min_interval=1.0, min_delta=0)
-        # footer 独立计时器 — 更快刷新
-        self._footer_flush = FlushController(min_interval=0.8, min_delta=0)
+        # footer 独立计时器 — 低频即可（秒表显示，0.8s 时与正文争锁，
+        # 曾加剧工具面板物化延迟；5s 精度足够）
+        self._footer_flush = FlushController(min_interval=5.0, min_delta=0)
 
         # Tool state  ({tool_call_id: {name, status, start_time}})
         self._tool_states: dict[str, dict] = {}
