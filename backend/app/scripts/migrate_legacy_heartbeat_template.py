@@ -136,6 +136,11 @@ def _audit_agent(
     logger.info(details)
 
 
+def _legacy_set(legacy_sha256: str | frozenset[str]) -> frozenset[str]:
+    """Normalize the single-string and set forms to one collection."""
+    return {legacy_sha256} if isinstance(legacy_sha256, str) else legacy_sha256
+
+
 async def _migrate_agent(
     storage: StorageBackend,
     *,
@@ -148,7 +153,7 @@ async def _migrate_agent(
 ) -> MigrationCounts:
     counts = MigrationCounts(agents_scanned=1)
     key = _heartbeat_key(agent_id)
-    legacy_set = {legacy_sha256} if isinstance(legacy_sha256, str) else legacy_sha256
+    legacy_set = _legacy_set(legacy_sha256)
     try:
         snapshot = await _read_snapshot(storage, key)
     except Exception as exc:
@@ -259,7 +264,7 @@ async def migrate_legacy_heartbeat_templates(
 ) -> MigrationReport:
     """Audit or migrate non-deleted Agents, preserving tenant boundaries."""
     current_sha256 = _sha256(current_template)
-    legacy_set = {legacy_sha256} if isinstance(legacy_sha256, str) else legacy_sha256
+    legacy_set = _legacy_set(legacy_sha256)
     if current_sha256 in legacy_set:
         raise ValueError("Current HEARTBEAT template still matches a legacy template")
 

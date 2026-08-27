@@ -16,9 +16,21 @@ from loguru import logger
 from scripts.utils import parse_skill_md
 
 try:
-    from scripts.clawith_runner import ChatClient, RunnerConfigError, load_config
+    from scripts.clawith_runner import (
+        ChatClient,
+        EndpointError,
+        LLMClientError,
+        RunnerConfigError,
+        load_config,
+    )
 except ImportError:  # pragma: no cover - direct path execution
-    from clawith_runner import ChatClient, RunnerConfigError, load_config
+    from clawith_runner import (
+        ChatClient,
+        EndpointError,
+        LLMClientError,
+        RunnerConfigError,
+        load_config,
+    )
 
 
 def improve_description(
@@ -213,15 +225,19 @@ def main():
     except RunnerConfigError as exc:
         logger.error(f"Cannot run description improvement: {exc}")
         sys.exit(1)
-    new_description = improve_description(
-        client=client,
-        skill_name=name,
-        skill_content=content,
-        current_description=current_description,
-        eval_results=eval_results,
-        history=history,
-        model=args.model,
-    )
+    try:
+        new_description = improve_description(
+            client=client,
+            skill_name=name,
+            skill_content=content,
+            current_description=current_description,
+            eval_results=eval_results,
+            history=history,
+            model=args.model,
+        )
+    except (EndpointError, LLMClientError) as exc:
+        logger.error(f"Description improvement failed: {exc}")
+        sys.exit(1)
 
     if args.verbose:
         logger.info(f"Improved: {new_description}")

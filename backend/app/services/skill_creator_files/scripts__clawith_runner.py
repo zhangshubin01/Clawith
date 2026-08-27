@@ -52,6 +52,10 @@ class RunnerConfigError(RuntimeError):
     """The platform runner is not configured; the message says how to fix it."""
 
 
+class EndpointError(RuntimeError):
+    """The platform endpoint could not be reached or rejected the request."""
+
+
 def load_config(env: dict[str, str] | None = None) -> dict[str, str]:
     """Resolve runner config from the environment, failing loudly when absent."""
     source = dict(os.environ if env is None else env)
@@ -115,11 +119,11 @@ def post_chat(config: dict[str, str], payload: dict, timeout: float = 30) -> dic
             return json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
         body = exc.read().decode("utf-8", errors="replace")[:300]
-        raise RunnerConfigError(
+        raise EndpointError(
             f"eval endpoint returned HTTP {exc.code}: {body}"
         ) from exc
     except urllib.error.URLError as exc:
-        raise RunnerConfigError(
+        raise EndpointError(
             f"cannot reach eval endpoint {url}: {exc.reason}"
         ) from exc
 
@@ -204,4 +208,6 @@ class ChatClient:
                 "unexpected completion response: "
                 + json.dumps(response, ensure_ascii=False)[:300]
             ) from exc
-        return content or ""
+        if not content or not content.strip():
+            raise LLMClientError("completion returned empty content")
+        return content

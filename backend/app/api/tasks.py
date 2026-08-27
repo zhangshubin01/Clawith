@@ -101,12 +101,13 @@ async def create_task(
             )
         except TaskRuntimeIntakeError as exc:
             # 配置缺失类失败（无模型/无租户等）是请求级错误，不是内部错误。
+            # 有面向用户的文案时优先用它；没有时才回退到 intake 自带消息。
             hint = _TASK_INTAKE_HINTS.get(exc.code, "")
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail={
                     "code": exc.code,
-                    "message": f"{exc} {hint}".strip(),
+                    "message": hint or str(exc),
                 },
             ) from exc
 

@@ -162,3 +162,21 @@ def test_chat_client_complete_malformed_response_raises(runner, monkeypatch):
     client = runner.ChatClient({"base_url": "http://x/v1", "api_key": "k", "model": "m"})
     with pytest.raises(runner.LLMClientError, match="unexpected completion response"):
         client.complete(messages=[])
+
+
+def test_chat_client_complete_empty_content_raises(runner, monkeypatch):
+    import json
+
+    class _Resp:
+        def __enter__(self): return self
+
+        def __exit__(self, *a): return False
+
+        def read(self):
+            return json.dumps({"choices": [{"message": {"content": "  "}}]}).encode()
+
+    monkeypatch.setattr(runner.urllib.request, "urlopen", lambda request, timeout: _Resp())
+
+    client = runner.ChatClient({"base_url": "http://x/v1", "api_key": "k", "model": "m"})
+    with pytest.raises(runner.LLMClientError, match="empty content"):
+        client.complete(messages=[])

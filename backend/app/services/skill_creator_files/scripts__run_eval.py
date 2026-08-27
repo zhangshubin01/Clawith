@@ -21,10 +21,12 @@ from loguru import logger
 from scripts.utils import parse_skill_md
 
 try:
+    from scripts.clawith_runner import EndpointError as _EndpointError
     from scripts.clawith_runner import RunnerConfigError as _RunnerConfigError
     from scripts.clawith_runner import load_config as _load_config
     from scripts.clawith_runner import run_single_query as _runner_single_query
 except ImportError:  # pragma: no cover - direct path execution (python scripts/run_eval.py)
+    from clawith_runner import EndpointError as _EndpointError
     from clawith_runner import RunnerConfigError as _RunnerConfigError
     from clawith_runner import load_config as _load_config
     from clawith_runner import run_single_query as _runner_single_query
@@ -208,14 +210,17 @@ def run_single_query_clawith(
         config = _load_config()
     except _RunnerConfigError as exc:
         raise EvalAbortError(str(exc)) from exc
-    return _runner_single_query(
-        config,
-        query,
-        skill_dir_name,
-        skill_name,
-        skill_description,
-        timeout=timeout,
-    )
+    try:
+        return _runner_single_query(
+            config,
+            query,
+            skill_dir_name,
+            skill_name,
+            skill_description,
+            timeout=timeout,
+        )
+    except _EndpointError as exc:
+        raise EvalAbortError(str(exc)) from exc
 
 
 def run_eval(
@@ -343,19 +348,23 @@ def main():
     if args.verbose:
         logger.info(f"Evaluating: {description}")
 
-    output = run_eval(
-        eval_set=eval_set,
-        skill_name=name,
-        description=description,
-        num_workers=args.num_workers,
-        timeout=args.timeout,
-        project_root=project_root,
-        runs_per_query=args.runs_per_query,
-        trigger_threshold=args.trigger_threshold,
-        model=args.model,
-        runner=args.runner,
-        skill_dir_name=skill_path.name,
-    )
+    try:
+        output = run_eval(
+            eval_set=eval_set,
+            skill_name=name,
+            description=description,
+            num_workers=args.num_workers,
+            timeout=args.timeout,
+            project_root=project_root,
+            runs_per_query=args.runs_per_query,
+            trigger_threshold=args.trigger_threshold,
+            model=args.model,
+            runner=args.runner,
+            skill_dir_name=skill_path.name,
+        )
+    except EvalAbortError as exc:
+        logger.error(str(exc))
+        sys.exit(1)
 
     if args.verbose:
         summary = output["summary"]

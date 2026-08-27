@@ -166,7 +166,7 @@ def test_post_chat_happy_path_and_http_error(runner, monkeypatch):
         raise urllib.error.HTTPError("u", 401, "Unauthorized", None, None)
 
     monkeypatch.setattr(runner.urllib.request, "urlopen", raise_http)
-    with pytest.raises(runner.RunnerConfigError, match="HTTP 401"):
+    with pytest.raises(runner.EndpointError, match="HTTP 401"):
         runner.post_chat(
             {"base_url": "http://platform/v1", "api_key": "bad", "model": "m"},
             {"model": "m", "messages": []},
@@ -238,6 +238,32 @@ def test_run_eval_clawith_runner_aborts_on_config_error(run_eval_mod, runner, mo
             skill_name="Risk Review",
             description="Check release risks",
             num_workers=2,
+            timeout=30,
+            project_root=Path("/tmp"),
+            runner="clawith",
+            skill_dir_name="risk-review",
+        )
+
+
+def test_run_eval_clawith_runner_aborts_on_endpoint_error(run_eval_mod, runner, monkeypatch):
+    _install_sync_pool(run_eval_mod, monkeypatch)
+    monkeypatch.setattr(
+        run_eval_mod,
+        "_load_config",
+        lambda env=None: {"base_url": "http://x/v1", "api_key": "k", "model": "m"},
+    )
+
+    def raise_endpoint(config, query, skill_dir_name, skill_name, skill_description, timeout=30):
+        raise runner.EndpointError("cannot reach eval endpoint")
+
+    monkeypatch.setattr(run_eval_mod, "_runner_single_query", raise_endpoint)
+
+    with pytest.raises(run_eval_mod.EvalAbortError, match="cannot reach eval endpoint"):
+        run_eval_mod.run_eval(
+            eval_set=_eval_set(),
+            skill_name="Risk Review",
+            description="Check release risks",
+            num_workers=1,
             timeout=30,
             project_root=Path("/tmp"),
             runner="clawith",
