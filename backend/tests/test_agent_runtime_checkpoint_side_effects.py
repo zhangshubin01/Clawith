@@ -899,3 +899,103 @@ async def test_rejects_checkpoint_metadata_outside_run_scope() -> None:
         ).handle(run=run, command=command, checkpoint=checkpoint)
 
     assert raised.value.code == "checkpoint_identity_mismatch"
+
+
+class _CardBridgeRecorder:
+    """卡片模式桥 mock：记录终态分派调用，模拟 CardStreamBridge 三态接口。"""
+
+    def __init__(self) -> None:
+        self.error_text: str | None = None
+        self.finalized: str | None = None
+        self.aborted: str | None = None
+        self.withdrawn = False
+
+    async def fallback_error(self, error: str) -> None:
+        self.error_text = error
+
+    async def finalize(self, content: str) -> None:
+        self.finalized = content
+
+    async def abort(self, reason: str = "⏹ 回复已中断") -> None:
+        self.aborted = reason
+
+    async def withdraw(self) -> None:
+        self.withdrawn = True
+
+
+@pytest.mark.asyncio
+async def test_failed_card_mode_pushes_error_card_via_fallback_error() -> None:
+    """卡片模式 failed 终态：推「❌ 处理失败」错误卡（错误码+消息+Run ID），
+    不再走 finalize 谎报成功横幅（回归：2026-08-27 部署打断 run 06565288）。"""
+    run, _, checkpoint = _records(
+        status="failed",
+        lifecycle={
+            "reason": "model_call_failed",
+            "error": {
+                "code": "model_call_failed",
+                "message": "HTTP 429 Too Many Requests",
+            },
+        },
+    )
+    run = replace(run, delivery_target={"_card_config": {"app_id": "app-1"}})
+
+    bridge = _CardBridgeRecorder()
+    unregistered: list[str] = []
+    with (
+        patch(
+            "app.services.agent_runtime.card_stream_bridge.get_bridge",
+            return_value=bridge,
+        ),
+        patch(
+            "app.services.agent_runtime.card_stream_bridge.unregister_bridge",
+            side_effect=unregistered.append,
+        ),
+    ):
+        assert delivery_from_checkpoint(run, checkpoint) is None
+        await asyncio.sleep(0)  # 让 create_task 的分派任务执行
+
+    assert bridge.error_text is not None
+    assert "错误：HTTP 429 Too Many Requests" in bridge.error_text
+    assert "错误码：model_call_failed" in bridge.error_text
+    assert f"Run ID：{run.run_id}" in bridge.error_text
+    assert bridge.finalized is None
+    assert unregistered == [str(run.run_id)]
+
+
+@pytest.mark.asyncio
+async def test_failed_card_mode_without_error_metadata_uses_safe_defaults() -> None:
+    """failed 但 checkpoint 无 error 元数据：错误卡仍给出默认错误码与提示，不崩溃。"""
+    run, _, checkpoint = _records(status="failed", lifecycle={"reason": "unknown"})
+    run = replace(run, delivery_target={"_card_config": {"app_id": "app-1"}})
+
+    bridge = _CardBridgeRecorder()
+    with patch(
+        "app.services.agent_runtime.card_stream_bridge.get_bridge",
+        return_value=bridge,
+    ):
+        assert delivery_from_checkpoint(run, checkpoint) is None
+        await asyncio.sleep(0)
+
+    assert bridge.error_text is not None
+    assert "错误码：runtime_failed" in bridge.error_text
+    assert "后端未提供详细错误信息" in bridge.error_text
+    assert bridge.finalized is None
+
+
+@pytest.mark.asyncio
+async def test_cancelled_card_mode_pushes_abort_banner() -> None:
+    """卡片模式 cancelled 终态：推「⚠️ 已中断」横幅，不再走 finalize 成功横幅。"""
+    run, _, checkpoint = _records(status="cancelled")
+    run = replace(run, delivery_target={"_card_config": {"app_id": "app-1"}})
+
+    bridge = _CardBridgeRecorder()
+    with patch(
+        "app.services.agent_runtime.card_stream_bridge.get_bridge",
+        return_value=bridge,
+    ):
+        assert delivery_from_checkpoint(run, checkpoint) is None
+        await asyncio.sleep(0)
+
+    assert bridge.aborted is not None
+    assert bridge.finalized is None
+    assert bridge.error_text is None

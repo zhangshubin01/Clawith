@@ -32,6 +32,11 @@ from app.services.agent_runtime.delivery import (
     deliver_runtime_message,
     waiting_content,
 )
+from app.services.agent_runtime.delivery_notice import (
+    _HEADLINE_EXECUTION,
+    _LABEL_ERROR_CODE,
+    _LABEL_RUN_ID,
+)
 from app.services.agent_runtime.state import runtime_messages_as_json
 from app.services.agent_runtime.tool_execution import (
     sanitize_tool_arguments,
@@ -176,6 +181,29 @@ def _failure_metadata(checkpoint: CheckpointObservation) -> tuple[str | None, st
     return _text_field(error.get("code")), _text_field(error.get("message"))
 
 
+def _failure_card_text(
+    run: RuntimeRunRecord,
+    code: str | None,
+    message: str | None,
+) -> str:
+    """卡片模式失败终态正文 — 与 delivery.py 纯文本失败文案同构（同源常量，
+    使 delivery_notice 识别器能在后续 run 的模型可见历史中降级失败横幅）。"""
+    error_code = code or "runtime_failed"
+    error_message = (
+        message.strip()
+        if isinstance(message, str) and message.strip()
+        else "后端未提供详细错误信息"
+    )
+    return "\n".join(
+        (
+            _HEADLINE_EXECUTION,
+            f"错误：{error_message}",
+            f"{_LABEL_ERROR_CODE}{error_code}",
+            f"{_LABEL_RUN_ID}{run.run_id}",
+        )
+    )
+
+
 def _terminal_group_handoff(
     checkpoint: CheckpointObservation,
 ) -> dict | None:
@@ -233,6 +261,18 @@ def delivery_from_checkpoint(
                 if _is_no_reply(content):
                     # 群聊非@消息：撤回整张卡片，不留字面 NO_REPLY 终版卡片
                     asyncio.create_task(bridge.withdraw())
+                elif status == "failed":
+                    # 失败终态：推「❌ 处理失败」横幅 + 错误卡（错误码/消息），
+                    # 不再走 finalize 谎报成功横幅（回归：2026-08-27 run 06565288）
+                    error_code, error_message = _failure_metadata(checkpoint)
+                    asyncio.create_task(
+                        bridge.fallback_error(
+                            _failure_card_text(run, error_code, error_message)
+                        )
+                    )
+                elif status == "cancelled":
+                    # 取消终态：推「⚠️ 已中断」横幅，同样不走成功横幅
+                    asyncio.create_task(bridge.abort())
                 else:
                     asyncio.create_task(bridge.finalize(content))
                 unregister_bridge(str(run.run_id))
