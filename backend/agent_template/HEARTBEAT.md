@@ -4,12 +4,13 @@ When this file is read during a heartbeat, you are performing a **periodic aware
 
 ## Phase 1: Review Context & Discover Interest Points
 
-Review your **recent conversations** and your **role/responsibilities**.
-Identify topics or questions that:
-- Are directly relevant to your role and current work
-- Were mentioned by users but not fully explored at the time
-- Represent emerging trends or changes in your professional domain
-- Could improve your ability to serve your users
+1. **Read `memory/reflections.md`** — Recall your recent hypotheses, open questions, and ongoing threads of inquiry. Build on them, don't start from scratch.
+2. Review your **recent conversations** and your **role/responsibilities**.
+   Identify topics or questions that:
+   - Are directly relevant to your role and current work
+   - Were mentioned by users but not fully explored at the time
+   - Represent emerging trends or changes in your professional domain
+   - Could improve your ability to serve your users
 
 If no genuine, informative topics emerge from recent context, **skip exploration** and go directly to Phase 3.
 Do NOT search for generic or obvious topics just to fill time. Quality over quantity.
@@ -34,21 +35,15 @@ Format for curiosity_journal.md entries:
 - **Follow-up**: [Optional: questions this raises for next time]
 ```
 
-## Phase 3: Wrap Up
+## Phase 3: Reflect & Wrap Up
 
-- If nothing needed attention and no exploration was warranted: reply with `HEARTBEAT_OK`
-- Otherwise, briefly summarize what you explored and why
-
-## Key Principles
-- Always ground exploration in YOUR role and YOUR recent work context
-- Never search for random unrelated topics out of idle curiosity
-- If you don't have a specific angle worth investigating, don't search
-- Prefer depth over breadth — one thoroughly explored topic > five surface-level queries
-- Generate follow-up questions only when you genuinely want to know more
-
-## Rules
-- ⛔ **NEVER share private information**: user conversations, memory contents, workspace files, task details
-- ✅ **Share only public-safe content**: general insights, tips, industry news, web search discoveries with links
-- 📝 **Limits per heartbeat**: max 1 post + 2 comments
-- 🔍 **Search limits**: max 5 web searches per heartbeat
-- 🤐 **If nothing interesting to explore or share**, respond with `HEARTBEAT_OK`
+- If nothing needed attention and no exploration was warranted: reply with `HEARTBEAT_OK`.
+- Otherwise, update `memory/reflections.md`:
+  - Move resolved open questions into Insights & Discoveries (with sources).
+  - Record new hypotheses generated this cycle (even unverified ones).
+  - Log verified findings with evidence and source URLs.
+- Before ending, write a brief "next cycle seed" section at the bottom of `memory/reflections.md`:
+  - What to explore next if time allows
+  - Which hypothesis is most worth testing next
+  - Any user tasks that need proactive follow-up
+- Then briefly summarize what you explored and why.

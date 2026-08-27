@@ -30,6 +30,17 @@ from app.services.storage_runtime.facade import get_storage_backend
 from app.services.storage_runtime.fallback import FallbackStorageBackend
 
 LEGACY_HEARTBEAT_SHA256 = "377e8e367d3aaa13d3932335787340363a88105fabe9717f758d90480843a6cd"
+# All known pre-unification HEARTBEAT templates, in the order they were shipped:
+# - 377e8e36: original Plaza-era template
+# - 5aed0d8c: four-phase reflections template (former app/templates fallback)
+# - cb4dfa9c: minimal "awareness check" template (former agent_template, pre-2026-08-27)
+LEGACY_HEARTBEAT_SHA256S = frozenset(
+    {
+        LEGACY_HEARTBEAT_SHA256,
+        "5aed0d8c1971483e23bc7124d336e2386b1ca24b19a08ba589f075996ef440e2",
+        "cb4dfa9c49a226a39cd1befd266f7d43a36685f80485c13f14833b2d330a25cd",
+    }
+)
 HEARTBEAT_FILENAME = "HEARTBEAT.md"
 HEARTBEAT_CONTENT_TYPE = "text/markdown; charset=utf-8"
 
@@ -132,11 +143,12 @@ async def _migrate_agent(
     agent_id: object,
     current_template: bytes,
     current_sha256: str,
-    legacy_sha256: str,
+    legacy_sha256: str | frozenset[str],
     apply: bool,
 ) -> MigrationCounts:
     counts = MigrationCounts(agents_scanned=1)
     key = _heartbeat_key(agent_id)
+    legacy_set = {legacy_sha256} if isinstance(legacy_sha256, str) else legacy_sha256
     try:
         snapshot = await _read_snapshot(storage, key)
     except Exception as exc:
@@ -164,7 +176,7 @@ async def _migrate_agent(
             observed_sha256=observed_sha256,
         )
         return counts
-    if observed_sha256 != legacy_sha256:
+    if observed_sha256 not in legacy_set:
         counts.skipped_custom = 1
         _audit_agent(
             tenant_id=tenant_id,
@@ -243,12 +255,13 @@ async def migrate_legacy_heartbeat_templates(
     *,
     current_template: bytes,
     apply: bool = False,
-    legacy_sha256: str = LEGACY_HEARTBEAT_SHA256,
+    legacy_sha256: str | frozenset[str] = LEGACY_HEARTBEAT_SHA256S,
 ) -> MigrationReport:
     """Audit or migrate non-deleted Agents, preserving tenant boundaries."""
     current_sha256 = _sha256(current_template)
-    if current_sha256 == legacy_sha256:
-        raise ValueError("Current HEARTBEAT template still matches the legacy template")
+    legacy_set = {legacy_sha256} if isinstance(legacy_sha256, str) else legacy_sha256
+    if current_sha256 in legacy_set:
+        raise ValueError("Current HEARTBEAT template still matches a legacy template")
 
     tenant_result = await db.execute(
         select(Tenant.id).where(Tenant.is_active.is_(True)).order_by(Tenant.id)
@@ -293,7 +306,7 @@ async def migrate_legacy_heartbeat_templates(
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Audit or migrate the exact Plaza-era HEARTBEAT template",
+        description="Audit or migrate known legacy HEARTBEAT templates",
     )
     parser.add_argument(
         "--apply",
