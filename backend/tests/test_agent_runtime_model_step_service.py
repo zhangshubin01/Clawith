@@ -3685,11 +3685,130 @@ def test_prompt_messages_stops_replaying_the_original_command_after_step_two() -
     # The original command stays the final control message for the first two steps.
     assert first_step[-1].content == "重新编译"
     assert second_step[-1].content == "重新编译"
-    # From the third step on it is replaced by the fixed continuation message.
+    # From the third step on it is replaced by the continuation message that
+    # carries a neutral short reference to the current task (anchor), never
+    # the verbatim command — the verbatim form re-cues re-execution.
     assert third_step[-1].role == "user"
-    assert third_step[-1].content == "上一轮工具调用已完成；若目标已达成请直接输出最终回复"
+    assert third_step[-1].content == (
+        "（当前任务：「重新编译」）上一轮工具调用已完成；若目标已达成请直接输出最终回复"
+    )
     # Byte-stable across later turns (prefix-cache guard).
     assert third_step[-1] == fourth_step[-1]
+
+
+def test_prompt_messages_continuation_anchor_truncates_long_goal() -> None:
+    """The anchor is a short reference, not the verbatim goal."""
+    long_goal = "重构这个项目" + "详情" * 200
+
+    def build_turn() -> RuntimeContextBuild:
+        return _build(
+            current_run={"run_id": str(uuid.uuid4()), "goal": long_goal},
+            recent_session_messages_snapshot=(),
+            recent_thread_messages=(
+                {"id": "a1", "role": "assistant", "content": "Running gradle"},
+                {
+                    "id": "s1",
+                    "role": "user",
+                    "content": long_goal,
+                    "runtime_input": "current",
+                },
+            ),
+            initial_input={"message_id": "s1", "input_content": long_goal},
+        )
+
+    step = _prompt_messages(
+        static_prompt="Static", dynamic_prompt="Dynamic", build=build_turn(), model_step_count=2
+    )
+
+    anchor = step[-1].content
+    assert anchor.startswith("（当前任务：「")
+    assert anchor.endswith("…」）上一轮工具调用已完成；若目标已达成请直接输出最终回复")
+    assert len(anchor) < model_step_service._TURN_ANCHOR_MAX_CHARS + 40  # 锚点截断 + 固定续接文案
+
+
+def test_prompt_messages_continuation_anchor_falls_back_without_goal() -> None:
+    """Without any user text the continuation stays the plain byte-stable message."""
+
+    def build_turn() -> RuntimeContextBuild:
+        return _build(
+            current_run={"run_id": str(uuid.uuid4())},
+            recent_session_messages_snapshot=(),
+            recent_thread_messages=(
+                {"id": "a1", "role": "assistant", "content": "Running gradle"},
+                {
+                    "id": "s1",
+                    "role": "user",
+                    "content": "继续",
+                    "runtime_input": "current",
+                },
+            ),
+            initial_input={"message_id": "s1"},
+        )
+
+    step = _prompt_messages(
+        static_prompt="Static", dynamic_prompt="Dynamic", build=build_turn(), model_step_count=2
+    )
+
+    assert step[-1].content == "上一轮工具调用已完成；若目标已达成请直接输出最终回复"
+
+
+def test_prompt_messages_continuation_anchor_falls_back_to_goal() -> None:
+    """Without input_content the run goal is the anchor fallback."""
+
+    def build_turn() -> RuntimeContextBuild:
+        return _build(
+            current_run={"run_id": str(uuid.uuid4()), "goal": "构建 APK"},
+            recent_session_messages_snapshot=(),
+            recent_thread_messages=(
+                {"id": "a1", "role": "assistant", "content": "Running gradle"},
+                {
+                    "id": "s1",
+                    "role": "user",
+                    "content": "构建 APK",
+                    "runtime_input": "current",
+                },
+            ),
+            initial_input={"message_id": "s1"},
+        )
+
+    step = _prompt_messages(
+        static_prompt="Static", dynamic_prompt="Dynamic", build=build_turn(), model_step_count=2
+    )
+
+    assert step[-1].content == (
+        "（当前任务：「构建 APK」）上一轮工具调用已完成；若目标已达成请直接输出最终回复"
+    )
+
+
+def test_prompt_messages_continuation_anchor_is_not_an_imperative_directive() -> None:
+    """The anchor is a parenthesised reference, never an imperative/goal
+    sentence — a user-role message reading 「目标：…」 is mistaken for a new
+    directive (direct-chat-run-boundary second-pitfall)."""
+
+    def build_turn() -> RuntimeContextBuild:
+        return _build(
+            current_run={"run_id": str(uuid.uuid4()), "goal": "重新编译"},
+            recent_session_messages_snapshot=(),
+            recent_thread_messages=(
+                {"id": "a1", "role": "assistant", "content": "Running gradle"},
+                {
+                    "id": "s1",
+                    "role": "user",
+                    "content": "重新编译",
+                    "runtime_input": "current",
+                },
+            ),
+            initial_input={"message_id": "s1", "input_content": "重新编译"},
+        )
+
+    step = _prompt_messages(
+        static_prompt="Static", dynamic_prompt="Dynamic", build=build_turn(), model_step_count=2
+    )
+
+    content = step[-1].content
+    assert not content.startswith("目标：")
+    assert not content.startswith("任务：")
+    assert "（当前任务：" in content
 
 
 def test_prompt_messages_never_replaces_repair_or_resume_instructions() -> None:

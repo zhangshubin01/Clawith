@@ -1232,9 +1232,49 @@ _MESSAGE_LAYOUT_NOTE = (
 # third model step on (see `_prompt_messages`). Replaying the user's original
 # instruction verbatim every turn re-cues the model to re-execute an already
 # completed task — the assembly-level first mover behind identical-tool-call
-# loops (2026-08-19). Must stay byte-stable across turns. Repair and resume
-# instructions are never replaced.
+# loops (2026-08-19). The message body is byte-stable within a run: the task
+# anchor varies per run (it carries that run's own goal text), so the
+# continuation is cache-stable per run segment, not across runs. Repair and
+# resume instructions are never replaced.
 _TURN_CONTINUATION_MESSAGE = "上一轮工具调用已完成；若目标已达成请直接输出最终回复"
+# 任务锚点最大长度：短引用而非全文重放，控制 attention 预算。
+_TURN_ANCHOR_MAX_CHARS = 120
+
+
+def _continuation_with_anchor(build: RuntimeContextBuild) -> str:
+    """Continuation message carrying a neutral short reference to the current task.
+
+    OpenAI's prompt-engineering docs state that per-turn instructions do not
+    carry over between turns — a fixed continuation message without the task
+    reference leaves the model without an anchor in long multi-run threads and
+    it drifts to answering an earlier turn's question. The reference is
+    parenthesised and neutral on purpose: a user-role message reading
+    「目标：…」 is itself mistaken for a new directive
+    (direct-chat-run-boundary second pitfall).
+    """
+    reference = _turn_anchor_text(build)
+    if reference is None:
+        return _TURN_CONTINUATION_MESSAGE
+    return f"（当前任务：「{reference}」）{_TURN_CONTINUATION_MESSAGE}"
+
+
+def _turn_anchor_text(build: RuntimeContextBuild) -> str | None:
+    """The clean user text to anchor on — never the platform-decorated goal.
+
+    ``initial_input.input_content`` is the user's original wording; the run
+    ``goal`` carries channel decorations (e.g. the Feishu sender identity
+    prefix) and is only a fallback.
+    """
+    initial_input = build.initial_input or {}
+    content = initial_input.get("input_content")
+    if not isinstance(content, str) or not content.strip():
+        content = build.current_run.get("goal")
+    if not isinstance(content, str) or not content.strip():
+        return None
+    content = content.strip()
+    if len(content) > _TURN_ANCHOR_MAX_CHARS:
+        content = content[:_TURN_ANCHOR_MAX_CHARS] + "…"
+    return content
 
 
 def _prompt_messages(
@@ -1447,11 +1487,12 @@ def _prompt_messages(
                     # From the third model step on, replaying the original
                     # task verbatim re-cues the model to re-execute an
                     # already handled instruction (loop root cause). Swap in
-                    # the byte-stable continuation message instead; repair
-                    # and resume instructions are never replaced.
+                    # the byte-stable continuation message with a neutral
+                    # short task reference instead; repair and resume
+                    # instructions are never replaced.
                     extracted = LLMMessage(
                         role="user",
-                        content=_TURN_CONTINUATION_MESSAGE,
+                        content=_continuation_with_anchor(build),
                     )
             messages.append(extracted)
     if not initial_message_seen:
