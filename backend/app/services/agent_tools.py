@@ -104,6 +104,7 @@ from app.services.sandbox.local.run_workspace import (
 )
 from app.services.sandbox.run_scope import sandbox_run_scope_id
 from app.services.sandbox.config import (
+    ANDROID_BUILD_MAX_TIMEOUT_SECONDS,
     CODE_EXECUTION_DEFAULT_TIMEOUT_SECONDS,
     CODE_EXECUTION_MAX_TIMEOUT_SECONDS,
 )
@@ -4641,7 +4642,7 @@ async def _android_compile_outcome(
     fallback_config = get_sandbox_config()
     merged_config = {**(tool_config or {}), "sandbox_type": "android-build"}
     sandbox_config = SandboxConfig.from_dict(merged_config, fallback_config)
-    timeout = min(1800, sandbox_config.max_timeout)
+    timeout = min(ANDROID_BUILD_MAX_TIMEOUT_SECONDS, sandbox_config.max_timeout)
     backend = get_sandbox_backend(sandbox_config)
 
     try:

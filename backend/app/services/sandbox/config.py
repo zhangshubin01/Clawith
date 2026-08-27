@@ -8,6 +8,9 @@ from pydantic import BaseModel, Field
 
 CODE_EXECUTION_DEFAULT_TIMEOUT_SECONDS = 180
 CODE_EXECUTION_MAX_TIMEOUT_SECONDS = 300
+# Android 构建（devbox 容器）执行硬顶：agent_tools 的 min() 与
+# agent_runtime 调度层 deadline 上限共用此值（单一权威）。
+ANDROID_BUILD_MAX_TIMEOUT_SECONDS = 1800
 
 
 class SandboxType(str, Enum):

@@ -14,7 +14,11 @@ from dataclasses import dataclass, field
 from typing import Literal, cast
 
 from app.services.agent_runtime.state import JsonObject, JsonValue
-from app.services.sandbox.config import CODE_EXECUTION_DEFAULT_TIMEOUT_SECONDS
+from app.services.sandbox.config import (
+    ANDROID_BUILD_MAX_TIMEOUT_SECONDS,
+    CODE_EXECUTION_DEFAULT_TIMEOUT_SECONDS,
+    CODE_EXECUTION_MAX_TIMEOUT_SECONDS,
+)
 
 ToolBindingKind = Literal["builtin", "mcp", "group", "a2a", "agentbay", "legacy"]
 ToolEffect = Literal["read", "write", "external_write"]
@@ -100,12 +104,23 @@ _DEADLINE_POLICIES = {
     "agentbay_code": ToolDeadlinePolicy(
         "agentbay_code", 30.0, 300.0, "stop_waiting_only"
     ),
+    # android_compile 是分钟级构建工具，不能落 runtime_default 的 60s 墙。
+    # default=300s 对齐执行层默认（agent_tools: min(max, SandboxConfig.max_timeout)，
+    # max_timeout 默认 300）；max=1800s 对齐执行层硬顶（ANDROID_BUILD_MAX_TIMEOUT_SECONDS）。
+    "android_build": ToolDeadlinePolicy(
+        "android_build",
+        float(CODE_EXECUTION_MAX_TIMEOUT_SECONDS),
+        float(ANDROID_BUILD_MAX_TIMEOUT_SECONDS),
+        "stop_waiting_only",
+    ),
 }
 
 
 def deadline_policy_for_tool(tool_name: str) -> ToolDeadlinePolicy:
     if tool_name in {"execute_code", "execute_code_e2b"}:
         return _DEADLINE_POLICIES["local_code"]
+    if tool_name == "android_compile":
+        return _DEADLINE_POLICIES["android_build"]
     if tool_name == "agentbay_code_execute":
         return _DEADLINE_POLICIES["agentbay_code"]
     if tool_name in {

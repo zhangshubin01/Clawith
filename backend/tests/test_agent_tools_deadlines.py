@@ -373,3 +373,19 @@ async def test_builtin_dispatch_forwards_runtime_frozen_code_timeout(
 
     assert outcome.status == "succeeded"
     assert observed["runtime_code_timeout_seconds"] == 180
+
+
+def test_android_compile_uses_dedicated_build_deadline_policy() -> None:
+    """android_compile 是分钟级构建工具，不再落入 runtime_default 的 60s 墙。
+
+    对齐执行层真实数值（agent_tools.py: min(1800, sandbox_config.max_timeout)）：
+    default=300s（SandboxConfig.max_timeout 默认值）、max=1800s（执行层硬顶）。
+    """
+    policy = deadline_policy_for_tool("android_compile")
+    assert policy.name == "android_build"
+    assert resolve_tool_deadline_seconds("android_build") == 300
+    assert resolve_tool_deadline_seconds("android_build", 500) == 500
+    assert resolve_tool_deadline_seconds("android_build", 99999) == 1800
+    assert tool_cancel_capability("android_build") == "stop_waiting_only"
+    # 回归锚：execute_code 仍走 local_code（cooperative），不受影响
+    assert deadline_policy_for_tool("execute_code").name == "local_code"
