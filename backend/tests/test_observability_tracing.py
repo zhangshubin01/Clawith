@@ -57,6 +57,28 @@ def test_observe_run_is_noop_when_disabled(monkeypatch: pytest.MonkeyPatch) -> N
     assert captured == ["ran"]
 
 
+def test_observe_tool_is_noop_when_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(tracing, "_get_client", lambda _tenant_id=None: None)
+    captured: list[str] = []
+
+    with tracing.observe_tool(tool_name="write_file", tool_call_id="call-1") as handle:
+        assert handle is None
+        captured.append("ran")
+
+    assert captured == ["ran"]
+
+
+def test_observe_node_is_noop_when_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(tracing, "_get_client", lambda _tenant_id=None: None)
+    captured: list[str] = []
+
+    with tracing.observe_node(node="execute_tool", run_id="r-1") as handle:
+        assert handle is None
+        captured.append("ran")
+
+    assert captured == ["ran"]
+
+
 def test_observe_run_creates_root_span_with_identity(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

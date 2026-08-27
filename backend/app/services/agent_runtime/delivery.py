@@ -143,6 +143,10 @@ _WAITING_ERROR_CODE_REASONS = frozenset(
         "tool_cancelled_outcome_unknown",
         "tool_outcome_unknown",
         "tool_reconciliation_required",
+        # Internal machine code from async polling waits (waiting_type=external).
+        # Currently only waiting_user boundaries are rendered, but this code must
+        # never leak verbatim if an external boundary ever becomes visible.
+        "async_tool_poll_pending",
     }
 )
 

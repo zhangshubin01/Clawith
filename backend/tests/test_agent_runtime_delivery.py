@@ -1353,6 +1353,7 @@ def test_waiting_content_hides_internal_error_codes() -> None:
     assert waiting_content({"reason": "tool_deadline_outcome_unknown"}) == _WAITING_FALLBACK_CONTENT
     assert waiting_content({"reason": "network_interrupted"}) == _WAITING_FALLBACK_CONTENT
     assert waiting_content({"reason": "tool_deadline_exceeded"}) == _WAITING_FALLBACK_CONTENT
+    assert waiting_content({"reason": "async_tool_poll_pending"}) == _WAITING_FALLBACK_CONTENT
     assert waiting_content({}) == _WAITING_FALLBACK_CONTENT
 
 
