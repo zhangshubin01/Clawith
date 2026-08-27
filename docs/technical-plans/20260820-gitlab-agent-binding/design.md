@@ -17,8 +17,10 @@ main.py ── gitlab_binding_router ── app/api/gitlab_binding.py ──┐
                                                                  ▼
                                     app/services/gitlab_workspace.py
                                     run_gitlab_workspace_init()：三态初始化
+                                    + 旧布局迁移 + inject origin 自愈
                                     （git 子进程参数数组，无 shell）
-                                    → /data/agents/<aid>/workspace/（仓库根）
+                                    → /data/agents/<aid>/workspace/<项目名>/
+                                      （仓库目录；workspace 根可放其他不入库文件）
 ```
 
 新增/修改文件清单见 §7。
@@ -76,14 +78,17 @@ class GitlabBindingOut(BaseModel):
   3. upsert ChannelConfig：`app_secret=encrypt_data(token, SECRET_KEY)`（token 非空时）、`extra_config` 合并 `{project_path, default_branch, init_status:'pending'}`、`is_configured=True`
   4. `await db.commit()` 后 `asyncio.create_task(run_gitlab_workspace_init(agent_id, project_path, default_branch, token))`（token 明文只在此传递，不落日志）
   5. 返回 `{"ok": True}`
-- `DELETE /` — 权限同上；`is_configured=False`、`app_secret=None`、`extra_config.init_status='unbound'`；若有工作区仓库，`git config --local --unset url.<rewrite>.insteadOf` 移除凭证（无仓库则跳过）；**文件与 .git 不动**。返回 204。
+- `DELETE /` — 权限同上；`is_configured=False`、`app_secret=None`、`extra_config.init_status='unbound'`；若有工作区仓库，`git config --local --unset url.<rewrite>.insteadOf` 移除凭证（无仓库则跳过）——**按候选路径列表逐一清理**：先 `workspace/<项目名>/`（由 extra_config.project_path 经 `_repo_dir_name` 推导，非法则跳过），再旧布局的 workspace 根（兼容 v2 存量），对存在 `.git` 的路径执行 unset；**文件与 .git 不动**。返回 204。
 
 ### 2.4 服务层（新增 `app/services/gitlab_workspace.py`，目标 <300 行）
 
 ```python
 _AGENT_INIT_LOCKS: dict[uuid.UUID, asyncio.Lock] = {}
 
-def _repo_root(agent_id) -> Path:            # WORKSPACE_ROOT/<aid>/workspace
+def repo_root(agent_id) -> Path:            # WORKSPACE_ROOT/<aid>/workspace（根，可放其他不入库文件）
+def _repo_dir_name(project_path) -> str:    # 取末段；^[\w.-]+$（UNICODE）且拒绝 . / .. / .git / .tmp；非法 raise ValueError
+def repo_path(agent_id, project_path) -> Path:
+    # repo_root(agent_id) / _repo_dir_name(project_path) —— 仓库目录
 def _credential_rewrite(base_url: str, pat: str) -> str:
     # f"https://oauth2:{pat}@{host}/"  （host 取自 base_url）
 
@@ -91,30 +96,48 @@ async def _run_git(args: list[str], *, cwd, timeout=300) -> tuple[int, str, str]
     # asyncio.create_subprocess_exec("git", *args)，参数数组、无 shell；
     # stdout/stderr 截断各 ≤4KB；PAT 替换为 glpat-**** 后才入库/入日志
 
-async def _apply_repo_config(root, rewrite, agent_name, agent_email) -> None:
-    # git config --local url.<rewrite>.insteadOf <base_url>/
+async def _apply_repo_config(root, rewrite, base_prefix, agent_name, agent_email, pat) -> None:
+    # git config --local url.<rewrite>.insteadOf <base_prefix>
+    # git config --local --get-regexp '^url\..*\.insteadOf$' → 同 host 且非当前 key 的旧 PAT 残留键 --unset
     # git config --local user.name <agent_name>      （参数数组直传，防注入）
     # git config --local user.email <agent_email>
 
-def _detect_mode(root) -> str:
-    # 不存在/空/仅 .tmp 等白名单项 → "clone"
+def _detect_mode(repo) -> str:
+    # 仓库目录不存在/空/仅 .tmp 等白名单项 → "clone"
     # 有文件且无 .git → "adopt"；有 .git → "inject"
+
+async def _inject_mode(repo, clone_url, ...) -> str | None:
+    # git remote get-url origin 与 clone_url 比对：
+    #   缺失 → remote add；漂移 → remote set-url；一致 → 不动
+    # 然后 _apply_repo_config + rev-parse HEAD
+
+async def _relocate_legacy(root, repo, pat) -> None:
+    # v2 旧布局迁移：git clone --local --no-hardlinks <root> <repo>
+    # 成功后删 root/.git（untracked 根文件原地保留）；
+    # 失败 rmtree 半成品 repo 且不动 root/.git，raise
+
+def _write_guide(root, repo_dir_name, project_path, default_branch, adopt_note) -> None:
+    # GITLAB_GUIDE.md 写到 workspace 根：先 cd <repo_dir_name>（或 git -C）；
+    # 根下其他文件不属于仓库
 
 async def run_gitlab_workspace_init(agent_id, project_path, default_branch, pat) -> None:
     # async with _AGENT_INIT_LOCKS.setdefault(agent_id, asyncio.Lock()):
+    #   0. _repo_dir_name 非法 → 直接 failed（不碰文件系统）
     #   1. init_status=initializing
-    #   2. 三态分发（clone / adopt / inject，见 spec §7 全流程）
-    #   3. 写 GITLAB_GUIDE.md（§9 内容模板）
-    #   4. init_status=done + init_commit；异常 → failed + 脱敏错误 ≤500 字
+    #   2. 分发（clone / adopt / inject，见 spec §7 全流程）；
+    #      clone 且 root/.git 存在 → 先 _relocate_legacy 再走 inject
+    #   3. 写 GITLAB_GUIDE.md 到 workspace 根（§9 内容模板）
+    #   4. init_status=done + init_commit + repo_dir；异常 → failed + 脱敏错误 ≤500 字
 ```
 
 **关键决策点**
 - `agent_email = f"agent-{agent_id.hex[:8]}@clawith.local"`，`agent_name = agent.name`（任务内从 DB 读取）。
 - 分支选择（clone 模式）：`git symbolic-ref refs/remotes/origin/HEAD` 取远程默认分支；`f_android_ai` 存在则 `checkout -b f_android_ai origin/f_android_ai`，否则 `checkout -b f_android_ai origin/<远程默认>` + `push -u origin f_android_ai`。
 - adopt 模式：`git init -b <default_branch>` → remote add → 写 `.gitignore`（`.tmp/`、`__pycache__/`、`.DS_Store`）→ `add -A && commit "Initial commit"` → `push -u origin <default_branch>`；推完检查远端默认分支，无 main 则指南附提示。
-- inject 模式：仅 `_apply_repo_config`（凭证+身份），不碰文件与远程。
-- 失败语义：clone 失败删除本次 clone 的半成品目录；adopt 失败**不删除任何用户文件**（只回滚本次新建的 .git 元数据目录）；inject 失败仅记状态。
-- 幂等/并发：锁内重复执行无害；`init_status=done` 后 PUT 仅更新凭证/绑定，不重跑（项目路径变化除外——此时若仓库存在且 remote 不匹配，返回 failed 提示「需清空工作区后重绑」）。
+- inject 模式：`remote get-url origin` 自愈（缺失 add / 漂移 set-url / 一致不动）+ `_apply_repo_config`（凭证+身份+旧 PAT 残留键清理），不碰工作树文件。
+- 旧布局迁移：`git clone --local --no-hardlinks` 本地迁移（refs 全量保留、无硬链接依赖根 .git）；成功后删根 `.git`，untracked 根文件原地保留；失败删半成品仓库目录、根 `.git` 不动（可安全重试）。触发条件 = 仓库目录空且根有 `.git`。
+- 失败语义：clone 失败删除本次 clone 的仓库目录；adopt 失败**不删除任何用户文件**（只回滚本次新建的 .git 元数据目录）；inject 失败仅记状态；迁移失败不动根 .git。
+- 幂等/并发：锁内重复执行无害；`init_status=done` 后 PUT 仅更新凭证/绑定，不重跑（项目路径变化除外——此时新项目克隆到新的 `workspace/<新项目名>/`，旧仓库目录保留）。
 
 ## 3. 前端设计（UI）
 
@@ -174,9 +197,9 @@ export const gitlabBindingApi = {
 
 ## 5. 测试设计
 
-- **单元 `tests/test_gitlab_workspace.py`**：`_detect_mode` 三态（含 .tmp 白名单）、分支选择逻辑、凭证重写串格式、身份写入、失败清理规则、PAT 脱敏（mock `_run_git`）
-- **单元 `tests/test_gitlab_binding_api.py`**：GET 不回 token、首次 PUT 无 token 422、权限 403、default_branch 非法 422、DELETE 语义、PUT 幂等
-- **集成（手工，实施时执行）**：对 192.168.5.254 真实测试项目三条路径（clone/adopt/inject）+ 换 token 后 push + push options 建 MR（第 0 步已预验证可行）
+- **单元 `tests/test_gitlab_workspace.py`**：`_detect_mode` 三态（含 .tmp 白名单）、`_repo_dir_name`（末段提取/子组/拒绝 `.` `..` `.git` `.tmp`/CJK 通过）、分支选择逻辑、凭证重写串格式、身份写入、`_apply_repo_config` 清 stale PAT 键（get-regexp 命中旧键 → unset 被调用）、`_inject_mode` origin 自愈三用例（漂移→set-url、缺失→add、一致→无操作）、`_relocate_legacy` 两用例（成功删根 .git + untracked 保留 / clone 失败保留 .git 且 raise 且清理半成品目录）、`_write_guide` 新签名（cd <repo_dir>/不入库文案）、失败清理规则、PAT 脱敏（mock `_run_git`）
+- **单元 `tests/test_gitlab_binding_api.py`**：GET 不回 token、首次 PUT 无 token 422、权限 403、default_branch 非法 422、project_path 校验（完整 URL 拒绝、`.git/` 剥离归一、非法末段 `g/..`/`g/.git`/`g/.tmp` 拒绝、CJK 接受）、DELETE 语义、PUT 幂等
+- **集成（手工，实施时执行）**：对 192.168.5.254 真实测试项目三条路径（clone/adopt/inject）+ 旧布局迁移 + inject origin 自愈 + 换 token 后 push + push options 建 MR（第 0 步已预验证可行）
 - **前端**：SettingsTab 卡片渲染、状态徽标三态、确认弹窗、非 manage 只读
 
 ## 6. 部署与回滚

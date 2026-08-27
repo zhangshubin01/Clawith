@@ -28,6 +28,27 @@ def test_put_schema_accepts_subgroup_path():
     assert data.default_branch == "f_android_ai"
 
 
+def test_put_schema_rejects_full_url():
+    with pytest.raises(Exception):
+        api.GitlabBindingPut(token="t", project_path="http://192.168.5.254/zhangshubin/my-repo")
+
+
+def test_put_schema_strips_git_suffix():
+    data = api.GitlabBindingPut(token="t", project_path="g/r.git/")
+    assert data.project_path == "g/r"
+
+
+def test_put_schema_rejects_unsafe_last_segment():
+    for bad in ("g/..", "g/.git", "g/.tmp", "g/."):
+        with pytest.raises(Exception):
+            api.GitlabBindingPut(token="t", project_path=bad)
+
+
+def test_put_schema_accepts_cjk_project_name():
+    data = api.GitlabBindingPut(token="t", project_path="group/测试仓库")
+    assert data.project_path == "group/测试仓库"
+
+
 def test_put_schema_rejects_long_token():
     with pytest.raises(Exception):
         api.GitlabBindingPut(token="x" * 101, project_path="g/r")

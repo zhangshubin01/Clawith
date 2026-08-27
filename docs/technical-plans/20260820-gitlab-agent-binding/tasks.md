@@ -1,6 +1,6 @@
 # Tasks: GitLab Agent Binding
 
-- 依据：spec.md v2 + design.md（均已确认）
+- 依据：spec.md v2 + **v3 布局修订（§7a）** + design.md（均已确认）
 - 分支：`feat/gitlab-agent-binding`
 - 每波完成后跑相关测试；后端收尾跑 `scripts/arch-guard.sh` + 全量 pytest
 
@@ -44,3 +44,14 @@
 | T4.1 | 真实 GitLab（192.168.5.254）三路径验证：空→clone（f_android_ai 自动创建）、有代码→adopt、有 .git→inject；换 token 后 push；push options 建 MR |
 | T4.2 | 前端手工验收（三态徽标、解绑、确认弹窗） |
 | T4.3 | `/code-review --base <主分支>` 收尾 |
+
+## Wave 5 — 布局修订 v3（workspace 根 → workspace/<项目名>/，用户拍板）
+
+| # | 任务 | 文件 |
+|---|---|---|
+| T5.1 | 服务层：`repo_root`/`repo_path`/`_repo_dir_name`（末段安全校验，非法直接 failed 不碰文件系统）、`_inject_mode`（origin 缺失 add/漂移 set-url/一致不动）、`_relocate_legacy`（v2 根仓库本地 clone 迁移，成功删根 .git + untracked 保留，失败不动根 .git）、`_apply_repo_config` 清同 host 旧 PAT 残留键、`_write_guide` 新签名（写到 workspace 根，cd <repo_dir> 指引）、`run_gitlab_workspace_init` 重写（legacy 分支、repo_dir 入 extra_config） | `backend/app/services/gitlab_workspace.py` |
+| T5.2 | API：validator 拒绝完整 URL（`://`）、剥离末尾 `.git`、末段安全校验（拒绝 `.` `..` `.git` `.tmp`，CJK 允许）；DELETE 凭证清理改候选路径列表（先 `workspace/<项目名>/` 再旧根） | `backend/app/api/gitlab_binding.py` |
+| T5.3 | 单测：`_repo_dir_name`、`_inject_mode` 三用例、`_relocate_legacy` 两用例、stale-key unset、`_write_guide` 新签名、validator 新用例（URL 拒绝/.git 剥离/非法末段/CJK） | `backend/tests/test_gitlab_workspace.py`、`backend/tests/test_gitlab_binding_api.py` |
+| T5.4 | 文档：spec 决策 #3/#8/#10、§4/§6/§7/§7a/§9/§11/§12；design §1/§2.3/§2.4/§5；tasks Wave 5 | 三件套 |
+| T5.5 | 门禁：ruff check/format、定向 pytest、全量 pytest、`scripts/arch-guard.sh`；提交 7 文件到 f-shubin-0806，`git branch -f feat/gitlab-agent-binding HEAD` | — |
+| T5.6 | 部署 backend（deploy.sh 仅 backend）；验证 /api/health、GET gitlab-binding；重新保存绑定（`zhangshubin/my-clawith-dome`）触发旧仓库自动迁移；容器内验证子目录布局、origin 自愈、新指南 | — |

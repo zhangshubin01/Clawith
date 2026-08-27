@@ -2,13 +2,19 @@
 
 Pure git-CLI integration (docs/technical-plans/20260820-gitlab-agent-binding):
 each agent binds one GitLab token + one project; on binding save this module
-initializes the agent workspace root (/data/agents/<aid>/workspace) in one of
-three modes:
+initializes the agent's repo directory — `workspace/<project-name>/` under the
+workspace root (/data/agents/<aid>/workspace), which may also hold files that
+are NOT part of the repo — in one of three modes:
 
-- clone:  workspace root empty → git clone + work-branch init
-- adopt:  existing code without .git → git init + first commit + push
+- clone:  repo dir empty → git clone + work-branch init
+- adopt:  repo dir has code without .git → git init + first commit + push
           (never touches user files)
-- inject: existing repo → only rewrite credentials + committer identity
+- inject: repo dir has .git → rewrite credentials + committer identity and
+          self-heal a drifted origin URL
+
+Legacy layout (repo rooted at the workspace root itself, v2 design) is
+migrated on save: local clone into the repo dir, then the stray root .git is
+dropped; untracked files at the root stay untouched.
 
 All git subprocesses use argv arrays (no shell) and redact the PAT from any
 text that ends up in logs or DB state.
@@ -33,6 +39,8 @@ _SANDBOX_JUNK = {".tmp"}
 
 _BRANCH_RE = re.compile(r"^[A-Za-z0-9_\-./]+$")
 
+_REPO_DIR_RE = re.compile(r"^[\w.-]+$", re.UNICODE)
+
 _CLONE_TIMEOUT_S = 600
 _PUSH_TIMEOUT_S = 300
 _DEFAULT_GIT_TIMEOUT_S = 60
@@ -44,8 +52,21 @@ def _workspace_base() -> Path:
 
 
 def repo_root(agent_id: uuid.UUID) -> Path:
-    """The workspace root that doubles as the bound repository root."""
+    """The agent workspace root (may hold the repo dir plus other files)."""
     return _workspace_base() / str(agent_id) / "workspace"
+
+
+def _repo_dir_name(project_path: str) -> str:
+    """Filesystem-safe directory name = the last segment of the project path."""
+    name = project_path.rstrip("/").rsplit("/", 1)[-1]
+    if not name or not _REPO_DIR_RE.match(name) or name in {".", "..", ".git"} or name in _SANDBOX_JUNK:
+        raise ValueError(f"project_path 的最后一段（目录名）非法: {name!r}")
+    return name
+
+
+def repo_path(agent_id: uuid.UUID, project_path: str) -> Path:
+    """The bound repository directory: workspace/<project-name>/."""
+    return repo_root(agent_id) / _repo_dir_name(project_path)
 
 
 def _credential_rewrite(base_url: str, pat: str) -> str:
@@ -128,6 +149,19 @@ async def _apply_repo_config(
     )
     if rc != 0:
         raise RuntimeError(f"git config insteadOf failed: {err.strip()}")
+    # 清掉指向同一 host 的旧 PAT 残留键（token 轮换后不留在 .git/config 里）
+    rc, out, _ = await _run_git(
+        ["config", "--local", "--get-regexp", r"^url\..*\.insteadOf$"],
+        cwd=root,
+        pat=pat,
+    )
+    if rc == 0:
+        current = f"url.{rewrite}.insteadOf"
+        for line in out.splitlines():
+            key, _, value = line.partition(" ")
+            key, value = key.strip(), value.strip()
+            if value == base_prefix and key != current:
+                await _run_git(["config", "--local", "--unset", key], cwd=root, pat=pat)
     for key, value in (("user.name", agent_name), ("user.email", agent_email)):
         rc, _, err = await _run_git(["config", "--local", key, value], cwd=root, pat=pat)
         if rc != 0:
@@ -248,13 +282,59 @@ async def _adopt_mode(
     return (out.strip() if rc == 0 else None), main_missing
 
 
-def _write_guide(root: Path, project_path: str, default_branch: str, adopt_note: bool) -> None:
+async def _inject_mode(
+    root: Path,
+    clone_url: str,
+    rewrite: str,
+    base_prefix: str,
+    agent_name: str,
+    agent_email: str,
+    pat: str,
+) -> str | None:
+    """Existing repo: self-heal a drifted origin, rewrite credentials + identity.
+
+    Covers both a user-entered bad URL from an earlier save and a legacy
+    relocation whose origin points at the old local path.
+    """
+    rc, out, _ = await _run_git(["remote", "get-url", "origin"], cwd=root, pat=pat)
+    if rc != 0:
+        rc, _, err = await _run_git(["remote", "add", "origin", clone_url], cwd=root, pat=pat)
+        if rc != 0:
+            raise RuntimeError(f"git remote add failed: {err.strip()}")
+    elif out.strip() != clone_url:
+        rc, _, err = await _run_git(["remote", "set-url", "origin", clone_url], cwd=root, pat=pat)
+        if rc != 0:
+            raise RuntimeError(f"git remote set-url failed: {err.strip()}")
+    await _apply_repo_config(root, rewrite, base_prefix, agent_name, agent_email, pat)
+    rc, out, _ = await _run_git(["rev-parse", "HEAD"], cwd=root, pat=pat)
+    return out.strip() if rc == 0 else None
+
+
+async def _relocate_legacy(root: Path, repo: Path, pat: str) -> None:
+    """Migrate the v2 layout (repo at the workspace root) into the repo dir.
+
+    Local clone keeps every ref; untracked files stay at the root (out of the
+    repo), then the stray root .git is dropped. On failure nothing is removed.
+    """
+    rc, _, err = await _run_git(
+        ["clone", "--local", "--no-hardlinks", str(root), str(repo)],
+        pat=pat,
+        timeout=_CLONE_TIMEOUT_S,
+    )
+    if rc != 0:
+        shutil.rmtree(repo, ignore_errors=True)
+        raise RuntimeError(f"legacy layout relocate failed: {err.strip()}")
+    shutil.rmtree(root / ".git", ignore_errors=True)
+
+
+def _write_guide(root: Path, repo_dir_name: str, project_path: str, default_branch: str, adopt_note: bool) -> None:
     guide = root / "GITLAB_GUIDE.md"
     lines = [
         "# GitLab 使用指南（本 agent 专属）",
         "",
-        "- **工作区根就是仓库根**（`workspace/`，沙箱内 `/workspace`），所有代码都在这个 git 仓库里。",
+        f"- **仓库位置**：`workspace/{repo_dir_name}/`（沙箱内 `/workspace/{repo_dir_name}/`），git 操作先 `cd {repo_dir_name}`（或 `git -C {repo_dir_name}`）。",
         f"- 绑定项目：`{project_path}`；工作分支：`{default_branch}`。",
+        "- workspace 根目录下的其他文件**不属于仓库**，git 不会跟踪它们。",
         '- 日常：`git pull` 同步；改动后 `git add -A && git commit -m "..."`；推送到工作分支。',
         f'- 提 MR：`git push origin {default_branch} -o merge_request.create -o merge_request.target=main -o merge_request.title="..."`（已存在 MR 则更新）。',
         "- 分支：本地开发分支随意建/切/合（`git merge` 合进工作分支）；**main 只能经 MR 进入，绝不直接 push**。",
@@ -276,6 +356,7 @@ async def _update_state(
     status: str,
     error: str | None = None,
     commit: str | None = None,
+    repo_dir: str | None = None,
 ) -> None:
     from datetime import datetime, timezone
 
@@ -298,6 +379,8 @@ async def _update_state(
     extra["init_updated_at"] = datetime.now(timezone.utc).isoformat()
     if commit:
         extra["init_commit"] = commit
+    if repo_dir:
+        extra["repo_dir"] = repo_dir
     config.extra_config = extra
     await session.commit()
 
@@ -318,6 +401,14 @@ async def run_gitlab_workspace_init(
     settings = get_settings()
     base_url = settings.GITLAB_BASE_URL.rstrip("/")
     root = repo_root(agent_id)
+    try:
+        repo = repo_path(agent_id, project_path)
+    except ValueError as exc:
+        async with query_dao.session() as session:
+            await _update_state(session, agent_id, status="failed", error=str(exc))
+        logger.warning("[GitLabBinding] bad repo dir name agent={}: {}", agent_id, exc)
+        return
+    repo_name = repo.name
     rewrite = _credential_rewrite(base_url, pat)
     prefix = _base_prefix(base_url)
     clone_url = f"{base_url}/{project_path}.git"
@@ -332,15 +423,23 @@ async def run_gitlab_workspace_init(
             agent_name = (agent.name if agent else "") or str(agent_id)
             agent_email = f"agent-{agent_id.hex[:8]}@clawith.local"
 
-            mode = _detect_mode(root)
-            created_root = False
+            mode = _detect_mode(repo)
+            legacy = False
+            created_repo = False
             try:
+                if mode == "clone" and (root / ".git").exists():
+                    # v2 旧布局（仓库根=工作区根）→ 迁移到子目录
+                    await _relocate_legacy(root, repo, pat)
+                    mode = "inject"
+                    legacy = True
                 if mode == "clone":
                     if not root.exists():
                         root.mkdir(parents=True, exist_ok=True)
-                        created_root = True
+                    if not repo.exists():
+                        repo.mkdir(parents=True, exist_ok=True)
+                        created_repo = True
                     commit = await _clone_mode(
-                        root,
+                        repo,
                         clone_url,
                         default_branch,
                         rewrite,
@@ -352,7 +451,7 @@ async def run_gitlab_workspace_init(
                     adopt_note = False
                 elif mode == "adopt":
                     commit, main_missing = await _adopt_mode(
-                        root,
+                        repo,
                         clone_url,
                         default_branch,
                         rewrite,
@@ -363,17 +462,17 @@ async def run_gitlab_workspace_init(
                     )
                     adopt_note = main_missing
                 else:  # inject
-                    await _apply_repo_config(root, rewrite, prefix, agent_name, agent_email, pat)
-                    rc, out, _ = await _run_git(["rev-parse", "HEAD"], cwd=root, pat=pat)
-                    commit = out.strip() if rc == 0 else None
+                    commit = await _inject_mode(repo, clone_url, rewrite, prefix, agent_name, agent_email, pat)
                     adopt_note = False
 
-                _write_guide(root, project_path, default_branch, adopt_note)
-                await _update_state(session, agent_id, status="done", commit=commit)
+                _write_guide(root, repo_name, project_path, default_branch, adopt_note)
+                await _update_state(session, agent_id, status="done", commit=commit, repo_dir=repo_name)
                 logger.info(
-                    "[GitLabBinding] init done mode={} agent={}",
+                    "[GitLabBinding] init done mode={}{} agent={} repo={}",
                     mode,
+                    " (legacy relocated)" if legacy else "",
                     agent_id,
+                    repo_name,
                 )
             except Exception as exc:  # noqa: BLE001 — background task boundary
                 err = _redact(str(exc)[:500], pat)
@@ -383,8 +482,8 @@ async def run_gitlab_workspace_init(
                     agent_id,
                     err,
                 )
-                if mode == "clone" and created_root:
-                    shutil.rmtree(root, ignore_errors=True)
-                elif mode == "adopt" and (root / ".git").exists():
-                    shutil.rmtree(root / ".git", ignore_errors=True)
+                if mode == "clone" and created_repo:
+                    shutil.rmtree(repo, ignore_errors=True)
+                elif mode == "adopt" and (repo / ".git").exists():
+                    shutil.rmtree(repo / ".git", ignore_errors=True)
                 await _update_state(session, agent_id, status="failed", error=err)

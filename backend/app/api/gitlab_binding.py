@@ -36,9 +36,21 @@ class GitlabBindingPut(BaseModel):
     @field_validator("project_path")
     @classmethod
     def _project_path_valid(cls, v: str) -> str:
-        v = (v or "").strip()
+        v = (v or "").strip().rstrip("/")
         if not v or any(ch.isspace() for ch in v):
             raise ValueError("project_path 不能为空且不能含空白字符")
+        if "://" in v:
+            raise ValueError("project_path 只需 group/repo 形式（例如 zhangshubin/my-repo），不要粘贴完整 URL")
+        # 最后一段将作为工作区子目录名，必须文件系统安全
+        last = v.rsplit("/", 1)[-1]
+        if last.endswith(".git"):
+            if last == ".git":
+                last = ""  # 保留名，走下方拒绝逻辑
+            else:
+                v = v[:-4]  # 容忍用户粘贴 .git 后缀，规范化去掉
+                last = last[:-4]
+        if not last or not re.fullmatch(r"[\w.-]+", last, re.UNICODE) or last in {".", "..", ".tmp"}:
+            raise ValueError("project_path 的最后一段（项目名）只能含字母/数字/_/./-，且不能是 . .. .git .tmp")
         return v
 
     @field_validator("default_branch")
@@ -205,19 +217,28 @@ async def delete_binding(
             pat = decrypt_data(existing.app_secret, settings.SECRET_KEY)
             from app.services.gitlab_workspace import (
                 _credential_rewrite,
+                _repo_dir_name,
                 repo_root,
             )
 
-            root = repo_root(agent_id)
-            if (root / ".git").exists():
-                rewrite = _credential_rewrite(settings.GITLAB_BASE_URL, pat)
-                from app.services.gitlab_workspace import _run_git
+            rewrite = _credential_rewrite(settings.GITLAB_BASE_URL, pat)
+            extra = existing.extra_config or {}
+            project_path = str(extra.get("project_path") or "")
+            candidates = [repo_root(agent_id)]
+            if project_path:
+                try:
+                    candidates.insert(0, repo_root(agent_id) / _repo_dir_name(project_path))
+                except ValueError:
+                    pass  # 路径非法时兜底只清理旧布局根目录
+            for cand in candidates:
+                if (cand / ".git").exists():
+                    from app.services.gitlab_workspace import _run_git
 
-                await _run_git(
-                    ["config", "--local", "--unset", f"url.{rewrite}.insteadOf"],
-                    cwd=root,
-                    pat=pat,
-                )
+                    await _run_git(
+                        ["config", "--local", "--unset", f"url.{rewrite}.insteadOf"],
+                        cwd=cand,
+                        pat=pat,
+                    )
         except Exception as exc:  # noqa: BLE001 — best-effort cleanup
             logger.warning(
                 "[GitLabBinding] unset credential rewrite failed agent={}: {}",
