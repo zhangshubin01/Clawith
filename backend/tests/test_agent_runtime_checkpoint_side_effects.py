@@ -726,6 +726,63 @@ async def test_no_reply_card_mode_withdraws_bridge_and_suppresses_delivery() -> 
     assert unregistered == [str(run.run_id)]
 
 
+@pytest.mark.asyncio
+async def test_waiting_card_mode_pushes_pause_banner_and_suppresses_delivery() -> None:
+    """卡片模式 waiting_user：桥推可读等待文案，抑制 ChannelDelivery。"""
+    run, _, checkpoint = _records(
+        status="waiting_user",
+        lifecycle={
+            "waiting_request": {
+                "waiting_type": "user",
+                "correlation_id": "confirm-1",
+                "question": "需要你的确认。",
+            }
+        },
+    )
+    run = replace(run, delivery_target={"_card_config": {"app_id": "app-1"}})
+
+    class _Bridge:
+        def __init__(self) -> None:
+            self.waiting_text: str | None = None
+
+        async def waiting(self, content: str) -> None:
+            self.waiting_text = content
+
+    bridge = _Bridge()
+    with patch(
+        "app.services.agent_runtime.card_stream_bridge.get_bridge",
+        return_value=bridge,
+    ):
+        assert delivery_from_checkpoint(run, checkpoint) is None
+        await asyncio.sleep(0)  # 让 create_task 的 waiting 任务执行
+
+    assert bridge.waiting_text == "需要你的确认。"
+
+
+@pytest.mark.asyncio
+async def test_waiting_card_mode_without_waiting_request_skips_bridge_push() -> None:
+    """waiting_user 但无 waiting_request 映射：不推横幅、不崩溃、仍抑制投递。"""
+    run, _, checkpoint = _records(status="waiting_user")
+    run = replace(run, delivery_target={"_card_config": {"app_id": "app-1"}})
+
+    class _Bridge:
+        def __init__(self) -> None:
+            self.pushed = False
+
+        async def waiting(self, content: str) -> None:
+            self.pushed = True
+
+    bridge = _Bridge()
+    with patch(
+        "app.services.agent_runtime.card_stream_bridge.get_bridge",
+        return_value=bridge,
+    ):
+        assert delivery_from_checkpoint(run, checkpoint) is None
+        await asyncio.sleep(0)
+
+    assert bridge.pushed is False
+
+
 def test_waiting_delivery_uses_correlation_id_and_prompt() -> None:
     run, _, checkpoint = _records(
         status="waiting_user",

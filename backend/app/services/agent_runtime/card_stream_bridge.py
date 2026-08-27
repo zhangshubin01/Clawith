@@ -239,6 +239,8 @@ class CardStreamBridge:
         self._last_thinking_hash: str = ""
         self._last_tools_hash: str = ""
         self._last_footer_hash: str = ""
+        # 最近一次成功推送的全量正文 — waiting() 追加提示时以此为基底。
+        self._main_content: str = ""
 
         # Accumulated content for terminal card
         self._thinking_text: str = ""
@@ -355,6 +357,32 @@ class CardStreamBridge:
                 "[FEISHU-CARD] card_withdraw_failed card_id={}", self.card_id,
             )
 
+    async def waiting(self, content: str) -> None:
+        """Waiting — make the pause visible instead of a frozen card.
+
+        The run entered waiting_user (approval, tool-deadline reconciliation,
+        regeneration). Without this the Feishu card simply stops updating and
+        the user reads it as stuck. Appends a pause marker plus the readable
+        waiting text to the accumulated main content (never replaces it), and
+        pushes a pause banner. Both go through the standard dedup/
+        serialisation path with ``check_streaming`` defaulted on, so a
+        terminal transition that closes streaming wins any race.
+        """
+        if not self._streaming or not self.card_id:
+            return
+        try:
+            await self._enqueue_push(
+                "status_banner", "⏸ 等待你的决定", "_last_banner_hash",
+                critical=False,
+            )
+            appended = f"{self._main_content}\n\n⏸ {content}".strip()
+            await self.push_text(appended)
+        except Exception:
+            logger.debug(
+                "[FEISHU-CARD] waiting_push_failed card_id={}", self.card_id,
+                exc_info=True,
+            )
+
     async def push_text(self, content: str) -> None:
         """Push the *full accumulated* text to the main-content element.
 
@@ -382,6 +410,7 @@ class CardStreamBridge:
             content,
             "_last_main_hash",
         )
+        self._main_content = content  # 记录全量正文，waiting() 追加以此为基底
         self._footer_flush.schedule(0, self._push_footer)
         self._aux_flush.schedule(0, self._flush_aux_panels)
 

@@ -236,6 +236,12 @@ def delivery_from_checkpoint(
                 else:
                     asyncio.create_task(bridge.finalize(content))
                 unregister_bridge(str(run.run_id))
+            elif status == "waiting_user":
+                # 卡片模式进入 waiting_user：桥推「等待你的决定」横幅并追加
+                # 可读等待文案，卡片不再像卡死；文案与网页端同源。
+                waiting = checkpoint.state["lifecycle"].get("waiting_request")
+                if isinstance(waiting, Mapping):
+                    asyncio.create_task(bridge.waiting(waiting_content(waiting)))
             return None  # bridge 活跃或已 finalize — 抑制 ChannelDelivery
         # bridge 丢失（进程重启/崩溃）— 回退到 ChannelDelivery 纯文本
     if run.system_role == "group_planning" and status == "completed":

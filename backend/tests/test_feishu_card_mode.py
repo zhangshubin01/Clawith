@@ -135,6 +135,44 @@ class TestCardStreamBridge:
         fs.stream_card_content.assert_not_awaited()
 
     @pytest.mark.asyncio
+    async def test_waiting_pushes_visible_pause_banner(self):
+        fs = _make_fake_feishu_service()
+        b = CardStreamBridge(feishu_service=fs, app_id="aid", app_secret="sec",
+                            receive_id="ou", receive_id_type="open_id",
+                            agent_name="TestBot", run_id="run-w1")
+        await b.start()
+        await b.push_text("已有正文：这是此前流式输出的回答。")
+        await b.waiting("工具执行超时且结果未知，请决定：重新尝试或取消。")
+
+        banner_calls = [
+            call for call in fs.stream_card_content.await_args_list
+            if call.args[3] == "status_banner"
+        ]
+        assert banner_calls, "waiting must push a status banner"
+        content = banner_calls[-1].args[4]
+        assert "等待你的决定" in content
+        # 正文必须追加而非替换：已有的流式回答保留，pause 提示附在其后
+        main_calls = [
+            call for call in fs.stream_card_content.await_args_list
+            if call.args[3] == "main_content"
+        ]
+        last_main = main_calls[-1].args[4]
+        assert "已有正文" in last_main
+        assert "⏸" in last_main
+        assert "重新尝试或取消" in last_main
+
+    @pytest.mark.asyncio
+    async def test_waiting_skips_when_not_streaming(self):
+        fs = _make_fake_feishu_service()
+        b = CardStreamBridge(feishu_service=fs, app_id="aid", app_secret="sec",
+                            receive_id="ou", receive_id_type="open_id",
+                            agent_name="TestBot", run_id="run-w2")
+        # No start() called — must not push anything.
+        await b.waiting("x")
+        fs.update_card_element.assert_not_awaited()
+        fs.stream_card_content.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_start_tool_end_tool_lifecycle(self):
         fs = _make_fake_feishu_service()
         b = CardStreamBridge(feishu_service=fs, app_id="aid", app_secret="sec",
