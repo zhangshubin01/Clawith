@@ -16,6 +16,11 @@ from app.schemas.schemas import TaskCreate, TaskLogCreate, TaskLogOut, TaskOut, 
 
 router = APIRouter(prefix="/agents/{agent_id}/tasks", tags=["tasks"])
 
+_TASK_INTAKE_HINTS = {
+    "agent_model_missing": "请先在模型池为该数字员工配置并启用主模型，再创建任务。",
+    "agent_tenant_missing": "该数字员工未绑定公司，无法执行任务。",
+}
+
 
 async def _enrich_task_out(task: Task, db: AsyncSession) -> TaskOut:
     """Convert Task to TaskOut with creator_username populated."""
@@ -86,13 +91,24 @@ async def create_task(
 
     runtime_handle = None
     if data.type == "todo":
-        from app.services.task_executor import enqueue_task_runtime
+        from app.services.task_executor import TaskRuntimeIntakeError, enqueue_task_runtime
 
-        runtime_handle = await enqueue_task_runtime(
-            db,
-            task=task,
-            agent=agent,
-        )
+        try:
+            runtime_handle = await enqueue_task_runtime(
+                db,
+                task=task,
+                agent=agent,
+            )
+        except TaskRuntimeIntakeError as exc:
+            # 配置缺失类失败（无模型/无租户等）是请求级错误，不是内部错误。
+            hint = _TASK_INTAKE_HINTS.get(exc.code, "")
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "code": exc.code,
+                    "message": f"{exc} {hint}".strip(),
+                },
+            ) from exc
 
     task_out = await _enrich_task_out(task, db)
 
