@@ -44,6 +44,7 @@ def _make_fake_feishu_service():
     fs.send_card_by_card_id = AsyncMock(return_value=None)
     fs.send_message = AsyncMock(return_value={"code": 0})
     fs.stream_card_content = AsyncMock(return_value=None)
+    fs.update_card_element = AsyncMock(return_value=None)
     fs.set_card_streaming_mode = AsyncMock(return_value=None)
     fs.update_cardkit_card = AsyncMock(return_value=None)
     return fs
@@ -436,6 +437,32 @@ class TestCardStreamBridge:
         await b.withdraw()  # 不抛
         assert b._streaming is False
         assert b._state == "withdrawn"
+
+    @pytest.mark.asyncio
+    async def test_start_tool_materializes_tools_panel_promptly(self):
+        """工具面板物化由 start_tool 直发 —— 不排在节流 flush 队尾。
+
+        回归：物化曾排在 _flush_aux_panels 末尾，流式高峰下工具面板
+        延迟 10-20s 才出现（生产 run e6f2557d / 0cf6063a 实锤）。
+        """
+        fs = _make_fake_feishu_service()
+        b = CardStreamBridge(feishu_service=fs, app_id="aid", app_secret="sec",
+                             receive_id="ou", receive_id_type="open_id",
+                             agent_name="TestBot", run_id="run-tools-panel")
+        await b.start()
+        b.start_tool("call-1", "list_files")
+        for _ in range(20):
+            await asyncio.sleep(0.01)
+            if fs.update_card_element.await_count:
+                break
+        assert fs.update_card_element.await_count == 1
+        args = fs.update_card_element.await_args.args
+        assert args[3] == "tools_placeholder"  # 替换的是工具占位符
+        assert args[4]["element_id"] == "tools_panel_live"
+        # 幂等：再次 start_tool 不重复物化
+        b.start_tool("call-2", "search_files")
+        await asyncio.sleep(0.05)
+        assert fs.update_card_element.await_count == 1
 
 
 # ---------------------------------------------------------------------------

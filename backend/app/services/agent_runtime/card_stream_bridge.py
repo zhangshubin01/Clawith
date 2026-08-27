@@ -394,6 +394,9 @@ class CardStreamBridge:
             "status": "running",
             "start_time": time.monotonic(),
         }
+        # 面板物化是结构性事件：直接触发专用任务，不与节流内容推送排队。
+        # （曾排在 _flush_aux_panels 队尾，流式高峰下物化被拖后 10-20s。）
+        asyncio.create_task(self._ensure_tools_panel())
         asyncio.create_task(self._schedule_aux_flush())
 
     def end_tool(self, tool_call_id: str, is_error: bool = False) -> None:
@@ -742,6 +745,35 @@ class CardStreamBridge:
         # min_delta=0 使 current_length 参数被忽略，每次调用均触发刷新
         self._aux_flush.schedule(0, self._flush_aux_panels)
 
+    async def _ensure_tools_panel(self) -> None:
+        """物化工具面板占位符 — 一次性结构性事件，直接执行不排队。
+
+        检查-置位在锁内完成，防并发 flush 双物化导致 sequence 乱序。
+        """
+        if not self._streaming or not self.card_id or not self._tool_states:
+            return
+        if self._tools_panel_added:
+            return  # 快路径：已物化，flush 兜底调用免锁跳过
+        try:
+            async with self._lock:
+                if self._tools_panel_added:
+                    return
+                logger.info(
+                    "[FEISHU-CARD] tools_panel_materializing n_tools={}",
+                    len(self._tool_states),
+                )
+                self._tools_panel_added = True
+                panel = self._build_tools_panel()
+                self._sequence += 1
+                await self._fs.update_card_element(
+                    self._app_id, self._app_secret,
+                    self.card_id, "tools_placeholder",
+                    panel, self._sequence,
+                )
+        except Exception:
+            self._tools_panel_added = False
+            logger.debug("[FEISHU-CARD] tools_panel_add_failed", exc_info=True)
+
     async def _flush_aux_panels(self) -> None:
         """统一刷新所有辅助面板 — 对齐 deepthink buildRichPanelPatches.
 
@@ -787,26 +819,9 @@ class CardStreamBridge:
         except Exception:
             logger.debug("[FEISHU-CARD] aux_banner_push_failed", exc_info=True)
 
-        # 工具面板 — 首次有工具时替换占位符
+        # 工具面板 — 首次有工具时物化占位符（start_tool 已直发专用任务，此处兜底）
         if self._tool_states:
-            if not self._tools_panel_added:
-                logger.info(
-                    "[FEISHU-CARD] tools_panel_materializing n_tools={}",
-                    len(self._tool_states),
-                )
-                self._tools_panel_added = True
-                try:
-                    panel = self._build_tools_panel()
-                    async with self._lock:
-                        self._sequence += 1
-                        await self._fs.update_card_element(
-                            self._app_id, self._app_secret,
-                            self.card_id, "tools_placeholder",
-                            panel, self._sequence,
-                        )
-                except Exception:
-                    self._tools_panel_added = False
-                    logger.debug("[FEISHU-CARD] tools_panel_add_failed", exc_info=True)
+            await self._ensure_tools_panel()
         if self._tool_states and self._tools_panel_added:
             lines: list[str] = []
             for t in list(self._tool_states.values())[-8:]:
