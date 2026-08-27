@@ -162,6 +162,55 @@ class TestCardStreamBridge:
         assert "重新尝试或取消" in last_main
 
     @pytest.mark.asyncio
+    async def test_waiting_keeps_footer_clock_ticking(self, monkeypatch):
+        """waiting 期间正文停更，右下角秒表必须继续走，否则用户仍读作卡死."""
+        monkeypatch.setattr(CardStreamBridge, "_WAITING_TICKER_INTERVAL", 0.02)
+        fs = _make_fake_feishu_service()
+        b = CardStreamBridge(feishu_service=fs, app_id="aid", app_secret="sec",
+                             receive_id="ou", receive_id_type="open_id",
+                             agent_name="TestBot", run_id="run-w3")
+
+        def footer_count() -> int:
+            return sum(
+                1 for c in fs.stream_card_content.await_args_list
+                if c.args[3] == "footer_note"
+            )
+
+        await b.start()
+        await b.push_text("正文")
+        await b.waiting("请决定")
+        before = footer_count()
+        await asyncio.sleep(0.07)  # ~3 个 tick，waiting 的 5s 兜底 timer 不会触发
+        assert footer_count() >= before + 2
+        await b.finalize("done")
+        await asyncio.sleep(0)  # 让 cancel 的 ticker 任务收尾
+
+    @pytest.mark.asyncio
+    async def test_content_push_stops_waiting_ticker(self, monkeypatch):
+        """run 恢复（新正文推送）后 waiting 秒表周期任务必须停止."""
+        monkeypatch.setattr(CardStreamBridge, "_WAITING_TICKER_INTERVAL", 0.02)
+        fs = _make_fake_feishu_service()
+        b = CardStreamBridge(feishu_service=fs, app_id="aid", app_secret="sec",
+                             receive_id="ou", receive_id_type="open_id",
+                             agent_name="TestBot", run_id="run-w4")
+
+        def footer_count() -> int:
+            return sum(
+                1 for c in fs.stream_card_content.await_args_list
+                if c.args[3] == "footer_note"
+            )
+
+        await b.start()
+        await b.push_text("正文")
+        await b.waiting("请决定")
+        await b.push_text("恢复输出")
+        await asyncio.sleep(0)  # ticker cancel 收尾
+        before = footer_count()
+        await asyncio.sleep(0.07)
+        assert footer_count() == before
+        b._footer_flush.dispose()  # 清理 push_text 起的 5s 兜底 timer
+
+    @pytest.mark.asyncio
     async def test_waiting_skips_when_not_streaming(self):
         fs = _make_fake_feishu_service()
         b = CardStreamBridge(feishu_service=fs, app_id="aid", app_secret="sec",
@@ -260,6 +309,47 @@ class TestCardStreamBridge:
             el for el in body_elements if el.get("tag") == "markdown" and el.get("text_align") is None
         )
         assert "任务已完成" in text_element["content"]
+
+    @pytest.mark.asyncio
+    async def test_finalize_with_empty_text_keeps_streamed_content(self):
+        """正文已流式输出而 finish 轮次无正文时，终版卡必须保留正文而非兜底文案."""
+        fs = _make_fake_feishu_service()
+        b = CardStreamBridge(feishu_service=fs, app_id="aid", app_secret="sec",
+                             receive_id="ou", receive_id_type="open_id",
+                             agent_name="TestBot", run_id="run-empty-final-2")
+        await b.start()
+        await b.push_text("已经流式输出的完整回答。")
+        await b.finalize("")
+
+        args = fs.update_cardkit_card.await_args.args
+        terminal_card = args[3]
+        text_element = next(
+            el for el in terminal_card["body"]["elements"]
+            if el.get("tag") == "markdown" and el.get("text_align") is None
+        )
+        assert "已经流式输出的完整回答" in text_element["content"]
+        assert "本次未输出正文" not in text_element["content"]
+
+    @pytest.mark.asyncio
+    async def test_waiting_prompt_not_carried_into_terminal_card(self):
+        """waiting 追加的 ⏸ 提示属于实时态，不得混入终版卡片正文兜底."""
+        fs = _make_fake_feishu_service()
+        b = CardStreamBridge(feishu_service=fs, app_id="aid", app_secret="sec",
+                             receive_id="ou", receive_id_type="open_id",
+                             agent_name="TestBot", run_id="run-empty-final-3")
+        await b.start()
+        await b.push_text("正文内容。")
+        await b.waiting("工具执行超时且结果未知，请决定：重新尝试或取消。")
+        await b.finalize("")
+
+        args = fs.update_cardkit_card.await_args.args
+        terminal_card = args[3]
+        text_element = next(
+            el for el in terminal_card["body"]["elements"]
+            if el.get("tag") == "markdown" and el.get("text_align") is None
+        )
+        assert "正文内容" in text_element["content"]
+        assert "⏸" not in text_element["content"]
 
     @pytest.mark.asyncio
     async def test_abort_delegates_to_finalize(self):

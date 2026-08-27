@@ -186,6 +186,11 @@ class CardStreamBridge:
     # docs/technical-plans/20260827-feishu-card-thinking-panel-truncation.md。
     _THINKING_TERMINAL_MAX_CHARS = 8_000
 
+    # waiting 期间 footer 秒表周期刷新间隔。正文/思考停更时 footer 是内容
+    # 驱动的、会冻结；ticker 只在 waiting 窗口跑，恢复推送或终态即停，
+    # 不增加流式期间的 API 调用量。
+    _WAITING_TICKER_INTERVAL = 5.0
+
     # ---- helpers ------------------------------------------------------------
 
     @staticmethod
@@ -268,6 +273,10 @@ class CardStreamBridge:
         self._withdrawn: bool = False
         self._card_ready: asyncio.Event = asyncio.Event()
 
+        # waiting 期间 footer 秒表周期刷新任务 — 内容驱动推送的补充；
+        # 恢复推送（push_text/push_thinking/start_tool）或终态即取消。
+        self._waiting_ticker: asyncio.Task | None = None
+
         # Resilience
         self._patch_fail_count: int = 0
         self._max_patch_failures: int = 3
@@ -330,6 +339,7 @@ class CardStreamBridge:
         A recall failure is logged and contained — the resume flow continues.
         """
         self._withdrawn = True
+        self._stop_waiting_ticker()
         self._aux_flush.dispose()
         self._footer_flush.dispose()
         if self._state == "creating" and self._creation_future is not None:
@@ -375,13 +385,40 @@ class CardStreamBridge:
                 "status_banner", "⏸ 等待你的决定", "_last_banner_hash",
                 critical=False,
             )
+            previous = self._main_content
             appended = f"{self._main_content}\n\n⏸ {content}".strip()
             await self.push_text(appended)
+            # ⏸ 提示属于实时态：恢复 _main_content，避免混入终版卡片兜底正文。
+            self._main_content = previous
+            # 正文停更后 footer 秒表由内容驱动变为冻结 — 启动周期刷新。
+            self._start_waiting_ticker()
         except Exception:
             logger.debug(
                 "[FEISHU-CARD] waiting_push_failed card_id={}", self.card_id,
                 exc_info=True,
             )
+
+    def _start_waiting_ticker(self) -> None:
+        """启动 waiting 期间 footer 秒表周期刷新任务（幂等）。"""
+        if self._waiting_ticker is not None and not self._waiting_ticker.done():
+            return
+        self._waiting_ticker = asyncio.create_task(self._waiting_ticker_loop())
+
+    def _stop_waiting_ticker(self) -> None:
+        """取消 waiting 秒表周期任务 — run 恢复推送或进入终态时调用。"""
+        task = self._waiting_ticker
+        self._waiting_ticker = None
+        if task is not None and not task.done():
+            task.cancel()
+
+    async def _waiting_ticker_loop(self) -> None:
+        """waiting 期间周期刷新右下角秒表；恢复推送或终态即退出。"""
+        try:
+            while self._streaming and not self._finalized and self.card_id:
+                await asyncio.sleep(self._WAITING_TICKER_INTERVAL)
+                await self._push_footer()
+        except asyncio.CancelledError:
+            pass
 
     async def push_text(self, content: str) -> None:
         """Push the *full accumulated* text to the main-content element.
@@ -390,6 +427,7 @@ class CardStreamBridge:
         """
         if not self._streaming:
             return
+        self._stop_waiting_ticker()  # run 恢复 — 秒表交回内容驱动路径
         if not content.strip():
             # 空正文不得推送: CardKit 对空字符串返回 99992402
             # (content min len is 1)。模型只输出推理、未输出正文时,
@@ -416,6 +454,7 @@ class CardStreamBridge:
 
     def start_tool(self, tool_call_id: str, tool_name: str) -> None:
         """Record that a tool started executing (non-blocking push)."""
+        self._stop_waiting_ticker()  # run 恢复信号之一（工具执行即恢复）
         self._tool_states[tool_call_id] = {
             "name": tool_name,
             "status": "running",
@@ -457,12 +496,19 @@ class CardStreamBridge:
 
         self._state = "finalizing"
         self._streaming = False
+        self._stop_waiting_ticker()
         self._aux_flush.dispose()
         self._footer_flush.dispose()
 
-        # 模型只输出推理、未输出正文时 final_text 为空 — 终版卡片
-        # 不能留白, 否则用户看到一张没有正文的卡片。
-        display_text = (final_text or "").strip() or "✅ 任务已完成（本次未输出正文）"
+        # 终版正文优先级：final_text → 流式期间已推送的全量正文 → 兜底文案。
+        # 模型只输出推理时 final_text 为空 — 终版卡片不能留白；但正文已
+        # 流式输出而 finish 轮次无正文时（waiting 恢复场景），同样必须
+        # 保留已显示的正文，绝不能用兜底文案覆盖。
+        display_text = (
+            (final_text or "").strip()
+            or self._main_content.strip()
+            or "✅ 任务已完成（本次未输出正文）"
+        )
 
         try:
             # Push terminal banner, then close streaming.
@@ -499,6 +545,7 @@ class CardStreamBridge:
         """Interrupt — push banner, close streaming, replace with terminal card."""
         self._finalized = True
         self._streaming = False
+        self._stop_waiting_ticker()
         self._aux_flush.dispose()
         self._footer_flush.dispose()
         try:
@@ -522,6 +569,7 @@ class CardStreamBridge:
         """Error — push banner, close streaming, show error card."""
         self._finalized = True
         self._streaming = False
+        self._stop_waiting_ticker()
         self._aux_flush.dispose()
         self._footer_flush.dispose()
         try:
@@ -675,6 +723,7 @@ class CardStreamBridge:
         """累积思考增量；由 aux flush 统一推送到思考面板。"""
         if not self._streaming:
             return
+        self._stop_waiting_ticker()  # run 恢复信号之一
         await self._card_ready.wait()
         self._thinking_text += content
         if not self._thinking_text.strip():
@@ -962,6 +1011,7 @@ class CardStreamBridge:
         if not self._streaming:
             return
         logger.warning("[FEISHU-CARD] degrading_to_v1 card_id={}", self.card_id)
+        self._stop_waiting_ticker()
         self._aux_flush.dispose()
         self._footer_flush.dispose()
 
