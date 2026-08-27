@@ -86,19 +86,27 @@ def extract_token_usage(usage: dict | None) -> TokenUsage | None:
         # DeepSeek reports misses explicitly; for other OpenAI-compatible
         # providers the miss is the uncached remainder of the prompt.
         cache_miss = _token_counter(usage, "prompt_cache_miss_tokens")
-        for details in detail_sources:
-            cached += _token_counter(
-                details,
-                "cached_tokens",
-                "cache_read_tokens",
-                "cache_read_input_tokens",
-                "prompt_cache_hit_tokens",
-            )
-            cache_creation += _token_counter(
-                details,
-                "cache_creation_tokens",
-                "cache_creation_input_tokens",
-            )
+        # Some providers report the same cache counters in both places:
+        # DeepSeek sends prompt_cache_hit_tokens at the top level AND the
+        # identical value as prompt_tokens_details.cached_tokens. Summing both
+        # levels double-counts every hit, so the details are only consulted as
+        # a fallback for providers that report there exclusively (e.g. OpenAI).
+        if not cached:
+            for details in detail_sources:
+                cached += _token_counter(
+                    details,
+                    "cached_tokens",
+                    "cache_read_tokens",
+                    "cache_read_input_tokens",
+                    "prompt_cache_hit_tokens",
+                )
+        if not cache_creation:
+            for details in detail_sources:
+                cache_creation += _token_counter(
+                    details,
+                    "cache_creation_tokens",
+                    "cache_creation_input_tokens",
+                )
         if not cache_miss:
             cache_miss = max(_int_token(usage.get("prompt_tokens")) - cached, 0)
         if cached or cache_creation:

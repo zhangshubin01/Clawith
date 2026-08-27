@@ -46,6 +46,27 @@ class TestExtractDeepSeekUsage:
         assert usage.cache_read_tokens == 11000
         assert usage.cache_miss_tokens == 1000
 
+    def test_real_payload_top_level_and_details_same_value_not_double_counted(self) -> None:
+        """DeepSeek's actual cached-hit response carries the SAME value twice:
+        top-level prompt_cache_hit_tokens AND prompt_tokens_details.cached_tokens.
+        Shape captured live from deepseek-v4-pro on 2026-08-27 (second identical
+        request, cache hit): hit=6656, miss=41, prompt=6697 = 6656 + 41.
+        cache_read must not sum both occurrences, or a 99.4% hit rate (6656/6697)
+        is recorded as 13312/6697 ≈ 199% of the prompt."""
+        usage = extract_token_usage(
+            {
+                "prompt_tokens": 6697,
+                "completion_tokens": 16,
+                "total_tokens": 6713,
+                "prompt_cache_hit_tokens": 6656,
+                "prompt_cache_miss_tokens": 41,
+                "prompt_tokens_details": {"cached_tokens": 6656},
+            }
+        )
+        assert usage is not None
+        assert usage.cache_read_tokens == 6656
+        assert usage.cache_miss_tokens == 41
+
 
 class TestExtractOpenAICompatibleUsage:
     def test_miss_derived_from_uncached_remainder(self) -> None:

@@ -25,6 +25,13 @@ Durable runtime 每轮重发 `system + 动态上下文 + 全量历史`，动态�
 | C. R1 滑动窗口根治 | `4bfb34bf` | compact-first gate：裁剪前查 80% 水位，超限路由 Thread Compact（`compact_guard` 防死循环） | 长任务 input 96k→6.6k 实测生效，滑窗不再短路摘要机制 |
 | D. R2 确认态出 system | `e85184ba` | 确认文案从 static_prompt 移入动态块（`_prompt_messages` 新参数 `extra_instruction`） | system 前缀绝对静态，确认轮不再全量 miss |
 | E. R4-a qwen 缓存边界 | `0e6afedc` | `cache_control` 标记从尾控制消息改打历史尾部（`prefix_cache_break` 标记动态块起点） | DashScope 缓存区不再包含每轮变化的动态块（生产未用 qwen，防御性修复） |
+| F. cache_read 双计修复 | （本提交，见 §3-F） | DeepSeek 同值双报（顶层 `prompt_cache_hit_tokens` 与 `prompt_tokens_details.cached_tokens` 同值同带），原实现对两层求和 → 命中记账恒 ×2；改「顶层优先、details 仅回退」 | `cache_read_tokens` 记账校准 2×→1×；历史落库值未回填，仍虚高约 2 倍 |
+
+### F. cache_read 双计修复（2026-08-27）
+
+- **契约（修复后）**：`TokenUsage.cache_read_tokens` = 该响应命中缓存的输入 token 真实数。OpenAI-compatible 分支：优先顶层 `prompt_cache_hit_tokens`（含别名链），顶层求和为 0 时才回退 details（`prompt_tokens_details` / `input_tokens_details`）的同名计数器；`cache_creation` 同理。`cache_miss` 顶层优先，缺失时按 `prompt_tokens - cached` 兜底。
+- **依据（四路证据闭合）**：①代码求和结构；②DeepSeek 真实响应（同请求第二次命中：顶层 6656 与 details 6656 同值，且 `prompt_tokens`=hit+miss 守恒）；③DB（08-26/27 共 26 行 `daily_token_usage`，25/26 行精确满足 `input = cache_read/2 + cache_miss`，`cache_read` 全偶）；④先写后跑的回归测试。
+- **已知影响**：历史数据不追溯——修复前 `daily_token_usage.cache_read_tokens` 与 `Agent.cache_read_tokens_*` 虚高约 2 倍，由此派生的 DB 命中率偏高、miss 占比偏低；下游无除 2 补偿逻辑（`cache_hit_rate`、admin 聚合），随修复自动校正。Anthropic 分支同型两层求和结构刻意未动（本栈未用 Anthropic，无实测载荷，不扩大范围）。
 
 **实测（08-19）**：修复链全部上线后平台日 miss 占比 **8.0%**（部署前 24.2%，重排后 12.4%）；长任务 96k→6.6k input 样本验证 R1 生效；`Low hit rate` 告警 0 条。
 
