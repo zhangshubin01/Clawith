@@ -368,6 +368,22 @@ Before returning the final Assistant response, verify that:
 """.strip()
 
 
+_MEMORY_MAINTENANCE = """
+### Memory Maintenance
+
+When work surfaces durable information — stable preferences, established facts,
+important decisions, or reusable knowledge — update `memory/memory.md` by
+reading the file first and merging the new information in place. Never blind-overwrite existing entries. If no durable information emerged from the current work, do not write anything.
+
+- Do not record temporary task progress or step-level state in Memory.
+- When a topic is added to or removed from `memory/memory.md`, keep the Topics
+  list in `memory/MEMORY_INDEX.md` in sync.
+- The current user's explicit instruction overrides Memory content and this
+  maintenance policy.
+- A failed Memory write never blocks delivering the task's result.
+""".strip()
+
+
 def _active_capability_policies(allowed_tool_names: frozenset[str]) -> str:
     """Describe only policies whose backing tools are in this model step."""
     policies: list[str] = []
@@ -529,6 +545,9 @@ async def build_agent_context(
                 f"# Available Skills\n\n{skills_catalog}\n\n{skill_policy}"
             )
     static_parts.append(_BASE_PROMPT_OUTPUT)
+
+    if {"read_file", "write_file"} <= allowed:
+        static_parts.append(_MEMORY_MAINTENANCE)
 
     dynamic_parts = [
         "# Dynamic Context Data",

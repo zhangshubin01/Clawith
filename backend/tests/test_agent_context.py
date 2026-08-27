@@ -38,6 +38,39 @@ def _context_patches(*, soul: str = "", memory: str = "", skills: str = ""):
 
 
 @pytest.mark.asyncio
+async def test_memory_maintenance_policy_follows_read_write_capabilities():
+    from app.services.agent_context import build_agent_context
+
+    agent_id = uuid.uuid4()
+    holder, patches = _context_patches()
+    holder["agent_id"] = agent_id
+
+    with patches[0], patches[1], patches[2], patches[3]:
+        without_write, _ = await build_agent_context(
+            agent_id,
+            "TestAgent",
+            allowed_tool_names={"wait"},
+        )
+        with_write, _ = await build_agent_context(
+            agent_id,
+            "TestAgent",
+            allowed_tool_names={"wait", "read_file", "write_file"},
+        )
+
+    assert "Memory Maintenance" not in without_write
+    assert "Memory Maintenance" in with_write
+    # 义务要点（语义断言，非逐字文案）
+    assert "memory/memory.md" in with_write
+    assert "memory/MEMORY_INDEX.md" in with_write
+    assert "reading the file first" in with_write
+    assert "Never blind-overwrite" in with_write
+    assert "do not write anything" in with_write
+    assert "temporary task progress" in with_write
+    assert "explicit instruction overrides" in with_write
+    assert "never blocks delivering" in with_write
+
+
+@pytest.mark.asyncio
 async def test_base_prompt_starts_with_name_and_soul_and_never_injects_self_role():
     from app.services.agent_context import build_agent_context
 
