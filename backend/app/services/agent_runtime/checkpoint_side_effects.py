@@ -744,6 +744,30 @@ async def _record_lifecycle_events(
                     checkpoint.checkpoint_id,
                 )
             )
+            if status == "completed":
+                # Memory Consolidation Gate skip trail: only objective facts,
+                # recorded when the gate let a Run finish without a memory
+                # write. Never projected into chat products, only consumed by
+                # explicit positive filters.
+                lifecycle = checkpoint.state["lifecycle"]
+                skip_reason = _text_field(lifecycle.get("memory_gate_skip_reason"))
+                if skip_reason is not None:
+                    track = lifecycle.get("memory_gate_track")
+                    if not isinstance(track, Mapping):
+                        track = {}
+                    events.append(
+                        (
+                            "memory_consolidation_skipped",
+                            "Memory Consolidation Gate skipped",
+                            {
+                                "skip_reason": skip_reason,
+                                "workspace_writes": track.get("workspace_writes", 0),
+                                "memory_writes": track.get("memory_writes", 0),
+                            },
+                            f"checkpoint:{checkpoint.checkpoint_id}:memory_consolidation_skipped",
+                            checkpoint.checkpoint_id,
+                        )
+                    )
 
     for position, (event_type, summary, payload, key, checkpoint_id) in enumerate(events):
         statement = (

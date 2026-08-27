@@ -276,6 +276,63 @@ async def test_resume_terminal_checkpoint_projects_resume_and_terminal_events() 
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "skip_reason",
+    ["step_budget_exhausted", "no_memory_write_after_forced_round"],
+)
+async def test_completed_checkpoint_projects_memory_consolidation_skip_event(skip_reason: str) -> None:
+    run, command, checkpoint = _records(
+        lifecycle={
+            "final_answer": "done",
+            "memory_gate_track": {"workspace_writes": 2, "memory_writes": 0},
+            "memory_gate_skip_reason": skip_reason,
+        }
+    )
+    sessions = _SessionFactory("not_required")
+
+    await RuntimeCheckpointSideEffects(
+        session_factory=sessions,  # type: ignore[arg-type]
+    ).handle(run=run, command=command, checkpoint=checkpoint)
+
+    compiled = [statement.compile(dialect=postgresql.dialect()).params for statement in sessions.sessions[0].statements]
+    events = [params for params in compiled if "event_type" in params]
+    assert [params["event_type"] for params in events] == [
+        "run_completed",
+        "memory_consolidation_skipped",
+    ]
+    skip = events[1]
+    assert skip["payload"] == {
+        "skip_reason": skip_reason,
+        "workspace_writes": 2,
+        "memory_writes": 0,
+    }
+    assert skip["idempotency_key"] == "checkpoint:checkpoint-1:memory_consolidation_skipped"
+    assert skip["source_checkpoint_id"] == "checkpoint-1"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "lifecycle",
+    [
+        {"final_answer": "done"},
+        {"final_answer": "done", "memory_gate_track": {"workspace_writes": 0, "memory_writes": 1}},
+    ],
+)
+async def test_completed_checkpoint_without_skip_reason_emits_no_consolidation_event(lifecycle: dict) -> None:
+    run, command, checkpoint = _records(lifecycle=lifecycle)
+    sessions = _SessionFactory("not_required")
+
+    await RuntimeCheckpointSideEffects(
+        session_factory=sessions,  # type: ignore[arg-type]
+    ).handle(run=run, command=command, checkpoint=checkpoint)
+
+    compiled = [statement.compile(dialect=postgresql.dialect()).params for statement in sessions.sessions[0].statements]
+    events = [params for params in compiled if "event_type" in params]
+    assert [params["event_type"] for params in events] == ["run_completed"]
+    assert all("memory_consolidation_skipped" not in str(statement) for statement in sessions.sessions[0].statements)
+
+
+@pytest.mark.asyncio
 async def test_checkpoint_projects_replayable_tool_activity_with_redacted_arguments() -> None:
     run, command, checkpoint = _records(lifecycle={"final_answer": "done"})
     checkpoint = replace(

@@ -38,6 +38,25 @@ from app.services.llm.multimodal_content import parse_multimodal_content
 _TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled"})
 _WAITING_STATUSES = frozenset({"waiting_user", "waiting_external", "waiting_agent"})
 
+# Workspace write tools behind the Memory Consolidation Gate. delete_file and
+# move_file are deliberately excluded: their failure modes produce a high false
+# positive rate for "the Run changed durable workspace state".
+_WORKSPACE_WRITE_TOOLS = frozenset({"write_file", "edit_file"})
+_MEMORY_PATH_PREFIX = "memory/"
+
+# The one forced Memory Consolidation round injected before a Run finishes with
+# workspace writes but no memory/ writes. Conditional obligation: the Run may
+# legitimately skip it when there is nothing durable to record.
+MEMORY_CONSOLIDATION_PROMPT = (
+    "Before finishing, review this Run for durable information worth keeping: "
+    "decisions made, requirements discovered, user preferences, or facts about "
+    "the workspace. If any such information exists and is not yet recorded, "
+    "first read the existing files under memory/, then merge the new "
+    "information in place into memory/memory.md, and keep memory/MEMORY_INDEX.md "
+    "in sync when it exists. If there is nothing durable to record, skip this "
+    "step and finish directly without writing anything."
+)
+
 ModelIntent = Literal["tool_calls", "wait", "finish", "text", "error", "compact"]
 VerificationOutcome = Literal["pass", "repair", "fail"]
 
@@ -307,6 +326,45 @@ def _model_protocol_repairs(lifecycle: RuntimeLifecycle) -> dict[str, int]:
             )
         repairs[code] = count
     return repairs
+
+
+def _validated_memory_gate_track(lifecycle: RuntimeLifecycle) -> dict[str, int]:
+    """Validate and copy the per-run workspace/memory write counters."""
+    raw = lifecycle.get("memory_gate_track", {})
+    if not isinstance(raw, Mapping):
+        raise RuntimeNodeTransitionError(
+            "invalid_memory_gate_track",
+            "checkpoint memory_gate_track must be an object",
+        )
+    track: dict[str, int] = {}
+    for counter_name in ("workspace_writes", "memory_writes"):
+        value = raw.get(counter_name, 0)
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise RuntimeNodeTransitionError(
+                "invalid_memory_gate_track",
+                "checkpoint memory_gate_track entries must be non-negative integers",
+            )
+        track[counter_name] = value
+    return track
+
+
+def _tool_call_path(call: Mapping[str, object]) -> str | None:
+    """The agent-relative path argument of a workspace file tool call."""
+    function = call.get("function")
+    if not isinstance(function, Mapping):
+        return None
+    raw_arguments = function.get("arguments")
+    if isinstance(raw_arguments, str):
+        try:
+            raw_arguments = json.loads(raw_arguments)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return None
+    if not isinstance(raw_arguments, Mapping):
+        return None
+    path = raw_arguments.get("path")
+    if not isinstance(path, str):
+        return None
+    return path.strip() or None
 
 
 def _messages(state: RuntimeGraphState) -> list[JsonObject]:
@@ -757,17 +815,50 @@ class DeterministicRuntimeNodeExecutor:
                     "invalid_group_handoff_intent",
                     "finish delivery intent must be an object",
                 )
-            lifecycle.update(
-                {
-                    "status": "verifying",
-                    "next_route": "verify",
-                    "final_answer": result.finish_content,
-                    "finish_delivery_intent": (
-                        dict(finish_delivery_intent) if finish_delivery_intent is not None else None
-                    ),
-                    "pending_tool_calls": [],
-                }
-            )
+            # Memory Consolidation Gate: a Run that changed workspace state
+            # but never wrote a durable memory gets exactly one forced round
+            # before it may finish. The track lives on the lifecycle, so it
+            # survives the Thread Compact message wipe that erases history.
+            gate = _validated_memory_gate_track(lifecycle)
+            forced = lifecycle.get("forced_memory_consolidation") is True
+            needs_consolidation = gate["workspace_writes"] > 0 and gate["memory_writes"] == 0
+            if needs_consolidation and not forced and step_count + 1 <= model_step_limit:
+                new_messages.append(
+                    {
+                        "id": _runtime_message_id(
+                            context,
+                            f"model-step:{step_count}:memory-consolidation",
+                        ),
+                        "role": "user",
+                        "content": MEMORY_CONSOLIDATION_PROMPT,
+                        "runtime_intent": "memory_consolidation",
+                        "runtime_run_id": context.run_id,
+                    }
+                )
+                lifecycle.update(
+                    {
+                        "status": "running",
+                        "pending_tool_calls": [],
+                        "forced_memory_consolidation": True,
+                    }
+                )
+                _schedule_compact(lifecycle)
+            else:
+                if needs_consolidation:
+                    lifecycle["memory_gate_skip_reason"] = (
+                        "no_memory_write_after_forced_round" if forced else "step_budget_exhausted"
+                    )
+                lifecycle.update(
+                    {
+                        "status": "verifying",
+                        "next_route": "verify",
+                        "final_answer": result.finish_content,
+                        "finish_delivery_intent": (
+                            dict(finish_delivery_intent) if finish_delivery_intent is not None else None
+                        ),
+                        "pending_tool_calls": [],
+                    }
+                )
         elif result.intent == "text":
             repair_code = result.repair_code
             if repair_code is not None:
@@ -1045,6 +1136,17 @@ class DeterministicRuntimeNodeExecutor:
                 }
             )
         else:
+            # Memory Consolidation Gate: count only successful executions of
+            # workspace write tools, split by whether the target path is a
+            # memory/ file. Failed writes change nothing durable.
+            if tool_name in _WORKSPACE_WRITE_TOOLS:
+                track = _validated_memory_gate_track(lifecycle)
+                write_path = _tool_call_path(current_call)
+                if write_path is not None and write_path.startswith(_MEMORY_PATH_PREFIX):
+                    track["memory_writes"] += 1
+                else:
+                    track["workspace_writes"] += 1
+                lifecycle["memory_gate_track"] = cast(JsonObject, track)
             lifecycle.update(
                 {
                     "status": "running",

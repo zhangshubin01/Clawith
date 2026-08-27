@@ -127,6 +127,16 @@ class RuntimeLifecycle(TypedDict):
     # Cleared once compaction actually ran; while set, the model step falls
     # back to budget truncation instead of requesting compact again.
     compact_guard: NotRequired[bool]
+    # Per-run write counters behind the Memory Consolidation Gate: successful
+    # write_file/edit_file executions split by whether the target path lives
+    # under memory/. Only successful executions are counted.
+    memory_gate_track: NotRequired[JsonObject]
+    # Set when the finish gate injected its one forced memory consolidation
+    # round; the gate never injects a second round in the same Run.
+    forced_memory_consolidation: NotRequired[bool]
+    # Why the Memory Consolidation Gate let the Run finish without a memory
+    # write; projected as a memory_consolidation_skipped lifecycle event.
+    memory_gate_skip_reason: NotRequired[str]
 
 
 class RuntimeGraphState(TypedDict):

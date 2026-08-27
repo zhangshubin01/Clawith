@@ -210,6 +210,7 @@ def test_agent_run_event_model_captures_product_projection_contract():
     assert _constraint_names(table, sa.CheckConstraint) == {
         "ck_agent_run_events_event_type"
     }
+    assert "'memory_consolidation_skipped'" in _check_sql(table)["ck_agent_run_events_event_type"]
     assert {index.name for index in table.indexes} == {
         "uq_agent_run_events_checkpoint_type_non_delivery",
         "ix_agent_run_events_run_created",

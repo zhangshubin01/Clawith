@@ -32,7 +32,8 @@ class AgentRunEvent(Base):
             "event_type IN ('run_created', 'status_changed', 'waiting_started', 'resumed', "
             "'evidence_added', 'verification_updated', 'run_completed', 'run_failed', "
             "'run_cancelled', 'delivery_succeeded', 'delivery_failed', "
-            "'channel_delivery_delivered', 'channel_delivery_failed')",
+            "'channel_delivery_delivered', 'channel_delivery_failed', "
+            "'memory_consolidation_skipped')",
             name="ck_agent_run_events_event_type",
         ),
         ForeignKeyConstraint(

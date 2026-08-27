@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import uuid
 from collections import deque
 from typing import cast
@@ -688,6 +689,207 @@ async def test_tool_batch_is_executed_before_the_next_model_step() -> None:
     assert [message["role"] for message in messages] == ["assistant", "tool"]
     assert messages[0]["tool_calls"][0]["id"] == "call-1"  # type: ignore[index]
     assert messages[1]["tool_call_id"] == "call-1"
+
+
+class ErrorToolService:
+    def __init__(self, error: JsonObject) -> None:
+        self.error = error
+        self.calls: list[tuple[JsonObject, ...]] = []
+
+    async def execute_pending(
+        self,
+        state: RuntimeGraphState,
+        context: RuntimeContext,
+        tool_calls: tuple[JsonObject, ...],
+    ) -> ToolStepResult:
+        del state, context
+        self.calls.append(tool_calls)
+        return ToolStepResult(error=self.error)
+
+
+def _write_call(call_id: str, path: str) -> JsonObject:
+    return {
+        "id": call_id,
+        "type": "function",
+        "function": {
+            "name": "write_file",
+            "arguments": json.dumps({"path": path, "content": "draft"}),
+        },
+    }
+
+
+@pytest.mark.asyncio
+async def test_successful_workspace_write_is_counted_in_the_memory_gate_track() -> None:
+    run_id = uuid.uuid4()
+    executor = _executor(ModelService(), tools=ToolService())
+    state = _state(run_id)
+    state["lifecycle"]["pending_tool_calls"] = [_write_call("call-ws-1", "reports/result.md")]
+
+    update = await executor.execute("tool", state, _context(run_id, executor, "command-ws"))
+
+    assert update["lifecycle"]["status"] == "running"
+    assert update["lifecycle"]["memory_gate_track"] == {
+        "workspace_writes": 1,
+        "memory_writes": 0,
+    }
+
+
+@pytest.mark.asyncio
+async def test_successful_memory_write_is_counted_as_a_memory_write() -> None:
+    run_id = uuid.uuid4()
+    executor = _executor(ModelService(), tools=ToolService())
+    state = _state(run_id)
+    state["lifecycle"]["pending_tool_calls"] = [
+        {
+            "id": "call-mem-1",
+            "type": "function",
+            "function": {
+                "name": "edit_file",
+                "arguments": json.dumps({"path": "memory/memory.md", "old_string": "a", "new_string": "b"}),
+            },
+        }
+    ]
+
+    update = await executor.execute("tool", state, _context(run_id, executor, "command-mem"))
+
+    assert update["lifecycle"]["memory_gate_track"] == {
+        "workspace_writes": 0,
+        "memory_writes": 1,
+    }
+
+
+@pytest.mark.asyncio
+async def test_failed_workspace_write_is_not_counted_in_the_memory_gate_track() -> None:
+    run_id = uuid.uuid4()
+    executor = _executor(
+        ModelService(),
+        tools=ErrorToolService({"code": "write_failed", "message": "sandbox rejected"}),
+    )
+    state = _state(run_id)
+    state["lifecycle"]["pending_tool_calls"] = [_write_call("call-err-1", "reports/result.md")]
+
+    update = await executor.execute("tool", state, _context(run_id, executor, "command-err"))
+
+    assert update["lifecycle"]["status"] == "failed"
+    assert "memory_gate_track" not in update["lifecycle"]
+
+
+@pytest.mark.asyncio
+async def test_finish_after_workspace_write_without_memory_write_forces_one_consolidation_round() -> None:
+    run_id = uuid.uuid4()
+    model = ModelService(
+        ModelStepResult(
+            intent="tool_calls",
+            assistant_message={"role": "assistant", "tool_calls": [_write_call("call-g1", "reports/r.md")]},
+            tool_calls=(_write_call("call-g1", "reports/r.md"),),
+        ),
+        ModelStepResult(intent="finish", finish_content="done"),
+        ModelStepResult(intent="finish", finish_content="done"),
+    )
+    executor = _executor(model, tools=ToolService())
+
+    result = await _invoke(run_id, executor)
+
+    lifecycle = result["lifecycle"]
+    assert lifecycle["status"] == "completed"
+    assert model.calls == 3
+    assert lifecycle["forced_memory_consolidation"] is True
+    assert lifecycle["memory_gate_track"] == {"workspace_writes": 1, "memory_writes": 0}
+    messages = runtime_messages_as_json(cast(RuntimeGraphState, result))
+    consolidation = [
+        message
+        for message in messages
+        if message.get("role") == "user" and message.get("runtime_intent") == "memory_consolidation"
+    ]
+    assert len(consolidation) == 1
+    assert "memory/memory.md" in str(consolidation[0]["content"])
+
+
+@pytest.mark.asyncio
+async def test_finish_after_memory_write_passes_the_gate_directly() -> None:
+    run_id = uuid.uuid4()
+    model = ModelService(
+        ModelStepResult(
+            intent="tool_calls",
+            assistant_message={
+                "role": "assistant",
+                "tool_calls": [_write_call("call-g2", "memory/memory.md")],
+            },
+            tool_calls=(_write_call("call-g2", "memory/memory.md"),),
+        ),
+        ModelStepResult(intent="finish", finish_content="done"),
+    )
+    executor = _executor(model, tools=ToolService())
+
+    result = await _invoke(run_id, executor)
+
+    lifecycle = result["lifecycle"]
+    assert lifecycle["status"] == "completed"
+    assert model.calls == 2
+    assert "forced_memory_consolidation" not in lifecycle
+    assert "memory_gate_skip_reason" not in lifecycle
+    assert lifecycle["memory_gate_track"] == {"workspace_writes": 0, "memory_writes": 1}
+
+
+@pytest.mark.asyncio
+async def test_finish_without_any_write_passes_the_gate_directly() -> None:
+    run_id = uuid.uuid4()
+    model = ModelService(ModelStepResult(intent="finish", finish_content="done"))
+    executor = _executor(model)
+
+    result = await _invoke(run_id, executor)
+
+    lifecycle = result["lifecycle"]
+    assert lifecycle["status"] == "completed"
+    assert model.calls == 1
+    assert "forced_memory_consolidation" not in lifecycle
+    assert "memory_gate_skip_reason" not in lifecycle
+    assert "memory_gate_track" not in lifecycle
+
+
+@pytest.mark.asyncio
+async def test_finish_without_memory_write_after_the_forced_round_passes_with_a_skip_reason() -> None:
+    run_id = uuid.uuid4()
+    model = ModelService(
+        ModelStepResult(
+            intent="tool_calls",
+            assistant_message={"role": "assistant", "tool_calls": [_write_call("call-g3", "reports/r.md")]},
+            tool_calls=(_write_call("call-g3", "reports/r.md"),),
+        ),
+        ModelStepResult(intent="finish", finish_content="done"),
+        ModelStepResult(intent="finish", finish_content="done"),
+    )
+    executor = _executor(model, tools=ToolService())
+
+    result = await _invoke(run_id, executor)
+
+    lifecycle = result["lifecycle"]
+    assert lifecycle["status"] == "completed"
+    assert model.calls == 3
+    assert lifecycle["forced_memory_consolidation"] is True
+    assert lifecycle["memory_gate_skip_reason"] == "no_memory_write_after_forced_round"
+
+
+@pytest.mark.asyncio
+async def test_finish_passes_when_the_step_budget_cannot_afford_a_forced_round() -> None:
+    run_id = uuid.uuid4()
+    model = ModelService(
+        ModelStepResult(
+            intent="tool_calls",
+            assistant_message={"role": "assistant", "tool_calls": [_write_call("call-g4", "reports/r.md")]},
+            tool_calls=(_write_call("call-g4", "reports/r.md"),),
+        ),
+        ModelStepResult(intent="finish", finish_content="done"),
+    )
+    executor = _executor(model, tools=ToolService())
+
+    result = await _invoke(run_id, executor, model_turn_limit=2)
+
+    lifecycle = result["lifecycle"]
+    assert lifecycle["status"] == "completed"
+    assert model.calls == 2
+    assert "forced_memory_consolidation" not in lifecycle
+    assert lifecycle["memory_gate_skip_reason"] == "step_budget_exhausted"
 
 
 @pytest.mark.asyncio

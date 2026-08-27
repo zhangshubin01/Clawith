@@ -28,7 +28,14 @@ safe read execution 处于 started 且 lease 未到期时，对同 call_id 的�
 **Reconciliation（对账接管）**:
 lease 到期后对未 settle 的 execution 的兜底处理：探测真实结果、标记不可用，或关闭孤儿收据。
 
-_Avoid_: retry（defer 与 attempt 重试是两种机制，勿混用）、recovery、fencing
+**Memory Consolidation Gate（记忆固化门禁）**:
+run 成功收尾路径上的运行时强制检测（机制见 ADR 0005）：本 run 有 workspace 写（write_file/edit_file
+落到非 `memory/` 路径）且无 memory 写（`memory/` 前缀）时，拦截 finish 意图、注入一轮条件义务式
+记忆固化（至多一轮），仍不写则放行并以 `memory_consolidation_skipped` 事件留痕。与纯提示词义务
+（D6 Memory Maintenance）是两层：提示词是语义兜底，门禁是运行时保证。
+
+_Avoid_: retry（defer 与 attempt 重试是两种机制，勿混用）、recovery、fencing；
+Memory Consolidation Gate 勿与 Thread Compact（历史压缩）混用——门禁是收尾注入，压缩是水位触发的历史替换。
 
 ## Deployment Coordination
 
