@@ -79,6 +79,7 @@ async def _lazy_reset_token_counters(agent: Agent, db: AsyncSession) -> bool:
         agent.tokens_used_today = 0
         agent.cache_read_tokens_today = 0
         agent.cache_creation_tokens_today = 0
+        agent.cache_miss_tokens_today = 0
         agent.last_daily_reset = now
         changed = True
 
@@ -87,6 +88,7 @@ async def _lazy_reset_token_counters(agent: Agent, db: AsyncSession) -> bool:
         agent.tokens_used_month = 0
         agent.cache_read_tokens_month = 0
         agent.cache_creation_tokens_month = 0
+        agent.cache_miss_tokens_month = 0
         agent.last_monthly_reset = now
         changed = True
 
