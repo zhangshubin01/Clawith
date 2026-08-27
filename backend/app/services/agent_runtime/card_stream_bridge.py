@@ -386,6 +386,9 @@ class CardStreamBridge:
 
     def start_tool(self, tool_call_id: str, tool_name: str) -> None:
         """Record that a tool started executing (non-blocking push)."""
+        logger.info(
+            "[FEISHU-CARD] tool_started call_id={} tool={}", tool_call_id, tool_name,
+        )
         self._tool_states[tool_call_id] = {
             "name": tool_name,
             "status": "running",
@@ -397,7 +400,13 @@ class CardStreamBridge:
         """Record that a tool finished (non-blocking push)."""
         entry = self._tool_states.get(tool_call_id)
         if entry is None:
+            logger.info(
+                "[FEISHU-CARD] tool_end_missed call_id={}", tool_call_id,
+            )
             return
+        logger.info(
+            "[FEISHU-CARD] tool_ended call_id={} error={}", tool_call_id, is_error,
+        )
         entry["status"] = "error" if is_error else "complete"
         entry["end_time"] = time.monotonic()
         asyncio.create_task(self._schedule_aux_flush())
@@ -781,6 +790,10 @@ class CardStreamBridge:
         # 工具面板 — 首次有工具时替换占位符
         if self._tool_states:
             if not self._tools_panel_added:
+                logger.info(
+                    "[FEISHU-CARD] tools_panel_materializing n_tools={}",
+                    len(self._tool_states),
+                )
                 self._tools_panel_added = True
                 try:
                     panel = self._build_tools_panel()

@@ -11,6 +11,7 @@ from typing import Literal, Protocol, cast
 
 from langchain_core.messages import RemoveMessage
 from langgraph.graph.message import REMOVE_ALL_MESSAGES
+from loguru import logger
 
 from app.services.agent_runtime.state import (
     JsonObject,
@@ -934,6 +935,18 @@ class DeterministicRuntimeNodeExecutor:
             bridge = get_bridge(context.card_bridge_key)
             if bridge is not None:
                 bridge.start_tool(tool_call_id, tool_name)
+            else:
+                logger.info(
+                    "[FEISHU-CARD] tool_card_bridge_missing key={!r} "
+                    "call_id={!r} tool={!r}",
+                    context.card_bridge_key, tool_call_id, tool_name,
+                )
+        else:
+            logger.info(
+                "[FEISHU-CARD] tool_card_guard_skipped key={!r} "
+                "call_id={!r} tool={!r}",
+                context.card_bridge_key, tool_call_id, tool_name,
+            )
 
         result = await self._tool_service.execute_pending(
             state,
