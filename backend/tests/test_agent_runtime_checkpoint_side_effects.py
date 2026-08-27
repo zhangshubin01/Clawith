@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import uuid
 from dataclasses import replace
@@ -666,6 +667,63 @@ async def test_cancel_after_rejected_start_does_not_append_second_terminal_event
     assert stored.lane_held is False
     assert stored.lane_claimed_at is None
     assert not any("INSERT INTO agent_run_events" in str(statement) for statement in session.statements)
+
+
+@pytest.mark.parametrize("answer", ("NO_REPLY", " no-reply ", "NOREPLY"))
+def test_no_reply_terminal_suppresses_non_card_delivery(answer: str) -> None:
+    """群聊被动指令：终态 NO_REPLY 不产生任何用户可见投递（不再字面发送）。"""
+    run, _, checkpoint = _records(lifecycle={"final_answer": answer})
+
+    assert delivery_from_checkpoint(run, checkpoint) is None
+
+
+def test_no_reply_suppresses_delivery_when_card_bridge_is_missing() -> None:
+    """卡片配置在但 bridge 丢失（进程重启回退）：NO_REPLY 同样不投递字面内容。"""
+    run, _, checkpoint = _records(lifecycle={"final_answer": "NO_REPLY"})
+    run = replace(run, delivery_target={"_card_config": {"app_id": "app-1"}})
+
+    with patch(
+        "app.services.agent_runtime.card_stream_bridge.get_bridge",
+        return_value=None,
+    ):
+        assert delivery_from_checkpoint(run, checkpoint) is None
+
+
+@pytest.mark.asyncio
+async def test_no_reply_card_mode_withdraws_bridge_and_suppresses_delivery() -> None:
+    """卡片模式终态 NO_REPLY：撤回整张卡片、清理注册、不产生 ChannelDelivery。"""
+    run, _, checkpoint = _records(lifecycle={"final_answer": "NO_REPLY"})
+    run = replace(run, delivery_target={"_card_config": {"app_id": "app-1"}})
+
+    class _Bridge:
+        def __init__(self) -> None:
+            self.withdrawn = False
+            self.finalized: str | None = None
+
+        async def withdraw(self) -> None:
+            self.withdrawn = True
+
+        async def finalize(self, content: str) -> None:
+            self.finalized = content
+
+    bridge = _Bridge()
+    unregistered: list[str] = []
+    with (
+        patch(
+            "app.services.agent_runtime.card_stream_bridge.get_bridge",
+            return_value=bridge,
+        ),
+        patch(
+            "app.services.agent_runtime.card_stream_bridge.unregister_bridge",
+            side_effect=unregistered.append,
+        ),
+    ):
+        assert delivery_from_checkpoint(run, checkpoint) is None
+        await asyncio.sleep(0)  # 让 create_task 的撤回任务执行
+
+    assert bridge.withdrawn is True
+    assert bridge.finalized is None
+    assert unregistered == [str(run.run_id)]
 
 
 def test_waiting_delivery_uses_correlation_id_and_prompt() -> None:

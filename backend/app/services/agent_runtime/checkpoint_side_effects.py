@@ -207,6 +207,14 @@ def _terminal_thinking(
     return None
 
 
+_NO_REPLY_MARKERS = frozenset({"NO_REPLY", "NO-REPLY", "NOREPLY"})
+
+
+def _is_no_reply(content: str) -> bool:
+    """群聊被动指令协议：模型以 NO_REPLY 表示无需回复 — 不投递任何用户可见产物。"""
+    return content.strip().upper() in _NO_REPLY_MARKERS
+
+
 def delivery_from_checkpoint(
     run: RuntimeRunRecord,
     checkpoint: CheckpointObservation,
@@ -222,7 +230,11 @@ def delivery_from_checkpoint(
         if bridge is not None:
             if status in _TERMINAL_STATUSES:
                 content = _terminal_content(checkpoint, status=status)
-                asyncio.create_task(bridge.finalize(content))
+                if _is_no_reply(content):
+                    # 群聊非@消息：撤回整张卡片，不留字面 NO_REPLY 终版卡片
+                    asyncio.create_task(bridge.withdraw())
+                else:
+                    asyncio.create_task(bridge.finalize(content))
                 unregister_bridge(str(run.run_id))
             return None  # bridge 活跃或已 finalize — 抑制 ChannelDelivery
         # bridge 丢失（进程重启/崩溃）— 回退到 ChannelDelivery 纯文本
@@ -233,11 +245,15 @@ def delivery_from_checkpoint(
     if status not in _TERMINAL_STATUSES:
         return None
     failure_code, failure_message = _failure_metadata(checkpoint) if status == "failed" else (None, None)
+    content = _terminal_content(checkpoint, status=status)
+    if _is_no_reply(content):
+        # 非卡片模式（bridge 丢失回退等）：NO_REPLY 同样不投递
+        return None
     return DeliveryRequest(
         tenant_id=run.tenant_id,
         run_id=run.run_id,
         kind="terminal",
-        content=_terminal_content(checkpoint, status=status),
+        content=content,
         checkpoint_id=checkpoint.checkpoint_id,
         lifecycle_status=cast(DeliveryLifecycleStatus, status),
         group_handoff_intent=_terminal_group_handoff(checkpoint),
