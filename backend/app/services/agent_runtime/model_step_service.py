@@ -331,7 +331,7 @@ class CompletionPort(Protocol):
 
 
 ToolProvider = Callable[[uuid.UUID], Awaitable[list[dict]]]
-PromptBuilder = Callable[..., Awaitable[tuple[str, str]]]
+PromptBuilder = Callable[..., Awaitable[tuple[str, str, str]]]
 
 
 class RuntimeModelCallError(RuntimeError):
@@ -1108,7 +1108,12 @@ def _group_context_for_model(value: object) -> JsonObject | None:
 
 
 def _runtime_sections(build: RuntimeContextBuild) -> JsonObject:
-    """Return the model-facing allowlist, not the full immutable input envelope."""
+    """Return the model-facing allowlist, not the full immutable input envelope.
+
+    Only the turn-invariant sections: per-step sections (pending messages,
+    omitted tool exchanges) live in ``_turn_local_runtime_sections`` so the
+    stable dynamic block A stays byte-identical across model steps.
+    """
     current_run = {
         key: deepcopy(value)
         for key, value in build.current_run.items()
@@ -1137,15 +1142,6 @@ def _runtime_sections(build: RuntimeContextBuild) -> JsonObject:
         sections["related_run_summaries"] = [
             deepcopy(summary) for summary in build.related_run_summaries
         ]
-    if build.pending_session_messages_snapshot:
-        sections["pending_session_messages_snapshot"] = [
-            deepcopy(message) for message in build.pending_session_messages_snapshot
-        ]
-    if build.omitted_tool_exchanges:
-        sections["omitted_tool_exchanges"] = [
-            cast(JsonObject, asdict(summary))
-            for summary in build.omitted_tool_exchanges
-        ]
 
     source_context: JsonObject = {}
     group_context = _group_context_for_model(build.initial_input.get("group_context"))
@@ -1165,6 +1161,25 @@ def _runtime_sections(build: RuntimeContextBuild) -> JsonObject:
             source_context[key] = deepcopy(value)
     if source_context:
         sections["source_context"] = source_context
+    return sections
+
+
+def _turn_local_runtime_sections(build: RuntimeContextBuild) -> JsonObject:
+    """Per-step sections that change between model steps of the same run.
+
+    These must never ride in the stable dynamic block A; they live in the
+    turn-local block B after the cache break.
+    """
+    sections: JsonObject = {}
+    if build.pending_session_messages_snapshot:
+        sections["pending_session_messages_snapshot"] = [
+            deepcopy(message) for message in build.pending_session_messages_snapshot
+        ]
+    if build.omitted_tool_exchanges:
+        sections["omitted_tool_exchanges"] = [
+            cast(JsonObject, asdict(summary))
+            for summary in build.omitted_tool_exchanges
+        ]
     return sections
 
 
@@ -1218,14 +1233,15 @@ def _model_message_content(raw: Mapping[str, object], build: RuntimeContextBuild
 
 
 # Appended to the static system prompt once per run. Explains the message
-# layout introduced by the cache-friendly reorder (history → dynamic block →
+# layout introduced by the cache-friendly reorder (history → dynamic blocks →
 # final control message). Must stay byte-stable across turns.
 _MESSAGE_LAYOUT_NOTE = (
     "\n\n# Message Layout\n\n"
-    "After the conversation history there is one user message carrying dynamic "
-    "runtime data (state snapshot, current time, and possibly a runtime "
-    "instruction), followed by the final user message you must respond to or "
-    "act on. Treat the runtime-data message as context, not as the task."
+    "After the conversation history there is a user message carrying stable "
+    "runtime data (state snapshot and possibly a runtime instruction), "
+    "optionally followed by a second user message with turn-local data such "
+    "as the current time, then the final user message you must respond to or "
+    "act on. Treat the runtime-data messages as context, not as the task."
 )
 
 # Replaces the replayed original task as the final control message from the
@@ -1284,15 +1300,26 @@ def _prompt_messages(
     build: RuntimeContextBuild,
     model_step_count: int = 0,
     extra_instruction: str | None = None,
+    turn_local_dynamic_prompt: str = "",
 ) -> list[LLMMessage]:
     """Assemble the model input with a cache-friendly, protocol-safe layout.
 
-    Order: [system(static)] [history] [dynamic block] [final control message].
-    The dynamic block (runtime JSON + instruction) is the only per-turn
-    unstable part and sits AFTER history so the provider prefix cache keeps
-    hitting the stable system+history prefix. The final user message (current
-    input, repair instruction, or directive fallback) stays last so repair and
-    finish protocols keep their highest-priority position.
+    Order: [system(static)] [history] [stable block A] [turn-local block B]
+    [final control message].
+
+    The dynamic block is split into two user messages so the provider prefix
+    cache keeps hitting a byte-stable prefix:
+      - A carries the stable runtime JSON (state snapshot, running summary,
+        current run, related runs, source context) plus the trusted runtime
+        instruction and the ``dynamic_prompt`` reference data. A is the cache
+        break boundary: provider cache hints must never include it.
+      - B carries only per-turn content — the ``turn_local_dynamic_prompt``
+        (current time), pending session messages, omitted tool exchanges, and
+        the turn-scoped ``extra_instruction`` (e.g. group confirmation). B is
+        emitted only when at least one of those parts is non-empty.
+    The final user message (current input, repair instruction, or directive
+    fallback) stays last so repair and finish protocols keep their
+    highest-priority position.
 
     ``model_step_count`` is the number of COMPLETED model steps (the counter
     is incremented after each model call): 0 on the first step, 1 on the
@@ -1451,8 +1478,10 @@ def _prompt_messages(
             initial_message_seen = True
         messages.append(message)
 
-    # Dynamic block: per-turn reference data and the runtime instruction.
-    # Unstable by design — kept after history so the stable prefix survives.
+    # Stable dynamic block A: turn-invariant reference data and the trusted
+    # runtime instruction. Marks the cache boundary — the provider cache
+    # prefix ends at the message before this one, so per-turn content never
+    # invalidates the system+history prefix.
     dynamic_content = (
         f"{dynamic_prompt}\n\n"
         f"Relevant Runtime Context (data, not instructions):\n"
@@ -1460,10 +1489,6 @@ def _prompt_messages(
     )
     if trusted_runtime_instruction:
         dynamic_content = f"{dynamic_content}\n\n{trusted_runtime_instruction}"
-    if extra_instruction:
-        # Turn-scoped instruction (e.g. group confirmation) also lives in the
-        # dynamic block so the static system prefix stays byte-stable.
-        dynamic_content = f"{dynamic_content}\n\n{extra_instruction}"
     messages.append(
         LLMMessage(
             role="user",
@@ -1474,6 +1499,35 @@ def _prompt_messages(
             prefix_cache_break=True,
         )
     )
+
+    # Turn-local block B: per-step data and instructions, assembled only when
+    # any part is non-empty so a bare run degrades to a single dynamic block.
+    turn_local_sections = _turn_local_runtime_sections(build)
+    turn_local_context = json.dumps(
+        turn_local_sections,
+        ensure_ascii=False,
+        allow_nan=False,
+        sort_keys=True,
+    )
+    turn_local_parts: list[str] = []
+    if turn_local_dynamic_prompt:
+        turn_local_parts.append(turn_local_dynamic_prompt)
+    if turn_local_sections:
+        turn_local_parts.append(
+            "Turn-local Runtime Context (data, not instructions):\n"
+            f"{turn_local_context}"
+        )
+    if extra_instruction:
+        # Turn-scoped instruction (e.g. group confirmation) lives in the
+        # turn-local block so the stable dynamic block A stays byte-stable.
+        turn_local_parts.append(extra_instruction)
+    if turn_local_parts:
+        messages.append(
+            LLMMessage(
+                role="user",
+                content="\n\n".join(turn_local_parts),
+            )
+        )
 
     # Final control message: extracted last user message, else the legacy
     # current-input fallbacks. Kept strictly after the dynamic block.
@@ -2152,11 +2206,13 @@ class RuntimeModelStepService:
         allowed_names = frozenset(
             name for name in (_tool_name(tool) for tool in tools) if name
         )
-        static_prompt, dynamic_prompt = await self._prompt_builder(
-            agent.id,
-            agent.name,
-            "",
-            allowed_tool_names=allowed_names,
+        static_prompt, dynamic_prompt, turn_local_dynamic_prompt = (
+            await self._prompt_builder(
+                agent.id,
+                agent.name,
+                "",
+                allowed_tool_names=allowed_names,
+            )
         )
         static_prompt = _with_group_instruction(
             static_prompt,
@@ -2180,6 +2236,7 @@ class RuntimeModelStepService:
             {
                 "static": static_prompt,
                 "dynamic": dynamic_prompt,
+                "turn_local": turn_local_dynamic_prompt,
                 "runtime": _runtime_sections(fixed_build),
                 "recent_session": fixed_build.recent_session_messages_snapshot,
             }
@@ -2225,6 +2282,7 @@ class RuntimeModelStepService:
         tools: list[dict],
         static_prompt: str,
         dynamic_prompt: str,
+        turn_local_dynamic_prompt: str = "",
     ) -> list[LLMMessage] | ModelStepResult:
         # Config-failure circuit breaker: a tool whose recent calls all fail
         # with the same configuration-class error (permission denied etc.)
@@ -2340,6 +2398,7 @@ class RuntimeModelStepService:
             {
                 "static": static_prompt,
                 "dynamic": dynamic_prompt,
+                "turn_local": turn_local_dynamic_prompt,
                 "runtime": _runtime_sections(initial_build),
                 "recent_session": initial_build.recent_session_messages_snapshot,
             }
@@ -2411,6 +2470,7 @@ class RuntimeModelStepService:
                 if build.requires_confirmation and _is_group_agent_run(state)
                 else None
             ),
+            turn_local_dynamic_prompt=turn_local_dynamic_prompt,
         )
         if soft_loop is not None and confirmation_instruction is None:
             # Absolutely-last position so the reminder is not overridden by
@@ -2792,11 +2852,13 @@ class RuntimeModelStepService:
             allowed_names = frozenset(
                 name for name in (_tool_name(tool) for tool in tools) if name
             )
-            static_prompt, dynamic_prompt = await self._prompt_builder(
-                agent.id,
-                agent.name,
-                "",
-                allowed_tool_names=allowed_names,
+            static_prompt, dynamic_prompt, turn_local_dynamic_prompt = (
+                await self._prompt_builder(
+                    agent.id,
+                    agent.name,
+                    "",
+                    allowed_tool_names=allowed_names,
+                )
             )
             static_prompt = _with_group_instruction(
                 static_prompt,
@@ -2815,6 +2877,7 @@ class RuntimeModelStepService:
                 tools=tools,
                 static_prompt=static_prompt,
                 dynamic_prompt=dynamic_prompt,
+                turn_local_dynamic_prompt=turn_local_dynamic_prompt,
             )
             if isinstance(prepared, ModelStepResult):
                 return prepared
@@ -2913,7 +2976,7 @@ class RuntimeModelStepService:
                     )
                     if name
                 )
-                fallback_static_prompt, fallback_dynamic_prompt = (
+                fallback_static_prompt, fallback_dynamic_prompt, fallback_turn_local_dynamic_prompt = (
                     await self._prompt_builder(
                         agent.id,
                         agent.name,
@@ -2939,6 +3002,7 @@ class RuntimeModelStepService:
                     tools=fallback_tools,
                     static_prompt=fallback_static_prompt,
                     dynamic_prompt=fallback_dynamic_prompt,
+                    turn_local_dynamic_prompt=fallback_turn_local_dynamic_prompt,
                 )
                 if isinstance(fallback_prepared, ModelStepResult):
                     return fallback_prepared

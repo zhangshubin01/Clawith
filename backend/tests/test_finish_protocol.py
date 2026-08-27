@@ -358,7 +358,7 @@ async def test_call_llm_returns_natural_assistant_stop_without_finish(monkeypatc
     monkeypatch.setattr(caller, "_get_user_name", lambda _user_id: _async_return("Ray"))
     monkeypatch.setattr(
         "app.services.agent_context.build_agent_context",
-        lambda *_args, **_kwargs: _async_return(("static", "dynamic")),
+        lambda *_args, **_kwargs: _async_return(("static", "dynamic", "")),
     )
     monkeypatch.setattr(caller, "get_agent_tools_for_llm", lambda _agent_id: _async_return([
         {
@@ -417,7 +417,7 @@ async def test_call_llm_routes_embedded_thinking_before_final_content(monkeypatc
     )
     monkeypatch.setattr(
         "app.services.agent_context.build_agent_context",
-        lambda *_args, **_kwargs: _async_return(("static", "dynamic")),
+        lambda *_args, **_kwargs: _async_return(("static", "dynamic", "")),
     )
     monkeypatch.setattr(
         caller,
@@ -480,7 +480,7 @@ async def test_call_llm_executes_exact_textual_tool_call_before_finishing(
     )
     monkeypatch.setattr(
         "app.services.agent_context.build_agent_context",
-        lambda *_args, **_kwargs: _async_return(("static", "dynamic")),
+        lambda *_args, **_kwargs: _async_return(("static", "dynamic", "")),
     )
     monkeypatch.setattr(
         caller,
@@ -562,7 +562,7 @@ async def test_call_llm_repairs_textual_result_instead_of_publishing_it(monkeypa
     )
     monkeypatch.setattr(
         "app.services.agent_context.build_agent_context",
-        lambda *_args, **_kwargs: _async_return(("static", "dynamic")),
+        lambda *_args, **_kwargs: _async_return(("static", "dynamic", "")),
     )
     monkeypatch.setattr(
         caller,
@@ -626,7 +626,7 @@ async def test_legacy_tool_loop_calls_saved_model_without_verified_tool_calling(
     monkeypatch.setattr(caller, "_get_user_name", lambda _user_id: _async_return("Ray"))
     monkeypatch.setattr(
         "app.services.agent_context.build_agent_context",
-        lambda *_args, **_kwargs: _async_return(("static", "dynamic")),
+        lambda *_args, **_kwargs: _async_return(("static", "dynamic", "")),
     )
     monkeypatch.setattr(
         caller,
@@ -666,7 +666,7 @@ async def test_call_llm_truncated_output_repair_is_bounded(monkeypatch):
     monkeypatch.setattr(caller, "_get_user_name", lambda _user_id: _async_return("Ray"))
     monkeypatch.setattr(
         "app.services.agent_context.build_agent_context",
-        lambda *_args, **_kwargs: _async_return(("static", "dynamic")),
+        lambda *_args, **_kwargs: _async_return(("static", "dynamic", "")),
     )
     monkeypatch.setattr(caller, "get_agent_tools_for_llm", lambda _agent_id: _async_return([
         {
@@ -720,7 +720,7 @@ async def test_invalid_finish_does_not_stop_and_is_returned_as_tool_error(monkey
     monkeypatch.setattr(caller, "_get_user_name", lambda _user_id: _async_return("Ray"))
     monkeypatch.setattr(
         "app.services.agent_context.build_agent_context",
-        lambda *_args, **_kwargs: _async_return(("static", "dynamic")),
+        lambda *_args, **_kwargs: _async_return(("static", "dynamic", "")),
     )
     monkeypatch.setattr(caller, "get_agent_tools_for_llm", lambda _agent_id: _async_return([
         {
@@ -770,7 +770,7 @@ async def test_repeated_invalid_finish_is_bounded_by_protocol_code(monkeypatch):
     monkeypatch.setattr(caller, "_get_user_name", lambda _user_id: _async_return("Ray"))
     monkeypatch.setattr(
         "app.services.agent_context.build_agent_context",
-        lambda *_args, **_kwargs: _async_return(("static", "dynamic")),
+        lambda *_args, **_kwargs: _async_return(("static", "dynamic", "")),
     )
     monkeypatch.setattr(caller, "get_agent_tools_for_llm", lambda _agent_id: _async_return([
         {
@@ -819,7 +819,7 @@ async def test_repeated_invalid_tool_json_is_bounded_by_protocol_code(monkeypatc
     monkeypatch.setattr(caller, "_get_user_name", lambda _user_id: _async_return("Ray"))
     monkeypatch.setattr(
         "app.services.agent_context.build_agent_context",
-        lambda *_args, **_kwargs: _async_return(("static", "dynamic")),
+        lambda *_args, **_kwargs: _async_return(("static", "dynamic", "")),
     )
     monkeypatch.setattr(caller, "get_agent_tools_for_llm", lambda _agent_id: _async_return([
         {
@@ -871,7 +871,7 @@ async def test_invalid_write_file_json_gets_ten_bounded_repairs(monkeypatch):
     monkeypatch.setattr(caller, "_get_user_name", lambda _user_id: _async_return("Ray"))
     monkeypatch.setattr(
         "app.services.agent_context.build_agent_context",
-        lambda *_args, **_kwargs: _async_return(("static", "dynamic")),
+        lambda *_args, **_kwargs: _async_return(("static", "dynamic", "")),
     )
     monkeypatch.setattr(caller, "get_agent_tools_for_llm", lambda _agent_id: _async_return([
         {
@@ -914,7 +914,7 @@ async def test_skip_tools_uses_natural_completion_without_any_tools(monkeypatch)
     monkeypatch.setattr(caller, "_get_user_name", lambda _user_id: _async_return("Ray"))
     monkeypatch.setattr(
         "app.services.agent_context.build_agent_context",
-        lambda *_args, **_kwargs: _async_return(("static", "dynamic")),
+        lambda *_args, **_kwargs: _async_return(("static", "dynamic", "")),
     )
     monkeypatch.setattr(caller, "create_llm_client", lambda **_kwargs: fake_client)
     monkeypatch.setattr(caller, "record_token_usage", lambda *_args, **_kwargs: _async_return(None))
@@ -1004,7 +1004,7 @@ async def test_mid_loop_token_limit_checking(monkeypatch):
     monkeypatch.setattr(caller, "_get_user_name", lambda _user_id: _async_return("Ray"))
     monkeypatch.setattr(
         "app.services.agent_context.build_agent_context",
-        lambda *_args, **_kwargs: _async_return(("static", "dynamic")),
+        lambda *_args, **_kwargs: _async_return(("static", "dynamic", "")),
     )
     monkeypatch.setattr(caller, "get_agent_tools_for_llm", lambda _agent_id: _async_return([
         {"type": "function", "function": {"name": "dummy_tool", "description": "dummy"}}

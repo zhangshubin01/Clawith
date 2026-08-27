@@ -46,12 +46,12 @@ async def test_memory_maintenance_policy_follows_read_write_capabilities():
     holder["agent_id"] = agent_id
 
     with patches[0], patches[1], patches[2], patches[3]:
-        without_write, _ = await build_agent_context(
+        without_write, _stable, _unstable = await build_agent_context(
             agent_id,
             "TestAgent",
             allowed_tool_names={"wait"},
         )
-        with_write, _ = await build_agent_context(
+        with_write, _stable, _unstable = await build_agent_context(
             agent_id,
             "TestAgent",
             allowed_tool_names={"wait", "read_file", "write_file"},
@@ -86,7 +86,7 @@ async def test_base_prompt_starts_with_name_and_soul_and_never_injects_self_role
     holder["agent_id"] = agent_id
 
     with patches[0], patches[1], patches[2], patches[3]:
-        static, dynamic = await build_agent_context(
+        static, stable_dynamic, _unstable_dynamic = await build_agent_context(
             agent_id,
             "TestAgent",
             "THIS ROLE MUST NOT ENTER THE MODEL",
@@ -96,10 +96,10 @@ async def test_base_prompt_starts_with_name_and_soul_and_never_injects_self_role
     assert static.startswith("# Identity\n\nYou are TestAgent, a digital employee in Clawith.")
     assert "<soul>\nBe precise and preserve evidence.\n</soul>" in static
     assert static.index("<soul>") < static.index("# Clawith Environment")
-    assert "THIS ROLE MUST NOT ENTER THE MODEL" not in f"{static}\n{dynamic}"
+    assert "THIS ROLE MUST NOT ENTER THE MODEL" not in f"{static}\n{stable_dynamic}\n{_unstable_dynamic}"
     assert "# Memory" in static
     assert "The release owner is Alice." not in static
-    assert "The release owner is Alice." in dynamic
+    assert "The release owner is Alice." in stable_dynamic
     assert "## Role" not in static
     assert "call `finish`" not in static
     assert "return the exact final answer as normal Assistant content" in static
@@ -114,12 +114,12 @@ async def test_focus_mechanism_is_constant_but_tool_policy_follows_effective_too
     holder["agent_id"] = agent_id
 
     with patches[0], patches[1], patches[2], patches[3]:
-        without_tools, _ = await build_agent_context(
+        without_tools, _stable, _unstable = await build_agent_context(
             agent_id,
             "TestAgent",
             allowed_tool_names={"wait"},
         )
-        with_focus_tools, _ = await build_agent_context(
+        with_focus_tools, _stable, _unstable = await build_agent_context(
             agent_id,
             "TestAgent",
             allowed_tool_names={
@@ -148,12 +148,12 @@ async def test_skill_catalog_requires_read_file_and_prompt_has_no_hardcoded_chan
     holder["agent_id"] = agent_id
 
     with patches[0], patches[1], patches[2], patches[3]:
-        without_loader, _ = await build_agent_context(
+        without_loader, _stable, _unstable = await build_agent_context(
             agent_id,
             "TestAgent",
             allowed_tool_names={"wait"},
         )
-        with_loader, _ = await build_agent_context(
+        with_loader, _stable, _unstable = await build_agent_context(
             agent_id,
             "TestAgent",
             allowed_tool_names={"wait", "read_file", "list_files"},
@@ -214,7 +214,7 @@ async def test_directory_and_human_send_policies_only_name_enabled_tools():
     holder["agent_id"] = agent_id
 
     with patches[0], patches[1], patches[2], patches[3]:
-        static, dynamic = await build_agent_context(
+        static, stable_dynamic, _unstable_dynamic = await build_agent_context(
             agent_id,
             "TestAgent",
             allowed_tool_names={
@@ -225,7 +225,7 @@ async def test_directory_and_human_send_policies_only_name_enabled_tools():
             },
         )
 
-    prompt = f"{static}\n{dynamic}"
+    prompt = f"{static}\n{stable_dynamic}\n{_unstable_dynamic}"
     assert "send_feishu_message" not in prompt
     assert "query_directory" in prompt
     assert "send_platform_message" in prompt
@@ -241,7 +241,7 @@ async def test_experience_policy_is_short_and_only_names_enabled_operations():
     holder["agent_id"] = agent_id
 
     with patches[0], patches[1], patches[2], patches[3]:
-        read_only, _ = await build_agent_context(
+        read_only, _stable, _unstable = await build_agent_context(
             agent_id,
             "TestAgent",
             allowed_tool_names={
@@ -250,7 +250,7 @@ async def test_experience_policy_is_short_and_only_names_enabled_operations():
                 "read_experience",
             },
         )
-        with_draft, _ = await build_agent_context(
+        with_draft, _stable, _unstable = await build_agent_context(
             agent_id,
             "TestAgent",
             allowed_tool_names={

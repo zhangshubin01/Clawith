@@ -456,8 +456,15 @@ async def build_agent_context(
     current_user_name: str | None = None,
     *,
     allowed_tool_names: Collection[str] | None = None,
-) -> tuple[str, str]:
-    """Build Base Prompt V1 plus bounded, explicitly low-trust context data."""
+) -> tuple[str, str, str]:
+    """Build Base Prompt V1 plus bounded, explicitly low-trust context data.
+
+    Returns ``(static, stable_dynamic, unstable_dynamic)``. The dynamic block
+    is split so per-turn content (the current time) never enters the
+    byte-stable prefix: ``stable_dynamic`` carries only turn-invariant
+    reference data, ``unstable_dynamic`` carries the current time and belongs
+    in the turn-local message after the cache break.
+    """
     # `role_description` remains product metadata and is intentionally ignored by
     # model context assembly. Keeping the parameter avoids a broad call-site API
     # break while D-017 is rolled out.
@@ -584,7 +591,6 @@ async def build_agent_context(
                 "</relationship_context>",
             ]
         )
-    dynamic_parts.extend(["", "## Current Time", now_text])
     if current_user_name:
         dynamic_parts.extend(
             [
@@ -593,7 +599,14 @@ async def build_agent_context(
                 f"Current human participant: {current_user_name}",
             ]
         )
-    return "\n\n".join(static_parts), "\n".join(dynamic_parts)
+    # Current Time is turn-local: it must never ride inside the byte-stable
+    # dynamic prefix (a second-granularity change would break the provider
+    # prefix cache on every turn). Returned separately as the unstable part.
+    return (
+        "\n\n".join(static_parts),
+        "\n".join(dynamic_parts),
+        f"## Current Time\n{now_text}",
+    )
 
 
 __all__ = ["build_agent_context"]

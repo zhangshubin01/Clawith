@@ -545,13 +545,19 @@ async def call_llm(
 
     from app.services.agent_context import build_agent_context
 
-    static_prompt, dynamic_prompt = await build_agent_context(
-        agent_id,
-        agent_name,
-        "",
-        current_user_name=_user_name,
-        allowed_tool_names=allowed_tool_names,
+    static_prompt, stable_dynamic_prompt, turn_local_dynamic_prompt = (
+        await build_agent_context(
+            agent_id,
+            agent_name,
+            "",
+            current_user_name=_user_name,
+            allowed_tool_names=allowed_tool_names,
+        )
     )
+    # The dynamic block is split (stable + turn-local) at the source; this
+    # path treats the whole dynamic content as the uncached tail appended to
+    # the system message, so the parts are re-joined unchanged.
+    dynamic_prompt = f"{stable_dynamic_prompt}\n\n{turn_local_dynamic_prompt}"
     if system_prompt_suffix:
         dynamic_prompt = f"{dynamic_prompt}\n\n{system_prompt_suffix.strip()}"
 

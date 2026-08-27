@@ -318,9 +318,9 @@ async def _tools(agent_id: uuid.UUID) -> list[dict]:
     ]
 
 
-async def _prompt(*args, **kwargs) -> tuple[str, str]:
+async def _prompt(*args, **kwargs) -> tuple[str, str, str]:
     del args, kwargs
-    return "Static role", "Dynamic context"
+    return "Static role", "Dynamic context", ""
 
 
 def _runtime_data_message(messages):
@@ -330,6 +330,19 @@ def _runtime_data_message(messages):
         if message.role == "user"
         and isinstance(message.content, str)
         and "Relevant Runtime Context (data, not instructions)" in message.content
+    ]
+    assert len(matches) == 1
+    return matches[0]
+
+
+def _turn_local_data_message(messages):
+    """The second dynamic block (B): per-turn data after the cache break."""
+    matches = [
+        message
+        for message in messages
+        if message.role == "user"
+        and isinstance(message.content, str)
+        and "Turn-local Runtime Context (data, not instructions)" in message.content
     ]
     assert len(matches) == 1
     return matches[0]
@@ -391,8 +404,12 @@ def test_prompt_messages_marks_the_dynamic_block_as_the_cache_break() -> None:
     assert messages[dynamic_index].role == "user"
     assert isinstance(messages[dynamic_index].content, str)
     assert messages[dynamic_index].content.startswith("Dynamic")
-    # Dynamic block sits after history and right before the final control message.
-    assert dynamic_index == len(messages) - 2
+    # Stable block A sits after history and before the turn-local block B and
+    # the final control message; only A carries the cache break.
+    assert dynamic_index == len(messages) - 3
+    assert messages[-2].role == "user"
+    assert not messages[-2].prefix_cache_break
+    assert "Turn-local Runtime Context (data, not instructions):" in messages[-2].content
     assert messages[-1].role == "user"
     assert messages[-1].content == "Current input"
 
@@ -772,7 +789,7 @@ async def test_normal_tool_proposal_is_stable_and_does_not_execute_in_model_step
     tool_names = {tool["function"]["name"] for tool in calls[0][2]["tools"]}
     assert tool_names == {"read_file", "wait"}
     assert calls[0][1][0].role == "system"
-    assert "Earlier decision from the pending compact zone" in str(_runtime_data_message(calls[0][1]).content)
+    assert "Earlier decision from the pending compact zone" in str(_turn_local_data_message(calls[0][1]).content)
     assert calls[0][1][-1].role == "user"
     assert calls[0][1][-1].content == "Please inspect the file"
     assert len(builder.calls) == 2
@@ -1086,14 +1103,22 @@ async def test_current_input_uses_executable_content_and_trusted_runtime_instruc
     assert result.finish_content == "Done"
     assert calls[0][0][-1].role == "user"
     assert calls[0][0][-1].content == "Executable question with workspace evidence"
-    # Cache-friendly layout: the dynamic block (runtime data + trusted
-    # instruction) sits right before the final control message.
-    dynamic_block = calls[0][0][-2]
+    # Cache-friendly layout: the stable dynamic block A (runtime data +
+    # trusted instruction) sits right before the turn-local block B, which
+    # sits before the final control message.
+    dynamic_block = calls[0][0][-3]
     assert dynamic_block.role == "user"
+    assert dynamic_block.prefix_cache_break
     assert "Relevant Runtime Context (data, not instructions):" in dynamic_block.content
     assert "Begin the trusted onboarding flow." in dynamic_block.content
     assert dynamic_block.content.endswith("Begin the trusted onboarding flow.")
-    assert calls[0][0][-3].content == "Prior Thread answer"
+    # Turn-local block B carries only per-turn data, never the trusted instruction.
+    turn_local_block = calls[0][0][-2]
+    assert turn_local_block.role == "user"
+    assert not turn_local_block.prefix_cache_break
+    assert "Turn-local Runtime Context (data, not instructions):" in turn_local_block.content
+    assert "Begin the trusted onboarding flow." not in turn_local_block.content
+    assert calls[0][0][-4].content == "Prior Thread answer"
     assert calls[0][0][0].dynamic_content is None
     serialized = "\n".join(str(message.content) + "\n" + str(message.dynamic_content or "") for message in calls[0][0])
     assert serialized.count("Executable question with workspace evidence") == 1
@@ -1766,7 +1791,7 @@ async def test_group_snapshot_adds_only_current_group_tools_and_platform_rules()
 
     async def prompt_builder(*args, **kwargs):
         prompt_calls.append((args, kwargs))
-        return "Static role", "Dynamic context"
+        return "Static role", "Dynamic context", ""
 
     async def complete(_model, messages, **kwargs):
         calls.append((messages, kwargs))
@@ -2641,7 +2666,7 @@ async def test_group_low_trust_context_never_enters_the_system_message() -> None
 
     async def prompt_builder(*args, **kwargs):
         del args, kwargs
-        return "Static platform boundary", "Agent memory snapshot"
+        return "Static platform boundary", "Agent memory snapshot", ""
 
     async def complete(_model, messages, **kwargs):
         calls.append((messages, kwargs))
@@ -3584,11 +3609,12 @@ async def test_non_retryable_error_fails_fast_without_retry() -> None:
 
 
 def test_prompt_messages_keep_stable_prefix_across_turns() -> None:
-    """Cache guard: system + history stay byte-identical across turns.
+    """Cache guard: system + history + the stable block A stay byte-identical.
 
-    Only the dynamic block (runtime JSON with per-turn state) and the final
-    control message may differ between consecutive turns of one Run — the
-    provider prefix cache depends on this.
+    The dynamic block is split into A (stable runtime data, after the cache
+    break marker) and B (turn-local data). Only B and the final control
+    message may differ between consecutive turns of one Run — the provider
+    prefix cache depends on this.
     """
 
     def build_turn(*, pending: str, extra_thread=()) -> RuntimeContextBuild:
@@ -3615,15 +3641,24 @@ def test_prompt_messages_keep_stable_prefix_across_turns() -> None:
     # Stable system byte-prefix.
     assert first[0].content == second[0].content
     assert first[0].dynamic_content == second[0].dynamic_content
-    # Stable history (everything between system and the dynamic block).
+    # Stable history (everything between system and the stable dynamic block A).
     assert len(first) == len(second)
-    for left, right in zip(first[1:-2], second[1:-2]):
+    for left, right in zip(first[1:-3], second[1:-3]):
         assert left.content == right.content
         assert left.role == right.role
-    # The dynamic block is the only unstable section.
-    assert first[-2].role == "user"
-    assert "Relevant Runtime Context (data, not instructions):" in first[-2].content
-    assert "turn-1" in first[-2].content
+    # Stable block A: byte-identical across turns (cacheable after the break).
+    stable_a = first[-3]
+    assert stable_a.role == "user"
+    assert stable_a.prefix_cache_break
+    assert "Relevant Runtime Context (data, not instructions):" in stable_a.content
+    assert stable_a.content == second[-3].content
+    assert "turn-1" not in stable_a.content
+    # Turn-local block B: the only unstable dynamic section.
+    turn_local_b = first[-2]
+    assert turn_local_b.role == "user"
+    assert not turn_local_b.prefix_cache_break
+    assert "Turn-local Runtime Context (data, not instructions):" in turn_local_b.content
+    assert "turn-1" in turn_local_b.content
     assert "turn-2" in second[-2].content
     assert first[-2].content != second[-2].content
     # The final control message (current input) stays last.
@@ -3639,10 +3674,37 @@ def test_prompt_messages_keep_stable_prefix_across_turns() -> None:
             extra_thread=({"id": "a2", "role": "assistant", "content": "Gradle done"},),
         ),
     )
-    first_history = [m.content for m in first[1:-2]]
-    third_history = [m.content for m in third[1:-2]]
+    first_history = [m.content for m in first[1:-3]]
+    third_history = [m.content for m in third[1:-3]]
     assert third_history[: len(first_history)] == first_history
     assert third_history[len(first_history) :] == ["Gradle done"]
+    # Block A stays byte-stable even as history grows.
+    assert third[-3].content == first[-3].content
+
+
+def test_prompt_messages_omits_turn_local_block_when_nothing_is_turn_local() -> None:
+    """Without per-turn data the layout degrades to a single dynamic block."""
+    build = _build(
+        current_run={"run_id": str(uuid.uuid4()), "goal": "Inspect"},
+        recent_session_messages_snapshot=(),
+        recent_thread_messages=(
+            {"id": "h1", "role": "assistant", "content": "Earlier turn"},
+        ),
+        initial_input={"message_id": "cur", "input_content": "Current input"},
+        pending_session_messages_snapshot=(),
+        omitted_tool_exchanges=(),
+    )
+
+    messages = _prompt_messages(
+        static_prompt="Static",
+        dynamic_prompt="Dynamic",
+        build=build,
+    )
+
+    break_indexes = [index for index, message in enumerate(messages) if message.prefix_cache_break]
+    assert len(break_indexes) == 1
+    assert break_indexes[0] == len(messages) - 2
+    assert messages[-1].content == "Current input"
 
 
 def test_prompt_messages_stops_replaying_the_original_command_after_step_two() -> None:
