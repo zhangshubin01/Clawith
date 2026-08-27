@@ -381,6 +381,9 @@ reading the file first and merging the new information in place. Never blind-ove
 - The current user's explicit instruction overrides Memory content and this
   maintenance policy.
 - A failed Memory write never blocks delivering the task's result.
+- Before returning the final answer, decide once whether the completed work
+  surfaced durable cross-conversation information. If it did and the fact is
+  not already recorded, apply the update above. If none, do nothing.
 """.strip()
 
 

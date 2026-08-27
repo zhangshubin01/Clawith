@@ -68,6 +68,10 @@ async def test_memory_maintenance_policy_follows_read_write_capabilities():
     assert "temporary task progress" in with_write
     assert "explicit instruction overrides" in with_write
     assert "never blocks delivering" in with_write
+    # 收尾固化判定（D6）：交卷前判一次，无则跳过
+    assert "before returning the final answer" in with_write.lower()
+    assert "decide once" in with_write.lower()
+    assert "do nothing" in with_write.lower()
 
 
 @pytest.mark.asyncio

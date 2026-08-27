@@ -66,6 +66,9 @@
     「旧模板要求写 reflections、新模板不要求」的分叉再次发生。
 9c. 作为 agent 创建者，我希望 `memory/MEMORY_INDEX.md` 随记忆条目增删保持
     与 memory.md 的主题一致（新主题入索引、消失的主题移出），以便快速定位记忆。
+9d. 作为 agent 创建者，我希望**每次任务收尾时**都固定过一遍记忆固化判定——
+    任务产生了新的耐用信息且未记录则写回，没有则跳过——而不是只有在我明确说
+    「记住这个」时才写（方案 B：收尾自动固化检查）。
 
 ### skill-creator 适配
 10. 作为在 Clawith 里使用 skill-creator 的 agent，我希望 `run_eval.py` 能对评测集
@@ -127,6 +130,18 @@
   记忆主题新增/移除时，同步更新 MEMORY_INDEX.md 的 Topics 清单。
 - 不给索引单独的写入工具/流程；索引只是 memory.md 的目录镜像。
 
+#### D6 — 收尾自动固化检查（方案 B，用户拍板）
+- 落点：`_MEMORY_MAINTENANCE` 小节末尾追加「before returning the final answer」
+  收尾判定条款（该节已在 `_BASE_PROMPT_OUTPUT` 之后、read_file+write_file
+  可用时注入——与既有「Before returning the final Assistant response, verify
+  that…」收尾清单同位，模型在交卷前必然经过）。
+- 语义：**判一次**——完成的工作是否产生了跨会话耐用信息；有且未记录则按 D1a
+  规则写回 memory.md + 同步索引；没有则什么都不做。
+- 措辞仍是条件义务（"decide once… if none, do nothing"），不构成祈使目标句，
+  沿用 R1 教训与 D1a 的防循环约束。
+- 不做：给 verify 节点写工具权限（破坏完成门的独立性）、不做平台级后处理钩子
+  （超出最小改动）。
+
 ### D2 — skill-creator 评估 runner：方案 A（推荐）
 - `run_eval.py` 增加 `--runner {clawith|claude}`（默认 clawith）：
   - `claude` runner 保留原实现（代码原样保留，供有 claude CLI 的环境使用）；
@@ -170,10 +185,11 @@
 
 - 好的测试只测外部行为：提示词断言测「指令存在 + 低信任语义未破坏」，
   不测逐字文案；runner 测「判定函数的行为」，不测真实模型外呼。
-- 记忆（D1a/D1c）：`tests/test_agent_context.py` 现有用例是直接先例
+- 记忆（D1a/D1c/D6）：`tests/test_agent_context.py` 现有用例是直接先例
   （`test_base_prompt_starts_with_name_and_soul_and_never_injects_self_role`）。
   新增：①static prompt 包含 Memory Maintenance 义务与 MEMORY_INDEX 同步义务；
-  ②memory 快照仍在 dynamic 低信任段；③无 `write_file` 工具权限的模型步不会收到
+  ②收尾固化判定条款存在（"before returning the final answer" + "do nothing"）；
+  ③memory 快照仍在 dynamic 低信任段；④无 `write_file` 工具权限的模型步不会收到
   该义务（沿用 `_active_capability_policies` 的 allowed-tool 门控，若有）。
 - HEARTBEAT 模板（D1b）：模板是纯文本种子文件，测试=内容断言（参照
   `tests/test_migrate_legacy_heartbeat_template.py` 对模板内容的断言先例）：
