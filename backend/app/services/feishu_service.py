@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import time
 from collections import OrderedDict
 
 import httpx
@@ -99,6 +100,14 @@ class FeishuService:
     # long-running multi-tenant deployments.
     _LARK_CLIENT_CACHE_MAX = 120
 
+    # Token cache: 飞书 app_access_token 有效期 2h，提前刷新；同应用重复调用
+    # 在 TTL 内直接复用（此前每次调用都现打 token，缓存字段为只写不读）。
+    _TOKEN_CACHE_TTL_SECONDS = 600.0
+    _TOKEN_CACHE_MAX = 120
+    # Contact 用户信息缓存：头像/昵称延迟更新可接受，短 TTL 平衡新鲜度。
+    _CONTACT_USER_CACHE_TTL_SECONDS = 300.0
+    _CONTACT_USER_CACHE_MAX = 500
+
     def __init__(self):
         self.app_id = settings.FEISHU_APP_ID
         self.app_secret = settings.FEISHU_APP_SECRET
@@ -108,6 +117,9 @@ class FeishuService:
         # the head when the cache is full.
         self._lark_clients: OrderedDict[str, lark.Client] = OrderedDict()
         self._clients_lock = asyncio.Lock()
+        self._token_cache: OrderedDict[tuple[str, str], tuple[str, float]] = OrderedDict()
+        self._token_cache_lock = asyncio.Lock()
+        self._user_cache: OrderedDict[tuple[str, str], tuple[dict, float]] = OrderedDict()
 
     @staticmethod
     def _parse_api_response(
@@ -173,24 +185,77 @@ class FeishuService:
     async def get_app_access_token(self) -> str:
         """Get or refresh the app-level access token. Deprecated: Use get_tenant_access_token instead."""
         return await self.get_tenant_access_token(self.app_id, self.app_secret)
-        
+
     async def get_tenant_access_token(self, app_id: str = None, app_secret: str = None) -> str:
-        """Get or refresh the app-level access token (tenant_access_token)."""
+        """Get or refresh the app-level access token (tenant_access_token).
+
+        Per-(app_id, app_secret) cache with TTL and in-flight dedup: repeated
+        calls for the same app within the TTL window reuse the cached token.
+        """
         target_app_id = app_id or self.app_id
         target_app_secret = app_secret or self.app_secret
-        
-        async with httpx.AsyncClient() as client:
-            resp = await client.post(FEISHU_APP_TOKEN_URL, json={
-                "app_id": target_app_id,
-                "app_secret": target_app_secret,
-            })
-            data = resp.json()
-            
+        key = (target_app_id, target_app_secret)
+        now = time.monotonic()
+        cached = self._token_cache.get(key)
+        if cached is not None and now - cached[1] < self._TOKEN_CACHE_TTL_SECONDS:
+            self._token_cache.move_to_end(key)
+            return cached[0]
+        async with self._token_cache_lock:
+            cached = self._token_cache.get(key)
+            if cached is not None and now - cached[1] < self._TOKEN_CACHE_TTL_SECONDS:
+                self._token_cache.move_to_end(key)
+                return cached[0]
+            async with httpx.AsyncClient() as client:
+                resp = await client.post(FEISHU_APP_TOKEN_URL, json={
+                    "app_id": target_app_id,
+                    "app_secret": target_app_secret,
+                })
+                data = resp.json()
             token = data.get("tenant_access_token") or data.get("app_access_token", "")
-            if not app_id: # only cache default app token
-                self._app_access_token = token
-                
-            return token
+            if token:
+                self._token_cache[key] = (token, time.monotonic())
+                self._token_cache.move_to_end(key)
+                while len(self._token_cache) > self._TOKEN_CACHE_MAX:
+                    self._token_cache.popitem(last=False)
+        if not app_id:
+            self._app_access_token = token or self._app_access_token
+        return token
+
+    async def get_contact_user_cached(
+        self,
+        app_id: str,
+        app_secret: str,
+        open_id: str,
+    ) -> dict | None:
+        """Fetch a user's Contact API info, cached by (app_id, open_id).
+
+        Returns the user info dict, or None when token/user fetch fails
+        (caller keeps its fail-closed semantics).
+        """
+        key = (app_id, open_id)
+        now = time.monotonic()
+        cached = self._user_cache.get(key)
+        if cached is not None and now - cached[1] < self._CONTACT_USER_CACHE_TTL_SECONDS:
+            self._user_cache.move_to_end(key)
+            return cached[0]
+        token = await self.get_tenant_access_token(app_id, app_secret)
+        if not token:
+            return None
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(
+                f"{_FEISHU_BASE}/open-apis/contact/v3/users/{open_id}",
+                params={"user_id_type": "open_id"},
+                headers={"Authorization": f"Bearer {token}"},
+            )
+        payload = resp.json()
+        if payload.get("code") != 0:
+            return None
+        user_info = payload.get("data", {}).get("user", {})
+        self._user_cache[key] = (user_info, time.monotonic())
+        self._user_cache.move_to_end(key)
+        while len(self._user_cache) > self._CONTACT_USER_CACHE_MAX:
+            self._user_cache.popitem(last=False)
+        return user_info
 
     async def list_bot_chats(
         self,

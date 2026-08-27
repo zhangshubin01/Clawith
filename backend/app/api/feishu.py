@@ -445,8 +445,6 @@ async def _resolve_feishu_sender(
     fail-closed: 如果 event 中没有 user_id 且 Contact API 调用失败，拒绝解析而非静默降级到仅 open_id。
     借鉴 DeepThink botOpenId fail-closed 语义：信息不足时拒绝，由调用方提示用户，而非创建重复账号。
     """
-    import httpx
-
     from app.services.channel_user_service import channel_user_service, ChannelUserResolutionError
 
     resolved_user_id = sender_user_id.strip()
@@ -456,41 +454,34 @@ async def _resolve_feishu_sender(
     }
     contact_failed = False
     try:
-        async with httpx.AsyncClient(timeout=10) as client:
-            token_response = await client.post(
-                f"{_FEISHU_BASE}/open-apis/auth/v3/app_access_token/internal",
-                json={"app_id": config.app_id, "app_secret": config.app_secret},
+        # 缓存方法：token + 用户信息均按 (app_id, open_id) TTL 缓存，
+        # 同用户连续消息不再打 2 个 Contact API RTT。
+        user_info = await feishu_service.get_contact_user_cached(
+            config.app_id, config.app_secret, sender_open_id,
+        )
+        if user_info:
+            resolved_user_id = user_info.get("user_id") or resolved_user_id
+            raw_avatar = user_info.get("avatar")
+            avatar_url = (
+                raw_avatar.get("avatar_240")
+                or raw_avatar.get("avatar_640")
+                or raw_avatar.get("avatar_origin")
+                or ""
+                if isinstance(raw_avatar, dict)
+                else raw_avatar or ""
             )
-            app_token = token_response.json().get("app_access_token", "")
-            if app_token:
-                user_response = await client.get(
-                    f"{_FEISHU_BASE}/open-apis/contact/v3/users/{sender_open_id}",
-                    params={"user_id_type": "open_id"},
-                    headers={"Authorization": f"Bearer {app_token}"},
-                )
-                payload = user_response.json()
-                if payload.get("code") == 0:
-                    user_info = payload.get("data", {}).get("user", {})
-                    resolved_user_id = user_info.get("user_id") or resolved_user_id
-                    raw_avatar = user_info.get("avatar")
-                    avatar_url = (
-                        raw_avatar.get("avatar_240")
-                        or raw_avatar.get("avatar_640")
-                        or raw_avatar.get("avatar_origin")
-                        or ""
-                        if isinstance(raw_avatar, dict)
-                        else raw_avatar or ""
-                    )
-                    extra_info = {
-                        "name": user_info.get("name"),
-                        "email": user_info.get("email")
-                        or user_info.get("enterprise_email"),
-                        "mobile": user_info.get("mobile"),
-                        "avatar_url": avatar_url,
-                        "external_id": resolved_user_id or None,
-                        "unionid": user_info.get("union_id"),
-                        "open_id": sender_open_id,
-                    }
+            extra_info = {
+                "name": user_info.get("name"),
+                "email": user_info.get("email")
+                or user_info.get("enterprise_email"),
+                "mobile": user_info.get("mobile"),
+                "avatar_url": avatar_url,
+                "external_id": resolved_user_id or None,
+                "unionid": user_info.get("union_id"),
+                "open_id": sender_open_id,
+            }
+        else:
+            contact_failed = True
     except Exception as exc:
         logger.warning(f"[Feishu] Sender enrichment failed: {exc}")
         contact_failed = True
