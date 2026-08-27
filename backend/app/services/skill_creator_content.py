@@ -22,6 +22,7 @@ _FILE_MAP = {
     "references__schemas.md": "references/schemas.md",
     "scripts____init__.py": "scripts/__init__.py",
     "scripts__aggregate_benchmark.py": "scripts/aggregate_benchmark.py",
+    "scripts__clawith_runner.py": "scripts/clawith_runner.py",
     "scripts__generate_report.py": "scripts/generate_report.py",
     "scripts__improve_description.py": "scripts/improve_description.py",
     "scripts__package_skill.py": "scripts/package_skill.py",
@@ -176,6 +177,13 @@ For rigorous comparison between two versions. Read `agents/comparator.md` and `a
 ## Description Optimization
 Optimize the description for better triggering accuracy. Use `scripts/run_loop.py`.
 
+On Clawith, trigger evals run through the platform runner by default
+(`--runner clawith`): it calls an OpenAI-compatible endpoint and treats a
+`read_file` tool call on the skill path as the trigger signal. Configure it
+with the environment variables `CLAWITH_EVAL_BASE_URL`, `CLAWITH_EVAL_API_KEY`,
+and `CLAWITH_EVAL_MODEL` before running evals. Use `--runner claude` only in an
+environment that has the Claude Code CLI.
+
 ---
 
 ## Reference files
@@ -187,6 +195,7 @@ Optimize the description for better triggering accuracy. Use `scripts/run_loop.p
 - `assets/eval_review.html` — HTML template for eval review
 - `eval-viewer/generate_review.py` — Script to generate the review viewer
 - `scripts/aggregate_benchmark.py` — Aggregate benchmark results
+- `scripts/clawith_runner.py` — Platform trigger-eval runner (env: CLAWITH_EVAL_*)
 - `scripts/generate_report.py` — Generate optimization report
 - `scripts/improve_description.py` — Improve skill description
 - `scripts/package_skill.py` — Package skill for distribution

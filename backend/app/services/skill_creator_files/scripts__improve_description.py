@@ -11,14 +11,18 @@ import re
 import sys
 from pathlib import Path
 
-import anthropic
 from loguru import logger
 
 from scripts.utils import parse_skill_md
 
+try:
+    from scripts.clawith_runner import ChatClient, RunnerConfigError, load_config
+except ImportError:  # pragma: no cover - direct path execution
+    from clawith_runner import ChatClient, RunnerConfigError, load_config
+
 
 def improve_description(
-    client: anthropic.Anthropic,
+    client,
     skill_name: str,
     skill_content: str,
     current_description: str,
@@ -29,7 +33,7 @@ def improve_description(
     log_dir: Path | None = None,
     iteration: int | None = None,
 ) -> str:
-    """Call Claude to improve the description based on eval results."""
+    """Improve the description based on eval results (OpenAI-compatible client)."""
     failed_triggers = [
         r for r in eval_results["results"]
         if r["should_trigger"] and not r["pass"]
@@ -47,9 +51,9 @@ def improve_description(
     else:
         scores_summary = f"Train: {train_score}"
 
-    prompt = f"""You are optimizing a skill description for a Claude Code skill called "{skill_name}". A "skill" is sort of like a prompt, but with progressive disclosure -- there's a title and description that Claude sees when deciding whether to use the skill, and then if it does use the skill, it reads the .md file which has lots more details and potentially links to other resources in the skill folder like helper files and scripts and additional documentation or examples.
+    prompt = f"""You are optimizing a skill description for an AI-agent skill called "{skill_name}". A "skill" is sort of like a prompt, but with progressive disclosure -- there's a title and description that the agent sees when deciding whether to use the skill, and then if it does use the skill, it reads the .md file which has lots more details and potentially links to other resources in the skill folder like helper files and scripts and additional documentation or examples.
 
-The description appears in Claude's "available_skills" list. When a user sends a query, Claude decides whether to invoke the skill based solely on the title and on this description. Your goal is to write a description that triggers for relevant queries, and doesn't trigger for irrelevant ones.
+The description appears in the agent's available-skill list. When a user sends a query, the agent decides whether to invoke the skill based solely on the title and on this description. Your goal is to write a description that triggers for relevant queries, and doesn't trigger for irrelevant ones.
 
 Here's the current description:
 <current_description>
@@ -105,31 +109,28 @@ Concretely, your description should not be more than about 100-200 words, even i
 Here are some tips that we've found to work well in writing these descriptions:
 - The skill should be phrased in the imperative -- "Use this skill for" rather than "this skill does"
 - The skill description should focus on the user's intent, what they are trying to achieve, vs. the implementation details of how the skill works.
-- The description competes with other skills for Claude's attention — make it distinctive and immediately recognizable.
+- The description competes with other skills for the agent's attention — make it distinctive and immediately recognizable.
 - If you're getting lots of failures after repeated attempts, change things up. Try different sentence structures or wordings.
 
 I'd encourage you to be creative and mix up the style in different iterations since you'll have multiple opportunities to try different approaches and we'll just grab the highest-scoring one at the end. 
 
 Please respond with only the new description text in <new_description> tags, nothing else."""
 
-    response = client.messages.create(
+    system_instruction = (
+        "You optimize skill descriptions for trigger accuracy. Respond with "
+        "only the new description text inside <new_description> tags, nothing else."
+    )
+    text = client.complete(
         model=model,
         max_tokens=16000,
-        thinking={
-            "type": "enabled",
-            "budget_tokens": 10000,
-        },
-        messages=[{"role": "user", "content": prompt}],
+        messages=[
+            {"role": "system", "content": system_instruction},
+            {"role": "user", "content": prompt},
+        ],
     )
 
-    # Extract thinking and text from response
+    # OpenAI-compatible responses carry no separate thinking blocks.
     thinking_text = ""
-    text = ""
-    for block in response.content:
-        if block.type == "thinking":
-            thinking_text = block.thinking
-        elif block.type == "text":
-            text = block.text
 
     # Parse out the <new_description> tags
     match = re.search(r"<new_description>(.*?)</new_description>", text, re.DOTALL)
@@ -149,14 +150,11 @@ Please respond with only the new description text in <new_description> tags, not
     # If over 1024 chars, ask the model to shorten it
     if len(description) > 1024:
         shorten_prompt = f"Your description is {len(description)} characters, which exceeds the hard 1024 character limit. Please rewrite it to be under 1024 characters while preserving the most important trigger words and intent coverage. Respond with only the new description in <new_description> tags."
-        shorten_response = client.messages.create(
+        shorten_text = client.complete(
             model=model,
             max_tokens=16000,
-            thinking={
-                "type": "enabled",
-                "budget_tokens": 10000,
-            },
             messages=[
+                {"role": "system", "content": system_instruction},
                 {"role": "user", "content": prompt},
                 {"role": "assistant", "content": text},
                 {"role": "user", "content": shorten_prompt},
@@ -164,13 +162,6 @@ Please respond with only the new description text in <new_description> tags, not
         )
 
         shorten_thinking = ""
-        shorten_text = ""
-        for block in shorten_response.content:
-            if block.type == "thinking":
-                shorten_thinking = block.thinking
-            elif block.type == "text":
-                shorten_text = block.text
-
         match = re.search(r"<new_description>(.*?)</new_description>", shorten_text, re.DOTALL)
         shortened = match.group(1).strip().strip('"') if match else shorten_text.strip().strip('"')
 
@@ -217,7 +208,11 @@ def main():
         logger.info(f"Current: {current_description}")
         logger.info(f"Score: {eval_results['summary']['passed']}/{eval_results['summary']['total']}")
 
-    client = anthropic.Anthropic()
+    try:
+        client = ChatClient(load_config())
+    except RunnerConfigError as exc:
+        logger.error(f"Cannot run description improvement: {exc}")
+        sys.exit(1)
     new_description = improve_description(
         client=client,
         skill_name=name,

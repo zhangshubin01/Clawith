@@ -20,6 +20,19 @@ from loguru import logger
 
 from scripts.utils import parse_skill_md
 
+try:
+    from scripts.clawith_runner import RunnerConfigError as _RunnerConfigError
+    from scripts.clawith_runner import load_config as _load_config
+    from scripts.clawith_runner import run_single_query as _runner_single_query
+except ImportError:  # pragma: no cover - direct path execution (python scripts/run_eval.py)
+    from clawith_runner import RunnerConfigError as _RunnerConfigError
+    from clawith_runner import load_config as _load_config
+    from clawith_runner import run_single_query as _runner_single_query
+
+
+class EvalAbortError(RuntimeError):
+    """The eval cannot proceed (configuration problem); do not swallow as results."""
+
 
 def find_project_root() -> Path:
     """Find the project root by walking up from cwd looking for .claude/.
@@ -183,6 +196,28 @@ def run_single_query(
             command_file.unlink()
 
 
+def run_single_query_clawith(
+    query: str,
+    skill_dir_name: str,
+    skill_name: str,
+    skill_description: str,
+    timeout: int,
+) -> bool:
+    """Run one trigger query through the platform endpoint (no claude CLI)."""
+    try:
+        config = _load_config()
+    except _RunnerConfigError as exc:
+        raise EvalAbortError(str(exc)) from exc
+    return _runner_single_query(
+        config,
+        query,
+        skill_dir_name,
+        skill_name,
+        skill_description,
+        timeout=timeout,
+    )
+
+
 def run_eval(
     eval_set: list[dict],
     skill_name: str,
@@ -193,23 +228,42 @@ def run_eval(
     runs_per_query: int = 1,
     trigger_threshold: float = 0.5,
     model: str | None = None,
+    runner: str = "clawith",
+    skill_dir_name: str | None = None,
 ) -> dict:
-    """Run the full eval set and return results."""
+    """Run the full eval set and return results.
+
+    ``runner`` selects the query executor: "clawith" (default, platform
+    endpoint via clawith_runner.py) or "claude" (original Claude Code CLI).
+    """
     results = []
+
+    if runner not in {"clawith", "claude"}:
+        raise EvalAbortError(f"Unknown runner {runner!r}; expected clawith or claude")
 
     with ProcessPoolExecutor(max_workers=num_workers) as executor:
         future_to_info = {}
         for item in eval_set:
             for run_idx in range(runs_per_query):
-                future = executor.submit(
-                    run_single_query,
-                    item["query"],
-                    skill_name,
-                    description,
-                    timeout,
-                    str(project_root),
-                    model,
-                )
+                if runner == "clawith":
+                    future = executor.submit(
+                        run_single_query_clawith,
+                        item["query"],
+                        skill_dir_name or skill_name,
+                        skill_name,
+                        description,
+                        timeout,
+                    )
+                else:
+                    future = executor.submit(
+                        run_single_query,
+                        item["query"],
+                        skill_name,
+                        description,
+                        timeout,
+                        str(project_root),
+                        model,
+                    )
                 future_to_info[future] = (item, run_idx)
 
         query_triggers: dict[str, list[bool]] = {}
@@ -222,6 +276,8 @@ def run_eval(
                 query_triggers[query] = []
             try:
                 query_triggers[query].append(future.result())
+            except EvalAbortError:
+                raise
             except Exception as e:
                 logger.warning(f"Warning: query failed: {e}")
                 query_triggers[query].append(False)
@@ -268,6 +324,8 @@ def main():
     parser.add_argument("--runs-per-query", type=int, default=3, help="Number of runs per query")
     parser.add_argument("--trigger-threshold", type=float, default=0.5, help="Trigger rate threshold")
     parser.add_argument("--model", default=None, help="Model to use for claude -p (default: user's configured model)")
+    parser.add_argument("--runner", default="clawith", choices=["clawith", "claude"],
+                        help="Query executor: clawith (platform endpoint via clawith_runner.py, default) or claude (Claude Code CLI)")
     parser.add_argument("--verbose", action="store_true", help="Print progress to stderr")
     args = parser.parse_args()
 
@@ -295,6 +353,8 @@ def main():
         runs_per_query=args.runs_per_query,
         trigger_threshold=args.trigger_threshold,
         model=args.model,
+        runner=args.runner,
+        skill_dir_name=skill_path.name,
     )
 
     if args.verbose:

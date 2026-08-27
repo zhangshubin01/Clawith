@@ -8,9 +8,9 @@
 
 **Status:** ready-for-agent
 
-- [ ] anthropic SDK 引用从 improve_description/run_loop 中移除（import 与 client 构造）
-- [ ] 新 client 走 httpx + 环境变量（与 #03 一致的 CLAWITH_EVAL_* 变量族）
-- [ ] 缺凭证时报可操作错误（不静默失败）
-- [ ] 优化逻辑（blinded history、train/test 拆分、best 选择）行为不变
-- [ ] fake client 单测：无凭证错误路径 + 一次迭代的 improve 调用序列
-- [ ] 全量 pytest + arch-guard 通过
+- [x] anthropic SDK 引用从 improve_description/run_loop 中移除（import 与 client 构造）
+- [x] 新 client 走 httpx + 环境变量（与 #03 一致的 CLAWITH_EVAL_* 变量族）
+- [x] 缺凭证时报可操作错误（不静默失败）
+- [x] 优化逻辑（blinded history、train/test 拆分、best 选择）行为不变
+- [x] fake client 单测：无凭证错误路径 + 一次迭代的 improve 调用序列
+- [x] 全量 pytest + arch-guard 通过

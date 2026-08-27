@@ -15,13 +15,17 @@ import time
 import webbrowser
 from pathlib import Path
 
-import anthropic
 from loguru import logger
 
 from scripts.generate_report import generate_html
 from scripts.improve_description import improve_description
 from scripts.run_eval import find_project_root, run_eval
 from scripts.utils import parse_skill_md
+
+try:
+    from scripts.clawith_runner import ChatClient, RunnerConfigError, load_config
+except ImportError:  # pragma: no cover - direct path execution
+    from clawith_runner import ChatClient, RunnerConfigError, load_config
 
 
 def split_eval_set(eval_set: list[dict], holdout: float, seed: int = 42) -> tuple[list[dict], list[dict]]:
@@ -59,6 +63,8 @@ def run_loop(
     holdout: float,
     model: str,
     verbose: bool,
+    runner: str = "clawith",
+    skill_dir_name: str | None = None,
     live_report_path: Path | None = None,
     log_dir: Path | None = None,
 ) -> dict:
@@ -76,7 +82,10 @@ def run_loop(
         train_set = eval_set
         test_set = []
 
-    client = anthropic.Anthropic()
+    try:
+        client = ChatClient(load_config())
+    except RunnerConfigError as exc:
+        raise RuntimeError(f"description-improvement LLM is not configured: {exc}") from exc
     history = []
     exit_reason = "unknown"
 
@@ -100,6 +109,8 @@ def run_loop(
             runs_per_query=runs_per_query,
             trigger_threshold=trigger_threshold,
             model=model,
+            runner=runner,
+            skill_dir_name=skill_dir_name or skill_path.name,
         )
         eval_elapsed = time.time() - t0
 
@@ -192,7 +203,7 @@ def run_loop(
 
         # Improve the description based on train results
         if verbose:
-            logger.info(f"\nImproving description...")
+            logger.info("\nImproving description...")
 
         t0 = time.time()
         # Strip test scores from history so improvement model can't see them
@@ -258,6 +269,8 @@ def main():
     parser.add_argument("--trigger-threshold", type=float, default=0.5, help="Trigger rate threshold")
     parser.add_argument("--holdout", type=float, default=0.4, help="Fraction of eval set to hold out for testing (0 to disable)")
     parser.add_argument("--model", required=True, help="Model for improvement")
+    parser.add_argument("--runner", default="clawith", choices=["clawith", "claude"],
+                        help="Trigger-eval executor: clawith (default) or claude")
     parser.add_argument("--verbose", action="store_true", help="Print progress to stderr")
     parser.add_argument("--report", default="auto", help="Generate HTML report at this path (default: 'auto' for temp file, 'none' to disable)")
     parser.add_argument("--results-dir", default=None, help="Save all outputs (results.json, report.html, log.txt) to a timestamped subdirectory here")
@@ -307,6 +320,7 @@ def main():
         holdout=args.holdout,
         model=args.model,
         verbose=args.verbose,
+        runner=args.runner,
         live_report_path=live_report_path,
         log_dir=log_dir,
     )
