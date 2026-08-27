@@ -24,6 +24,10 @@ from app.config import Settings, get_settings
 from app.models.audit import ChatMessage
 from app.models.chat_session import ChatSession
 from app.models.session_context_state import SessionContextState
+from app.services.agent_runtime.delivery_notice import (
+    _downgrade_failure_notice,
+    _is_terminal_failure_notice,
+)
 from app.services.agent_runtime.state import JsonObject, JsonValue
 
 
@@ -266,10 +270,15 @@ def _message_to_json(message: ChatMessage) -> JsonObject:
             "invalid_session_message",
             f"message {message.id} has no Message Position",
         )
+    content = message.content
+    if message.role == "assistant" and _is_terminal_failure_notice(content):
+        # 失败通知横幅不原样进模型可见历史——降级为一行历史注记
+        # （模型曾把旧 run 的「任务执行未完成」误读为待办，答非所问）。
+        content = _downgrade_failure_notice(content)
     return {
         "id": str(message.id),
         "role": message.role,
-        "content": message.content,
+        "content": content,
         "created_at": message.created_at.isoformat(),
         "agent_id": str(message.agent_id) if message.agent_id is not None else None,
         "user_id": str(message.user_id) if message.user_id is not None else None,
@@ -666,6 +675,13 @@ class SessionContextService:
         session_id: uuid.UUID,
         limit: int | None = None,
     ) -> tuple[JsonObject, ...]:
+        """Load the recent user/assistant window for one session.
+
+        Despite the name, this output is model-visible context, not a
+        user-facing transcript: terminal failure banners are downgraded to
+        one-line history notes (see `delivery_notice`). The chat history API
+        renders the undowngraded messages separately.
+        """
         selected_limit = self.recent_message_limit if limit is None else limit
         if selected_limit <= 0:
             raise ValueError("limit must be greater than zero")

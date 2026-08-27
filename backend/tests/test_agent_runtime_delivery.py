@@ -22,6 +22,7 @@ from app.models.user import User
 from app.services.agent_runtime.delivery import (
     DeliveryRequest,
     DeliveryServiceError,
+    _safe_failure_content,
     deliver_runtime_message,
 )
 from app.services.agent_runtime.group_handoff import (
@@ -1268,3 +1269,71 @@ async def test_waiting_delivery_rejects_non_user_waiting_checkpoint() -> None:
     assert db.statements == []
     assert db.added == []
     assert "projected_" not in inspect.getsource(deliver_runtime_message)
+
+
+def _failure_banner(
+    *,
+    failure_code: str = "model_call_failed",
+    failure_message: str = "HTTP 429 Too Many Requests",
+    run_kind: str = "foreground",
+    system_role: str | None = None,
+) -> tuple[AgentRun, str]:
+    """A terminal-failure banner produced by the real generator."""
+    run = _run(
+        tenant_id=uuid.uuid4(),
+        session=None,
+        agent_id=uuid.uuid4(),
+        run_kind=run_kind,
+        system_role=system_role,
+    )
+    content = _safe_failure_content(
+        run,
+        _terminal_request(
+            run,
+            status="failed",
+            failure_code=failure_code,
+            failure_message=failure_message,
+        ),
+    )
+    return run, content
+
+
+def test_is_terminal_failure_notice_recognizes_generated_format() -> None:
+    from app.services.agent_runtime.delivery_notice import _is_terminal_failure_notice
+
+    # Round-trip through the generator: if the rendered format drifts the
+    # recogniser's contract must break loudly, not silently miss.
+    _, content = _failure_banner()
+    assert _is_terminal_failure_notice(content) is True
+    _, planning = _failure_banner(
+        run_kind="orchestration",
+        system_role="group_planning",
+    )
+    assert _is_terminal_failure_notice(planning) is True
+    # 正常回复不误判
+    assert _is_terminal_failure_notice("好的，已完成编译，APK 见附件。") is False
+    # 三要素缺一不可
+    assert _is_terminal_failure_notice("任务执行未完成。") is False
+    assert _is_terminal_failure_notice("错误码：x\nRun ID：y") is False
+    assert _is_terminal_failure_notice("") is False
+
+
+def test_downgrade_failure_notice_compacts_to_single_line() -> None:
+    from app.services.agent_runtime.delivery_notice import (
+        _downgrade_failure_notice,
+        _is_terminal_failure_notice,
+    )
+
+    run, content = _failure_banner(
+        failure_code="reconciliation_required",
+        failure_message="Runtime could not reconcile the command after repeated attempts",
+    )
+    downgraded = _downgrade_failure_notice(content)
+
+    assert "\n" not in downgraded
+    assert "历史记录" in downgraded and "已终结" in downgraded
+    assert "reconciliation_required" in downgraded
+    assert str(run.id)[:8] in downgraded
+    assert str(run.id)[8:] not in downgraded  # 只保留前 8 位
+    # 降级产物自识别为普通消息（幂等：二次降级不改变形态）
+    assert _is_terminal_failure_notice(downgraded) is False

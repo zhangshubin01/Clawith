@@ -116,6 +116,75 @@ def _sql(statement) -> str:
     return str(_compiled(statement))
 
 
+@pytest.mark.asyncio
+async def test_context_pack_downgrades_terminal_failure_notices_to_history_note():
+    """失败通知横幅不原样进新 run 上下文——降级为一行历史注记。
+
+    Claude Code 官方文档直述失败类历史污染上下文；模型曾在长群里把旧
+    run 的「任务执行未完成」横幅误读为有未完成任务，答非所问。
+    """
+    session = _session()
+    base = datetime(2026, 7, 13, 10, 0, tzinfo=UTC)
+    failure_notice = _message(
+        uuid.UUID(int=99),
+        session_id=session.id,
+        created_at=base + timedelta(seconds=99),
+        role="assistant",
+    )
+    failure_notice.content = (
+        "任务执行未完成。\n"
+        "错误：Runtime could not reconcile the command after repeated attempts\n"
+        "错误码：reconciliation_required\n"
+        f"Run ID：{uuid.uuid4()}"
+    )
+    normal_reply = _message(
+        uuid.UUID(int=100),
+        session_id=session.id,
+        created_at=base + timedelta(seconds=100),
+        role="assistant",
+    )
+    normal_reply.content = "已完成，这是正常回复。"
+    user_message = _message(
+        uuid.UUID(int=101),
+        session_id=session.id,
+        created_at=base + timedelta(seconds=101),
+        role="user",
+    )
+    covered = _message(
+        uuid.uuid4(),
+        session_id=session.id,
+        created_at=base - timedelta(seconds=2),
+    )
+    state = _state(session, version=4, watermark=covered.id)
+    db = _FakeSession(
+        _Result(scalar=session),
+        _Result(scalar=state),
+        _Result(scalar=covered),
+        _Result(
+            rows=[
+                (user_message, True),
+                (normal_reply, True),
+                (failure_notice, True),
+            ]
+        ),
+    )
+
+    pack = await service.SessionContextService().load_context_pack(
+        db,
+        tenant_id=session.tenant_id,
+        session_id=session.id,
+    )
+
+    by_id = {message["id"]: message for message in pack.recent_messages}
+    downgraded = by_id[str(failure_notice.id)]["content"]
+    assert "\n" not in downgraded
+    assert "历史记录" in downgraded and "已终结" in downgraded
+    assert "reconciliation_required" in downgraded
+    # 正常回复与用户消息原样保留
+    assert by_id[str(normal_reply.id)]["content"] == "已完成，这是正常回复。"
+    assert by_id[str(user_message.id)]["content"] == f"content:{user_message.id}"
+
+
 def test_terminal_delta_requires_the_exact_source_run_and_full_schema():
     run_id = uuid.uuid4()
     delta = service.SessionContextDelta.from_json(

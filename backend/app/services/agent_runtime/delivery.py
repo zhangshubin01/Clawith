@@ -26,6 +26,12 @@ from app.services.agent_runtime.group_handoff import (
     GroupAgentHandoffError,
     apply_group_agent_handoff,
 )
+from app.services.agent_runtime.delivery_notice import (
+    _HEADLINE_EXECUTION,
+    _HEADLINE_PLANNING,
+    _LABEL_ERROR_CODE,
+    _LABEL_RUN_ID,
+)
 from app.services.agent_runtime.state import JsonObject
 from app.services.participant_identity import get_or_create_agent_participant
 
@@ -616,17 +622,19 @@ def _safe_failure_content(run: AgentRun, request: DeliveryRequest) -> str:
         if isinstance(request.failure_message, str) and request.failure_message.strip()
         else "后端未提供详细错误信息"
     )
+    # Headline constants are shared with delivery_notice — the recogniser that
+    # downgrades these banners in later runs' model-visible history.
     headline = (
-        "任务规划未完成。"
+        _HEADLINE_PLANNING
         if run.run_kind == "orchestration" and run.system_role == _PLANNING_ROLE
-        else "任务执行未完成。"
+        else _HEADLINE_EXECUTION
     )
     return "\n".join(
         (
             headline,
             f"错误：{message}",
-            f"错误码：{code}",
-            f"Run ID：{run.id}",
+            f"{_LABEL_ERROR_CODE}{code}",
+            f"{_LABEL_RUN_ID}{run.id}",
         )
     )
 
