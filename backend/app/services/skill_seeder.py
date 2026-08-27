@@ -1045,9 +1045,87 @@ Android 工程必须包含 Gradle Wrapper（`gradlew`、`gradle/wrapper/gradle-w
     },
 ]
 
+BUILTIN_SKILL_VERSION_WHITELIST_KEY = "builtin_skill_version_whitelist"
+DEFAULT_SKILLS_SYNC_HASH_KEY = "default_skills_sync_hash"
 
-def _default_skills_sync_digest(skills) -> str:
-    """Hash the complete default-Skill registry state used for repair runs."""
+# Historical builtin versions observed on agent file layers (investigation
+# 2026-08-27): skill-creator files deployed before the version-alignment
+# mechanism never got updated because the sync only filled missing files.
+# These seeds let alignment runs recognise those versions as builtin — i.e.
+# safe to overwrite with the current DB version.
+BUILTIN_SKILL_VERSION_SEED: dict[str, set[str]] = {
+    "skill-creator/SKILL.md": {"d0cffe612ecddd187c06e21f2a314bb0"},
+    "skill-creator/scripts/clawith_runner.py": {"2f1ec894797734bb6d2ff7fe5508edcf"},
+    "skill-creator/scripts/improve_description.py": {"c72cbcbb8f9b0b72de4371547c5f8687"},
+    "skill-creator/scripts/quick_validate.py": {"b74b2cdce300d20ed6c64d0bf4738a0c"},
+    "skill-creator/scripts/run_eval.py": {"80c38214917bf1dfbf5024efd7d47bd9"},
+    "skill-creator/scripts/run_loop.py": {"f4662ff05f8946960571362f9c4dcfbd"},
+}
+
+
+def _content_md5(content: str) -> str:
+    return hashlib.md5(content.encode("utf-8")).hexdigest()
+
+
+def _whitelist_path(skill_folder: str, file_path: str) -> str:
+    """The whitelist key for one skill file: ``"<skill-folder>/<file-path>"``."""
+    return f"{skill_folder}/{file_path}"
+
+
+def _versions_of(persisted_value: dict | None) -> dict:
+    """The ``versions`` map inside a persisted whitelist value (``{}`` when absent)."""
+    return (persisted_value or {}).get("versions") or {}
+
+
+def _load_version_whitelist(persisted_value: dict | None) -> dict[str, set[str]]:
+    """Merge the static seed with persisted historical builtin versions."""
+    merged = {path: set(md5s) for path, md5s in BUILTIN_SKILL_VERSION_SEED.items()}
+    for path, md5s in _versions_of(persisted_value).items():
+        merged.setdefault(path, set()).update(md5s)
+    return merged
+
+
+def _record_replaced_versions(persisted_value: dict | None, replaced: dict[str, str]) -> dict:
+    """Return a new persisted value with the replaced versions appended (deduped).
+
+    ``replaced`` maps ``"<skill-folder>/<file-path>"`` to the md5 of the content
+    that was just superseded in the DB registry.
+    """
+    versions: dict[str, list[str]] = {
+        path: list(md5s) for path, md5s in _versions_of(persisted_value).items()
+    }
+    for path, md5 in replaced.items():
+        bucket = versions.setdefault(path, [])
+        if md5 not in bucket:
+            bucket.append(md5)
+    return {"versions": versions}
+
+
+async def _persist_replaced_versions(db, dao, replaced: dict[str, str]) -> None:
+    """Persist replaced builtin versions into the version whitelist setting."""
+    from app.models.system_settings import SystemSetting
+
+    if not replaced:
+        return
+    result = await dao.execute(
+        db,
+        select(SystemSetting).where(SystemSetting.key == BUILTIN_SKILL_VERSION_WHITELIST_KEY),
+    )
+    setting = result.scalar_one_or_none()
+    new_value = _record_replaced_versions(setting.value if setting else None, replaced)
+    if setting:
+        setting.value = new_value
+    else:
+        dao.add(db, SystemSetting(key=BUILTIN_SKILL_VERSION_WHITELIST_KEY, value=new_value))
+
+
+def _default_skills_sync_digest(skills, whitelist: dict[str, set[str]] | None = None) -> str:
+    """Hash the complete default-Skill registry state used for repair runs.
+
+    When a version whitelist is given its content is folded into the digest, so
+    adding historical builtin versions (which changes what counts as "safe to
+    overwrite") also triggers an alignment run.
+    """
     hasher = hashlib.sha256()
     for skill in sorted(skills, key=lambda item: item.folder_name):
         hasher.update(skill.folder_name.encode("utf-8"))
@@ -1057,19 +1135,59 @@ def _default_skills_sync_digest(skills) -> str:
             hasher.update(b"\0")
             hasher.update(skill_file.content.encode("utf-8"))
             hasher.update(b"\0")
+    if whitelist:
+        for path in sorted(whitelist):
+            hasher.update(path.encode("utf-8"))
+            hasher.update(b"\0")
+            for md5 in sorted(whitelist[path]):
+                hasher.update(md5.encode("utf-8"))
+                hasher.update(b"\0")
     return hasher.hexdigest()
 
 
-async def _sync_missing_default_skill_files(storage, agent_prefix: str, skill) -> int:
-    """Fill missing files for one installed default Skill without overwriting files."""
+async def _align_default_skill_files(
+    storage,
+    agent_prefix: str,
+    skill,
+    whitelist: dict[str, set[str]],
+) -> tuple[int, int, int]:
+    """Align one installed default Skill's file layer with the registry version.
+
+    Per-file verdicts:
+    - missing -> write the registry content (written)
+    - content equals the registry version -> leave untouched
+    - content md5 is in the version whitelist for this path -> it is a stale
+      builtin version, overwrite with the registry content (aligned)
+    - anything else is treated as a local customisation -> keep it and warn
+      (skipped). A kept file becomes self-maintained: it is excluded from every
+      future automatic upgrade unless its content is later whitelisted.
+
+    Returns ``(written, aligned, skipped)``.
+    """
     written = 0
+    aligned = 0
+    skipped = 0
     for skill_file in skill.files:
         key = f"{agent_prefix}/skills/{skill.folder_name}/{skill_file.path}"
-        if await storage.is_file(key):
+        if not await storage.is_file(key):
+            await storage.write_text(key, skill_file.content, encoding="utf-8")
+            written += 1
             continue
-        await storage.write_text(key, skill_file.content, encoding="utf-8")
-        written += 1
-    return written
+        existing = await storage.read_text(key, encoding="utf-8")
+        if existing == skill_file.content:
+            continue
+        existing_md5 = _content_md5(existing)
+        if existing_md5 in whitelist.get(_whitelist_path(skill.folder_name, skill_file.path), ()):
+            await storage.write_text(key, skill_file.content, encoding="utf-8")
+            aligned += 1
+        else:
+            skipped += 1
+            logger.warning(
+                f"[SkillSeeder] Kept locally modified file "
+                f"'{skill.folder_name}/{skill_file.path}' for agent "
+                f"'{agent_prefix}' (md5 {existing_md5} not in whitelist)"
+            )
+    return written, aligned, skipped
 
 
 async def seed_skills():
@@ -1097,6 +1215,7 @@ async def seed_skills():
                 logger.warning("[SkillSeeder] mcp-installer/SKILL.md not found in agent_template/skills/")
 
     async with query_dao.session() as db:
+        replaced_versions: dict[str, str] = {}
         for skill_data in BUILTIN_SKILLS:
             result = await query_dao.execute(db, 
                 select(Skill).where(Skill.folder_name == skill_data["folder_name"])
@@ -1122,6 +1241,9 @@ async def seed_skills():
                         # Update content if changed
                         existing_file = existing_paths[f["path"]]
                         if existing_file.content != f["content"]:
+                            replaced_versions[
+                                _whitelist_path(skill_data["folder_name"], f["path"])
+                            ] = _content_md5(existing_file.content)
                             existing_file.content = f["content"]
                             logger.info(f"[SkillSeeder] Updated {f['path']} in {skill_data['name']}")
                     else:
@@ -1142,15 +1264,18 @@ async def seed_skills():
                 for f in skill_data["files"]:
                     query_dao.add(db, SkillFile(skill_id=skill.id, path=f["path"], content=f["content"]))
                 logger.info(f"[SkillSeeder] Created skill: {skill_data['name']}")
+        await _persist_replaced_versions(db, query_dao, replaced_versions)
         await query_dao.commit(db)
         logger.info("[SkillSeeder] Skills seeded")
 
 
 async def push_default_skills_to_existing_agents():
-    """Deploy all is_default skills into the workspace of every existing agent that is missing them.
-    
-    Called at startup after seed_skills() so existing agents automatically receive new default skills
-    like mcp-installer without requiring manual re-creation.
+    """Align every existing agent's default-skill files with the registry version.
+
+    Called at startup after seed_skills() so existing agents automatically receive
+    new default skills and stale builtin versions get refreshed. Per file: missing
+    -> write, equals registry -> skip, matches a whitelisted builtin version ->
+    overwrite, anything else -> keep as a local customisation (with a warning).
     """
     from app.models.agent import Agent
     from app.models.skill import Skill
@@ -1167,11 +1292,20 @@ async def push_default_skills_to_existing_agents():
         if not default_skills:
             return
 
-        current_hash = _default_skills_sync_digest(default_skills)
+        # Load the version whitelist (static seed + persisted historical
+        # builtin versions); its content is part of the sync digest so new
+        # seeds trigger an alignment run even when registry files are unchanged.
+        whitelist_r = await query_dao.execute(db,
+            select(SystemSetting).where(SystemSetting.key == BUILTIN_SKILL_VERSION_WHITELIST_KEY)
+        )
+        whitelist_setting = whitelist_r.scalar_one_or_none()
+        whitelist = _load_version_whitelist(whitelist_setting.value if whitelist_setting else None)
+
+        current_hash = _default_skills_sync_digest(default_skills, whitelist)
 
         # Check if we already synced this version of default skills
         setting_r = await query_dao.execute(db, 
-            select(SystemSetting).where(SystemSetting.key == "default_skills_sync_hash")
+            select(SystemSetting).where(SystemSetting.key == DEFAULT_SKILLS_SYNC_HASH_KEY)
         )
         setting = setting_r.scalar_one_or_none()
         if setting and setting.value.get("hash") == current_hash:
@@ -1184,44 +1318,71 @@ async def push_default_skills_to_existing_agents():
         )
         agents = agents_r.scalars().all()
 
-        pushed = 0
+        written_total = 0
+        aligned_total = 0
+        skipped_total = 0
         removed_legacy = 0
+        failed_agents: list[str] = []
         storage = get_storage_backend()
         for agent in agents:
-            agent_prefix = agent_manager._agent_storage_prefix(agent.id)
-            legacy_key = f"{agent_prefix}/skills/MCP_INSTALLER.md"
-            if await storage.is_file(legacy_key):
-                try:
-                    await storage.delete(legacy_key)
-                    removed_legacy += 1
-                except Exception as exc:
-                    logger.warning(f"[SkillSeeder] Failed to remove legacy MCP_INSTALLER.md for agent {agent.id}: {exc}")
-            for skill in default_skills:
-                if not skill.files:
-                    continue
-                written = await _sync_missing_default_skill_files(
-                    storage,
-                    agent_prefix,
-                    skill,
-                )
-                if written:
-                    pushed += written
-                    logger.info(
-                        f"[SkillSeeder] Repaired {written} missing file(s) for "
-                        f"default skill '{skill.name}' on agent {agent.id}"
+            try:
+                agent_prefix = agent_manager._agent_storage_prefix(agent.id)
+                legacy_key = f"{agent_prefix}/skills/MCP_INSTALLER.md"
+                if await storage.is_file(legacy_key):
+                    # Narrow guard: a legacy-cleanup failure only skips the
+                    # cleanup, not the alignment for this agent.
+                    try:
+                        await storage.delete(legacy_key)
+                        removed_legacy += 1
+                    except Exception as exc:
+                        logger.warning(
+                            f"[SkillSeeder] Failed to remove legacy MCP_INSTALLER.md "
+                            f"for agent {agent.id}: {exc!r}"
+                        )
+                for skill in default_skills:
+                    if not skill.files:
+                        continue
+                    written, aligned, skipped = await _align_default_skill_files(
+                        storage,
+                        agent_prefix,
+                        skill,
+                        whitelist,
                     )
+                    written_total += written
+                    aligned_total += aligned
+                    skipped_total += skipped
+                    if written or aligned or skipped:
+                        logger.info(
+                            f"[SkillSeeder] Aligned default skill '{skill.name}' "
+                            f"on agent {agent.id}: {aligned} overwritten, {written} filled, "
+                            f"{skipped} kept (custom)"
+                        )
+            except Exception as exc:
+                # One failing agent must not abort the others. It is reported
+                # and retried on the next startup: the sync hash is not
+                # persisted below, so the hash gate stays open.
+                failed_agents.append(str(agent.id))
+                logger.warning(
+                    f"[SkillSeeder] Failed to align default skills for agent {agent.id}: {exc!r}"
+                )
 
-        # Save/update the sync hash in settings
-        if setting:
-            setting.value = {"hash": current_hash}
-        else:
-            query_dao.add(db, SystemSetting(key="default_skills_sync_hash", value={"hash": current_hash}))
+        # Persist the sync hash only when every agent was processed without
+        # errors; otherwise a failed agent would be skipped forever by the
+        # hash gate. Alignment is idempotent, so re-running it is safe.
+        if not failed_agents:
+            if setting:
+                setting.value = {"hash": current_hash}
+            else:
+                query_dao.add(db, SystemSetting(key=DEFAULT_SKILLS_SYNC_HASH_KEY, value={"hash": current_hash}))
         await query_dao.commit(db)
 
-        if pushed or removed_legacy:
-            logger.info(
-                f"[SkillSeeder] Pushed {pushed} new skill files "
-                f"to existing agents; removed {removed_legacy} legacy MCP installer files"
-            )
-        else:
-            logger.info("[SkillSeeder] All existing agents already have all default skills")
+        failed_note = (
+            f", {len(failed_agents)} agents failed (will retry next startup)"
+            if failed_agents
+            else ""
+        )
+        logger.info(
+            f"[SkillSeeder] Default skill alignment finished: {aligned_total} overwritten, "
+            f"{written_total} filled, {skipped_total} kept (custom), "
+            f"{removed_legacy} legacy MCP installer files removed{failed_note}"
+        )
