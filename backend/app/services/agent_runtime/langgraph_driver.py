@@ -415,6 +415,14 @@ class LangGraphRuntimeDriver:
         command: RuntimeCommandRecord,
         checkpoint: CheckpointObservation | None,
     ) -> None:
+        # CLAIM-TIMING 插桩（入队→图启动四段量化，拿到数据后移除）
+        import time as _time
+
+        logger.info(
+            "[CLAIM-TIMING] graph_start run_id={} ts_ms={}",
+            run.run_id,
+            int(_time.time() * 1000),
+        )
         with observe_run(
             run_id=run.run_id,
             command_id=command.id,

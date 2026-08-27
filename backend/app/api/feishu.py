@@ -749,6 +749,14 @@ async def _accept_feishu_runtime_message(
                 ),
             )
             await db.commit()
+            # CLAIM-TIMING 插桩（入队→图启动四段量化，拿到数据后移除）
+            import time as _time
+
+            logger.info(
+                "[CLAIM-TIMING] enqueued run_id={} ts_ms={}",
+                pregenerated_run_id,
+                int(_time.time() * 1000),
+            )
         except Exception:
             if bridge is not None:
                 try:

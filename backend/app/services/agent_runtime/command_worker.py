@@ -1124,6 +1124,14 @@ class RuntimeCommandWorker:
         # One stable trace follows the durable Command across claim retries.
         set_trace_id(command.id.hex[:12])
         exhausted = command.attempt_count >= self._max_attempts
+        # CLAIM-TIMING 插桩（入队→图启动四段量化，拿到数据后移除）
+        import time as _time
+
+        logger.info(
+            "[CLAIM-TIMING] claimed run_id={} ts_ms={}",
+            command.run_id,
+            int(_time.time() * 1000),
+        )
 
         stop_heartbeat = asyncio.Event()
         heartbeat = asyncio.create_task(
