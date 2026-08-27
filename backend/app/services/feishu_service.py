@@ -947,13 +947,17 @@ class FeishuService:
         receive_id: str,
         card_id: str,
         receive_id_type: str = "open_id",
-    ) -> None:
-        """Send an interactive message referencing an existing card_id."""
+    ) -> dict:
+        """Send an interactive message referencing an existing card_id.
+
+        Returns the provider response data dict (carries ``message_id``) so the
+        caller can later recall the message (e.g. withdraw on resume).
+        """
         content = json.dumps({
             "type": "card",
             "data": {"card_id": card_id},
         })
-        await self.send_message(
+        return await self.send_message(
             app_id=app_id,
             app_secret=app_secret,
             receive_id=receive_id,
@@ -962,6 +966,28 @@ class FeishuService:
             receive_id_type=receive_id_type,
             stage="send_card_by_card_id",
         )
+
+    async def delete_message(
+        self,
+        app_id: str,
+        app_secret: str,
+        message_id: str,
+    ) -> dict:
+        """Recall a message the bot previously sent (used to withdraw a card)."""
+        async with httpx.AsyncClient() as client:
+            token_resp = await client.post(FEISHU_APP_TOKEN_URL, json={
+                "app_id": app_id,
+                "app_secret": app_secret,
+            })
+            app_token = token_resp.json().get("app_access_token", "")
+
+            resp = await client.delete(
+                f"{_FEISHU_BASE}/open-apis/im/v1/messages/{message_id}",
+                headers={"Authorization": f"Bearer {app_token}"},
+            )
+            return self._parse_api_response(
+                resp, stage="delete_message", message_id=message_id,
+            )
 
     async def stream_card_content(
         self,

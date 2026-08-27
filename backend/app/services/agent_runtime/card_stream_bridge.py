@@ -10,6 +10,8 @@ Lifecycle
 ---------
 ``start()`` → ``push_text()``* → ``update_tool_status()``* → ``finalize()``
                                                           → ``abort()``
+``withdraw()`` — recall a pre-created card (resume path); valid at any point
+after ``start()`` is scheduled, including before it runs and mid-creation.
 """
 
 from __future__ import annotations
@@ -227,6 +229,7 @@ class CardStreamBridge:
 
         # Card identity
         self.card_id: str | None = None
+        self.message_id: str | None = None
         self._sequence: int = 0
         self._lock = asyncio.Lock()  # serialise all CardKit API calls
 
@@ -259,6 +262,7 @@ class CardStreamBridge:
         self._creation_future: asyncio.Future | None = None
         self._streaming: bool = False
         self._finalized: bool = False
+        self._withdrawn: bool = False
         self._card_ready: asyncio.Event = asyncio.Event()
 
         # Resilience
@@ -276,16 +280,27 @@ class CardStreamBridge:
         self._state = "creating"
         self._creation_future = asyncio.Future()
 
+        if self._withdrawn:
+            # 建卡开始前已被撤回 — 不建卡、不发送，直接终态。
+            self._state = "withdrawn"
+            self._card_ready.set()
+            self._creation_future.set_result(None)
+            return
+
         try:
             card = self._build_streaming_skeleton()
             self.card_id = await self._fs.create_card_entity(
                 self._app_id, self._app_secret, card,
             )
             self._sequence = 1
-            await self._fs.send_card_by_card_id(
+            send_data = await self._fs.send_card_by_card_id(
                 self._app_id, self._app_secret,
                 self._receive_id, self.card_id, self._receive_id_type,
             )
+            if isinstance(send_data, dict):
+                data_payload = send_data.get("data")
+                if isinstance(data_payload, dict):
+                    self.message_id = data_payload.get("message_id")
             self._streaming = True
             self._state = "streaming"
             self._card_ready.set()
@@ -298,8 +313,46 @@ class CardStreamBridge:
             self._creation_future.set_result(None)
 
         # If finalize / abort was requested during creation, honour it now.
-        if self._finalized and self._streaming:
+        # withdraw() deletes the message itself — do not render a terminal card.
+        if self._finalized and self._streaming and not self._withdrawn:
             await self.finalize("")
+
+    async def withdraw(self) -> None:
+        """Recall a card that was created ahead of time but is no longer needed.
+
+        Used when the message turns out to resume an existing Run (its card keeps
+        streaming): the pre-created skeleton card must not linger in the chat.
+        If creation is still in flight, waits for it to finish; if ``start()``
+        has not run yet, the pending start will bail out instead of sending.
+        A recall failure is logged and contained — the resume flow continues.
+        """
+        self._withdrawn = True
+        self._aux_flush.dispose()
+        self._footer_flush.dispose()
+        if self._state == "creating" and self._creation_future is not None:
+            try:
+                await asyncio.wait_for(self._creation_future, timeout=15)
+            except Exception:
+                logger.exception("[FEISHU-CARD] withdraw_creation_wait_failed")
+                return
+        self._streaming = False
+        self._finalized = True
+        self._state = "withdrawn"
+        if not self.message_id:
+            return
+        try:
+            await self._fs.delete_message(
+                self._app_id, self._app_secret, self.message_id,
+            )
+            logger.info(
+                "[FEISHU-CARD] card_withdrawn card_id={} message_id={}",
+                self.card_id, self.message_id,
+            )
+        except Exception:
+            # 撤回失败只留下一个空的骨架卡片 — 无害，resume 流程继续。
+            logger.exception(
+                "[FEISHU-CARD] card_withdraw_failed card_id={}", self.card_id,
+            )
 
     async def push_text(self, content: str) -> None:
         """Push the *full accumulated* text to the main-content element.

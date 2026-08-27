@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 from datetime import UTC, datetime
+from functools import partial
 from types import SimpleNamespace
 import uuid
 
@@ -60,6 +62,19 @@ class _SessionFactory:
 
     def __call__(self):
         return next(self.sessions)
+
+
+class _RecordingBridge:
+    """Fake CardStreamBridge that records lifecycle calls into a shared list."""
+
+    def __init__(self, events: list[str], **kwargs):
+        self.events = events
+
+    async def start(self):
+        self.events.append("card_start")
+
+    async def withdraw(self):
+        self.events.append("withdraw")
 
 
 def test_feishu_callback_rejects_missing_or_mismatched_verification_token() -> None:
@@ -133,11 +148,12 @@ async def test_feishu_group_message_uses_runtime_intake(monkeypatch) -> None:
     session = SimpleNamespace(id=session_id)
     model = SimpleNamespace(id=uuid.uuid4())
     config = SimpleNamespace(app_id="app-1", app_secret="secret-1")
-    db = _Session(agent)
+    db = _OrderedSession(agent, None)  # 查询1=agent, 查询2=resume 检查(无进行中 run)
     intake = _runtime(tenant_id)
     calls: dict[str, object] = {}
 
     async def resolve_sender(_db, **_kwargs):
+        await asyncio.sleep(0)  # 让出事件循环，让提前 fire 的建卡任务得以运行
         return user
 
     async def find_session(**kwargs):
@@ -151,11 +167,20 @@ async def test_feishu_group_message_uses_runtime_intake(monkeypatch) -> None:
         calls["intake"] = kwargs
         return intake
 
-    monkeypatch.setattr(feishu, "_async_session", _SessionFactory(db))
+    from app.services.agent_runtime import card_stream_bridge as bridge_module
+
+    bridge_events: list[str] = []
+
+    monkeypatch.setattr(feishu, "_async_session", lambda: db)
     monkeypatch.setattr(feishu, "_resolve_feishu_sender", resolve_sender)
     monkeypatch.setattr(channel_session, "find_or_create_channel_session", find_session)
     monkeypatch.setattr(feishu, "_load_agent_and_model", load_model)
     monkeypatch.setattr(feishu, "enqueue_channel_chat_runtime", enqueue)
+    monkeypatch.setattr(
+        bridge_module, "CardStreamBridge", partial(_RecordingBridge, bridge_events),
+    )
+    monkeypatch.setattr(bridge_module, "register_bridge", lambda *_args: None)
+    monkeypatch.setattr(bridge_module, "unregister_bridge", lambda *_args: None)
 
     result = await feishu._accept_feishu_runtime_message(
         agent_id=agent_id,
@@ -171,6 +196,7 @@ async def test_feishu_group_message_uses_runtime_intake(monkeypatch) -> None:
 
     assert db.commits == 1
     assert result is intake
+    assert bridge_events == ["card_start"]  # 卡片先建、无撤回（非 resume）
     session_call = calls["session"]
     assert isinstance(session_call, dict)
     assert session_call["is_group"] is True
@@ -529,6 +555,12 @@ async def test_feishu_interrupt_command_cancels_active_run_without_new_run(monke
     monkeypatch.setattr(bridge_module, "get_bridge", lambda _key: None)
     monkeypatch.setattr(fs, "send_message", send_message)
 
+    class _NoCard:
+        def __init__(self, **kwargs):
+            raise AssertionError("interrupt command must not create a card")
+
+    monkeypatch.setattr(bridge_module, "CardStreamBridge", _NoCard)
+
     result = await feishu._accept_feishu_runtime_message(
         agent_id=agent_id,
         config=config,  # type: ignore[arg-type]
@@ -622,3 +654,179 @@ async def test_feishu_interrupt_with_no_active_run_confirms_and_stays_idle(monke
     assert len(intake_calls) == 0
     assert len(sent) == 1
     assert "没有正在执行" in json.loads(sent[0][1])["text"]
+
+
+@pytest.mark.asyncio
+async def test_feishu_card_creation_starts_before_sender_resolution(monkeypatch) -> None:
+    """卡片任务在发送者解析/会话创建之前就 fire —— 压缩卡片首现延迟。"""
+    from app.services.agent_runtime import card_stream_bridge as bridge_module
+
+    tenant_id = uuid.uuid4()
+    agent_id = uuid.uuid4()
+    agent = SimpleNamespace(
+        id=agent_id, tenant_id=tenant_id, creator_id=uuid.uuid4(), name="A",
+    )
+    user = SimpleNamespace(id=uuid.uuid4(), display_name="Alice")
+    session = SimpleNamespace(id=uuid.uuid4())
+    model = SimpleNamespace(id=uuid.uuid4())
+    config = SimpleNamespace(app_id="app-1", app_secret="secret-1")
+    db = _OrderedSession(agent, None)  # 查询1=agent, 查询2=resume 检查(无进行中 run)
+    intake = _runtime(tenant_id)
+    events: list[str] = []
+    registered: list = []
+
+    async def resolve_sender(_db, **_kwargs):
+        await asyncio.sleep(0)  # 模拟真实 Contact API RTT：让出事件循环
+        events.append("resolve")
+        return user
+
+    async def find_session(**kwargs):
+        events.append("session")
+        return session
+
+    async def load_model(_db, _agent_id):
+        return agent, model, None
+
+    async def enqueue(_db, **kwargs):
+        events.append("enqueue")
+        return intake
+
+    monkeypatch.setattr(feishu, "_async_session", lambda: db)
+    monkeypatch.setattr(feishu, "_resolve_feishu_sender", resolve_sender)
+    monkeypatch.setattr(channel_session, "find_or_create_channel_session", find_session)
+    monkeypatch.setattr(feishu, "_load_agent_and_model", load_model)
+    monkeypatch.setattr(feishu, "enqueue_channel_chat_runtime", enqueue)
+    monkeypatch.setattr(
+        bridge_module, "CardStreamBridge", partial(_RecordingBridge, events),
+    )
+    monkeypatch.setattr(bridge_module, "register_bridge", lambda *a: registered.append(a))
+    monkeypatch.setattr(bridge_module, "unregister_bridge", lambda *_a: None)
+
+    result = await feishu._accept_feishu_runtime_message(
+        agent_id=agent_id,
+        config=config,  # type: ignore[arg-type]
+        sender_open_id="ou_sender",
+        sender_user_id="feishu-user-1",
+        chat_type="group",
+        chat_id="oc_group_1",
+        content="Hello",
+        display_content="Hello",
+        external_event_id="evt-1",
+    )
+
+    assert result is intake
+    # 建卡任务先于发送者解析与会话创建启动；非 resume 不撤回
+    assert events == ["card_start", "resolve", "session", "enqueue"]
+    assert len(registered) >= 1  # 初始注册 (rebound 注册取决于 fake intake 的 run_id)
+
+
+@pytest.mark.asyncio
+async def test_feishu_card_withdrawn_when_resuming_existing_run(monkeypatch) -> None:
+    """消息命中有 lane 的既有 run 时，提前建的卡片被撤回且不参与注册。"""
+    from app.services.agent_runtime import card_stream_bridge as bridge_module
+
+    tenant_id = uuid.uuid4()
+    agent_id = uuid.uuid4()
+    active_run_id = uuid.uuid4()
+    agent = SimpleNamespace(
+        id=agent_id, tenant_id=tenant_id, creator_id=uuid.uuid4(), name="A",
+    )
+    user = SimpleNamespace(id=uuid.uuid4(), display_name="Alice")
+    session = SimpleNamespace(id=uuid.uuid4())
+    model = SimpleNamespace(id=uuid.uuid4())
+    config = SimpleNamespace(app_id="app-1", app_secret="secret-1")
+    db = _OrderedSession(agent, SimpleNamespace(id=active_run_id))
+    intake = _runtime(tenant_id)
+    events: list[str] = []
+    registered: list = []
+    unregistered: list = []
+
+    async def resolve_sender(_db, **_kwargs):
+        await asyncio.sleep(0)
+        events.append("resolve")
+        return user
+
+    async def find_session(**kwargs):
+        events.append("session")
+        return session
+
+    async def load_model(_db, _agent_id):
+        return agent, model, None
+
+    async def enqueue(_db, **kwargs):
+        events.append("enqueue")
+        return intake
+
+    monkeypatch.setattr(feishu, "_async_session", lambda: db)
+    monkeypatch.setattr(feishu, "_resolve_feishu_sender", resolve_sender)
+    monkeypatch.setattr(channel_session, "find_or_create_channel_session", find_session)
+    monkeypatch.setattr(feishu, "_load_agent_and_model", load_model)
+    monkeypatch.setattr(feishu, "enqueue_channel_chat_runtime", enqueue)
+    monkeypatch.setattr(
+        bridge_module, "CardStreamBridge", partial(_RecordingBridge, events),
+    )
+    monkeypatch.setattr(bridge_module, "register_bridge", lambda *a: registered.append(a))
+    monkeypatch.setattr(bridge_module, "unregister_bridge", lambda *a: unregistered.append(a))
+
+    result = await feishu._accept_feishu_runtime_message(
+        agent_id=agent_id,
+        config=config,  # type: ignore[arg-type]
+        sender_open_id="ou_sender",
+        sender_user_id="feishu-user-1",
+        chat_type="p2p",
+        chat_id="",
+        content="继续",
+        display_content="继续",
+        external_event_id="evt-1",
+    )
+
+    assert result is intake
+    # 提前建的卡片被撤回、从注册表移除；run 仍照常入队（resume）
+    assert events == ["card_start", "resolve", "session", "withdraw", "enqueue"]
+    assert len(registered) == 1  # 仅初始注册；撤回后不再按 rebound run_id 注册
+    assert len(unregistered) == 1
+
+
+@pytest.mark.asyncio
+async def test_feishu_card_withdrawn_on_sender_resolution_failure(monkeypatch) -> None:
+    """发送者解析失败时，提前建的卡片被撤回，错误照常传播。"""
+    from app.services.agent_runtime import card_stream_bridge as bridge_module
+    from app.services.channel_user_service import ChannelUserResolutionError
+
+    agent_id = uuid.uuid4()
+    agent = SimpleNamespace(
+        id=agent_id, tenant_id=uuid.uuid4(), creator_id=uuid.uuid4(), name="A",
+    )
+    config = SimpleNamespace(app_id="app-1", app_secret="secret-1")
+    db = _Session(agent)  # 只需要 agent 查询；解析失败发生在会话创建之前
+    events: list[str] = []
+    unregistered: list = []
+
+    async def resolve_sender(_db, **_kwargs):
+        await asyncio.sleep(0)
+        raise ChannelUserResolutionError("unresolvable sender")
+
+    monkeypatch.setattr(feishu, "_async_session", lambda: db)
+    monkeypatch.setattr(feishu, "_resolve_feishu_sender", resolve_sender)
+    monkeypatch.setattr(
+        bridge_module, "CardStreamBridge", partial(_RecordingBridge, events),
+    )
+    monkeypatch.setattr(bridge_module, "register_bridge", lambda *_a: None)
+    monkeypatch.setattr(bridge_module, "unregister_bridge", lambda *a: unregistered.append(a))
+
+    with pytest.raises(ChannelUserResolutionError):
+        await feishu._accept_feishu_runtime_message(
+            agent_id=agent_id,
+            config=config,  # type: ignore[arg-type]
+            sender_open_id="ou_sender",
+            sender_user_id="feishu-user-1",
+            chat_type="p2p",
+            chat_id="",
+            content="Hello",
+            display_content="Hello",
+            external_event_id="evt-1",
+        )
+
+    # 卡片任务已 fire，解析失败时被撤回并从注册表移除
+    assert events == ["card_start", "withdraw"]
+    assert len(unregistered) == 1

@@ -515,6 +515,25 @@ async def _resolve_feishu_sender(
     )
 
 
+async def _withdraw_card_bridge(
+    *,
+    bridge,
+    pregenerated_run_id: uuid.UUID,
+    unregister_bridge,
+    reason: str,
+) -> None:
+    """撤回提前创建的卡片并从注册表移除，失败仅记日志（流程继续）。
+
+    撤回失败只会在聊天里留下一个空的骨架卡片 — 无害；但注册表条目
+    必须无论成败都清理，否则残留直至 30 分钟 age-sweep。
+    """
+    try:
+        await bridge.withdraw()
+    except Exception:
+        logger.exception("[FEISHU-CARD] withdraw_failed reason={}", reason)
+    unregister_bridge(str(pregenerated_run_id))
+
+
 async def _accept_feishu_runtime_message(
     *,
     agent_id: uuid.UUID,
@@ -534,6 +553,7 @@ async def _accept_feishu_runtime_message(
     """
     from app.models.agent import Agent
     from app.services.channel_session import find_or_create_channel_session
+    from app.services.channel_user_service import ChannelUserResolutionError
 
     async with _async_session() as db:
         agent_result = await db.execute(
@@ -550,13 +570,61 @@ async def _accept_feishu_runtime_message(
         pregenerated_run_id = uuid.uuid4()
         bridge = None
         register_bridge = None
-        user = await _resolve_feishu_sender(
-            db,
-            agent=agent,
-            config=config,
-            sender_open_id=sender_open_id,
-            sender_user_id=sender_user_id,
-        )
+        unregister_bridge = None
+        # 对话内中断指令 — 纯文本判断提前：中断指令不建卡
+        # (卡片按钮在长连接模式下收不到点击回调，用户回复指令是唯一可靠停止方式)
+        _normalized = re.sub(r"\s+", "", content).strip().lower()
+        is_interrupt = _normalized in _FEISHU_INTERRUPT_PHRASES
+        # 卡片提前创建 — 与发送者解析/会话创建并发，压缩首帧延迟。
+        # 建卡只依赖 agent_name + receive_id + 凭据，全部来自事件与配置；
+        # 若随后判定为 resume 会撤回（withdraw）这张提前建的卡片。
+        if card_mode and not is_interrupt:
+            from app.services.agent_runtime.card_stream_bridge import (
+                CardStreamBridge,
+                register_bridge as _reg_bridge,
+                unregister_bridge as _unreg_bridge,
+            )
+            from app.services.feishu_service import feishu_service as fs
+            register_bridge = _reg_bridge
+            unregister_bridge = _unreg_bridge
+            bridge = CardStreamBridge(
+                feishu_service=fs,
+                app_id=config.app_id or "",
+                app_secret=config.app_secret or "",
+                receive_id=chat_id if is_group else sender_open_id,
+                receive_id_type="chat_id" if is_group else "open_id",
+                agent_name=agent.name or str(agent.id),
+                run_id=str(pregenerated_run_id),
+            )
+            card_task = asyncio.create_task(bridge.start())
+            card_task.add_done_callback(
+                lambda t: (
+                    logger.error("[FEISHU-CARD] card_task_failed: %s", t.exception())
+                    if t.exception() else None
+                )
+            )
+            register_bridge(str(pregenerated_run_id), bridge)
+            logger.info(
+                "[FEISHU-CARD] bridge_created run_id={}", pregenerated_run_id,
+            )
+        try:
+            user = await _resolve_feishu_sender(
+                db,
+                agent=agent,
+                config=config,
+                sender_open_id=sender_open_id,
+                sender_user_id=sender_user_id,
+            )
+        except ChannelUserResolutionError:
+            # 发送者解析失败时，提前创建的卡片需要撤回再让错误传播。
+            if bridge is not None:
+                await _withdraw_card_bridge(
+                    bridge=bridge,
+                    pregenerated_run_id=pregenerated_run_id,
+                    unregister_bridge=unregister_bridge,
+                    reason="resolution_failure",
+                )
+            raise
         stable_sender = sender_user_id or sender_open_id
         external_conv_id = (
             f"feishu_group_{chat_id}" if is_group else f"feishu_p2p_{stable_sender}"
@@ -574,8 +642,7 @@ async def _accept_feishu_runtime_message(
         )
         # 对话内中断指令 — 卡片按钮在长连接模式下收不到点击回调，
         # 用户回复「中断/停止/取消」时直接取消当前活跃 run。
-        _normalized = re.sub(r"\s+", "", content).strip().lower()
-        if _normalized in _FEISHU_INTERRUPT_PHRASES:
+        if is_interrupt:
             return await _cancel_active_feishu_run(
                 db=db,
                 agent=agent,
@@ -586,8 +653,8 @@ async def _accept_feishu_runtime_message(
                 chat_id=chat_id,
                 sender_open_id=sender_open_id,
             )
-        # 卡片创建 — session 后可用精确 resume 检查
-        if card_mode:
+        # 精确 resume 检查 — 会话可用后判断；命中 resume 时撤回提前建的卡片。
+        if card_mode and bridge is not None:
             from app.models.agent_run import AgentRun as _AgentRun
             from sqlalchemy import select as _select
             resume_result = await db.execute(
@@ -599,32 +666,19 @@ async def _accept_feishu_runtime_message(
                     _AgentRun.source_type == "chat",
                 ).limit(1)
             )
-            if resume_result.scalar_one_or_none() is None:
-                from app.services.agent_runtime.card_stream_bridge import (
-                    CardStreamBridge, register_bridge as _reg_bridge,
-                )
-                register_bridge = _reg_bridge
-                from app.services.feishu_service import feishu_service as fs
-                bridge = CardStreamBridge(
-                    feishu_service=fs,
-                    app_id=config.app_id or "",
-                    app_secret=config.app_secret or "",
-                    receive_id=chat_id if is_group else sender_open_id,
-                    receive_id_type="chat_id" if is_group else "open_id",
-                    agent_name=agent.name or str(agent.id),
-                    run_id=str(pregenerated_run_id),
-                )
-                card_task = asyncio.create_task(bridge.start())
-                card_task.add_done_callback(
-                    lambda t: (
-                        logger.error("[FEISHU-CARD] card_task_failed: %s", t.exception())
-                        if t.exception() else None
-                    )
-                )
-                register_bridge(str(pregenerated_run_id), bridge)
+            if resume_result.scalar_one_or_none() is not None:
                 logger.info(
-                    "[FEISHU-CARD] bridge_created run_id={}", pregenerated_run_id,
+                    "[FEISHU-CARD] resume_detected — withdrawing pre-created card "
+                    "run_id={}", pregenerated_run_id,
                 )
+                await _withdraw_card_bridge(
+                    bridge=bridge,
+                    pregenerated_run_id=pregenerated_run_id,
+                    unregister_bridge=unregister_bridge,
+                    reason="resume",
+                )
+                bridge = None
+                register_bridge = None
         _, model, _ = await _load_agent_and_model(db, agent_id)
         sender_name = (user.display_name or "").strip() or "未知用户"
         sender_identity = " | ".join(

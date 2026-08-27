@@ -352,6 +352,91 @@ class TestCardStreamBridge:
         assert content == "> " + at_limit
         assert "截断" not in content
 
+    # ---- withdraw (resume 场景撤回) ---------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_start_captures_message_id_from_send_response(self):
+        """message_id 从响应体 data 层提取（飞书响应为 {"data": {"message_id"}}）。"""
+        fs = _make_fake_feishu_service()
+        fs.send_card_by_card_id = AsyncMock(
+            return_value={"code": 0, "data": {"message_id": "om_card_1"}},
+        )
+        b = CardStreamBridge(feishu_service=fs, app_id="aid", app_secret="sec",
+                             receive_id="ou", receive_id_type="open_id",
+                             agent_name="TestBot", run_id="run-msgid")
+        await b.start()
+        assert b.message_id == "om_card_1"
+
+    @pytest.mark.asyncio
+    async def test_withdraw_recalls_sent_card(self):
+        fs = _make_fake_feishu_service()
+        fs.send_card_by_card_id = AsyncMock(
+            return_value={"code": 0, "data": {"message_id": "om_card_1"}},
+        )
+        fs.delete_message = AsyncMock(return_value={"code": 0})
+        b = CardStreamBridge(feishu_service=fs, app_id="aid", app_secret="sec",
+                             receive_id="ou", receive_id_type="open_id",
+                             agent_name="TestBot", run_id="run-withdraw")
+        await b.start()
+        await b.withdraw()
+        fs.delete_message.assert_awaited_once_with("aid", "sec", "om_card_1")
+        assert b._streaming is False
+        assert b._state == "withdrawn"
+
+    @pytest.mark.asyncio
+    async def test_withdraw_waits_for_inflight_creation_then_recalls(self):
+        """创建在途时撤回：等创建完成后删消息，且不渲染终版卡片。"""
+        fs = _make_fake_feishu_service()
+        send_started = asyncio.Event()
+
+        async def slow_send(*_args, **_kwargs):
+            send_started.set()
+            await asyncio.sleep(0.05)
+            return {"code": 0, "data": {"message_id": "om_card_1"}}
+
+        fs.send_card_by_card_id = slow_send
+        fs.delete_message = AsyncMock(return_value={"code": 0})
+        b = CardStreamBridge(feishu_service=fs, app_id="aid", app_secret="sec",
+                             receive_id="ou", receive_id_type="open_id",
+                             agent_name="TestBot", run_id="run-inflight")
+        start_task = asyncio.create_task(b.start())
+        await send_started.wait()
+        await b.withdraw()
+        await start_task
+        fs.delete_message.assert_awaited_once_with("aid", "sec", "om_card_1")
+        # 撤回的卡片不得渲染终版卡片（finalize 未发生）
+        fs.update_cardkit_card.assert_not_awaited()
+        fs.set_card_streaming_mode.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_withdraw_before_start_prevents_card_creation(self):
+        """start() 尚未执行时撤回：建卡与发送都被跳过。"""
+        fs = _make_fake_feishu_service()
+        b = CardStreamBridge(feishu_service=fs, app_id="aid", app_secret="sec",
+                             receive_id="ou", receive_id_type="open_id",
+                             agent_name="TestBot", run_id="run-early")
+        await b.withdraw()
+        await b.start()
+        fs.create_card_entity.assert_not_awaited()
+        fs.send_card_by_card_id.assert_not_awaited()
+        assert b._state == "withdrawn"
+
+    @pytest.mark.asyncio
+    async def test_withdraw_recall_failure_is_contained(self):
+        """撤回失败只记日志、不抛出 —— resume 流程继续。"""
+        fs = _make_fake_feishu_service()
+        fs.send_card_by_card_id = AsyncMock(
+            return_value={"code": 0, "data": {"message_id": "om_card_1"}},
+        )
+        fs.delete_message = AsyncMock(side_effect=RuntimeError("recall denied"))
+        b = CardStreamBridge(feishu_service=fs, app_id="aid", app_secret="sec",
+                             receive_id="ou", receive_id_type="open_id",
+                             agent_name="TestBot", run_id="run-recall-fail")
+        await b.start()
+        await b.withdraw()  # 不抛
+        assert b._streaming is False
+        assert b._state == "withdrawn"
+
 
 # ---------------------------------------------------------------------------
 # RuntimeContext card fields
