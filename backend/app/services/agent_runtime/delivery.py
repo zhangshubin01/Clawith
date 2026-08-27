@@ -130,18 +130,41 @@ class DeliveryReceipt:
 
 _WAITING_FALLBACK_CONTENT = "需要你的确认或补充信息后才能继续。"
 
+# Waiting-boundary reasons that are internal error codes, never user-facing.
+# Known codes already carry an authoritative ``question`` from their producers
+# (tool_step_service / model_step_service); when one reaches here without a
+# question it falls back instead of leaking verbatim. Free-form reasons (model
+# authored sentences, external-poll notes) are rendered as-is.
+_WAITING_ERROR_CODE_REASONS = frozenset(
+    {
+        "network_interrupted",
+        "tool_deadline_outcome_unknown",
+        "tool_deadline_exceeded",
+        "tool_cancelled_outcome_unknown",
+        "tool_outcome_unknown",
+        "tool_reconciliation_required",
+    }
+)
+
 
 def waiting_content(request: Mapping[str, object]) -> str:
     """Visible text for one waiting boundary.
 
-    Mirrors the question/prompt/reason precedence of waiting deliveries so
-    both the durable delivery (checkpoint_side_effects) and the Web Chat
-    stream fallback (chat_stream) render the same user-visible content.
+    Mirrors the question/prompt precedence of waiting deliveries so both the
+    durable delivery (checkpoint_side_effects) and the Web Chat stream
+    fallback (chat_stream) render the same user-visible content. The
+    ``reason`` field is overloaded: internal error codes fall back instead of
+    leaking verbatim, while free-form text passes through untouched.
     """
-    for field in ("question", "prompt", "reason"):
+    for field in ("question", "prompt"):
         text = request.get(field)
         if isinstance(text, str) and text.strip():
             return text.strip()
+    reason = request.get("reason")
+    if isinstance(reason, str) and reason.strip():
+        stripped = reason.strip()
+        if stripped not in _WAITING_ERROR_CODE_REASONS:
+            return stripped
     return _WAITING_FALLBACK_CONTENT
 
 

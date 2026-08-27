@@ -22,8 +22,10 @@ from app.models.user import User
 from app.services.agent_runtime.delivery import (
     DeliveryRequest,
     DeliveryServiceError,
+    _WAITING_FALLBACK_CONTENT,
     _safe_failure_content,
     deliver_runtime_message,
+    waiting_content,
 )
 from app.services.agent_runtime.group_handoff import (
     GroupAgentHandoffApplyResult,
@@ -1337,3 +1339,28 @@ def test_downgrade_failure_notice_compacts_to_single_line() -> None:
     assert str(run.id)[8:] not in downgraded  # 只保留前 8 位
     # 降级产物自识别为普通消息（幂等：二次降级不改变形态）
     assert _is_terminal_failure_notice(downgraded) is False
+
+
+def test_waiting_content_prefers_authoritative_question_text() -> None:
+    # 已知 reason 的权威文案由其 producer 的 question 提供，
+    # waiting_content 只取 question/prompt，不自行映射 reason。
+    assert waiting_content({"question": "继续吗？", "reason": "tool_deadline_outcome_unknown"}) == "继续吗？"
+    assert waiting_content({"prompt": "请确认", "reason": "network_interrupted"}) == "请确认"
+
+
+def test_waiting_content_hides_internal_error_codes() -> None:
+    # 内部错误码 reason 无 question 时回退兜底，绝不把错误码字面量透出。
+    assert waiting_content({"reason": "tool_deadline_outcome_unknown"}) == _WAITING_FALLBACK_CONTENT
+    assert waiting_content({"reason": "network_interrupted"}) == _WAITING_FALLBACK_CONTENT
+    assert waiting_content({"reason": "tool_deadline_exceeded"}) == _WAITING_FALLBACK_CONTENT
+    assert waiting_content({}) == _WAITING_FALLBACK_CONTENT
+
+
+def test_waiting_content_passes_free_form_reason_through() -> None:
+    # reason 是重载字段：模型自然语言/外部等待说明必须原样呈现，不得降级成兜底。
+    assert waiting_content({"reason": "A prior tool outcome is unknown and requires confirmation."}) == (
+        "A prior tool outcome is unknown and requires confirmation."
+    )
+    assert waiting_content({"reason": "Model provider remained unavailable after 2 attempts."}) == (
+        "Model provider remained unavailable after 2 attempts."
+    )
