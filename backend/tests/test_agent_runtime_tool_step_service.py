@@ -1434,6 +1434,43 @@ async def test_legacy_unknown_wait_keeps_resolved_context_on_resume(
     assert provider_calls == 1
 
 
+async def test_unknown_wait_question_names_the_tool(monkeypatch) -> None:
+    tenant_id = uuid.uuid4()
+    agent = _agent(tenant_id)
+    call = _call("question-unknown", "write_file")
+    state = _state(tenant_id, agent, (call,))
+    context = _context(state)
+    execution = _execution(
+        tenant_id,
+        uuid.UUID(context.run_id),
+        "question-unknown",
+        "write_file",
+    )
+
+    async def reserve(db, **kwargs):
+        del db, kwargs
+        return _reservation(
+            execution,
+            blocked=True,
+            requires_confirmation=True,
+            error_code="tool_outcome_unknown",
+        )
+
+    monkeypatch.setattr(tool_step_service, "reserve_tool_execution", reserve)
+    service = tool_step_service.RuntimeToolStepService(
+        session_factory=_session_factory(agent),
+        cancel_source=_CancelSource(None, None),
+        tool_provider=_tools,
+        tool_executor=_unexpected_executor,
+    )
+
+    result = await service.execute_pending(state, context, (call,))
+    assert result.waiting_request is not None
+    question = str(result.waiting_request.get("question"))
+    assert "write_file" in question
+    assert "执行结果无法确认" in question
+
+
 @pytest.mark.asyncio
 async def test_legacy_a2a_wait_keeps_context_for_tail_call(monkeypatch) -> None:
     tenant_id = uuid.uuid4()

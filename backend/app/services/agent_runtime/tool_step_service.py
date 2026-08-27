@@ -511,19 +511,38 @@ def _result_message(
     return message
 
 
+_WAITING_QUESTION_BY_ERROR_CODE = {
+    "tool_deadline_outcome_unknown": (
+        "工具 `{tool}` 在截止时间前未能确认执行结果，可能已产生部分写入。请回复如何处理：继续 / 放弃重试"
+    ),
+    "tool_cancelled_outcome_unknown": ("工具 `{tool}` 被取消，可能有未完成的写入。请回复如何处理：继续 / 放弃重试"),
+    "tool_outcome_unknown": ("工具 `{tool}` 的执行结果无法确认。请回复如何处理：继续 / 放弃重试"),
+    "tool_reconciliation_required": ("工具 `{tool}` 需要核对执行结果。请回复如何处理：继续 / 放弃重试"),
+}
+
+
 def _waiting_request(
     *,
     run_id: uuid.UUID,
     call_id: str,
     requires_confirmation: bool,
     error_code: str | None,
+    tool_name: str | None = None,
 ) -> JsonObject:
-    return {
+    code = error_code or "tool_reconciliation_required"
+    template = _WAITING_QUESTION_BY_ERROR_CODE.get(code)
+    question = None
+    if template is not None:
+        question = template.format(tool=f"`{tool_name or '未知工具'}`")
+    request: JsonObject = {
         "waiting_type": "user" if requires_confirmation else "external",
         "correlation_id": str(uuid.uuid5(run_id, f"tool-reconcile:{call_id}")),
-        "reason": error_code or "tool_reconciliation_required",
+        "reason": code,
         "tool_call_id": call_id,
     }
+    if question is not None:
+        request["question"] = question
+    return request
 
 
 def _async_poll_schedule_metadata(
@@ -2455,6 +2474,7 @@ class RuntimeToolStepService:
                             call_id=call_id,
                             requires_confirmation=reservation.requires_confirmation,
                             error_code=reservation.error_code,
+                            tool_name=tool_name,
                         ),
                         pending_tool_calls=tool_calls[index:],
                         step_tool_context=step_context_update,
@@ -2789,6 +2809,7 @@ class RuntimeToolStepService:
                                 call_id=call_id,
                                 requires_confirmation=True,
                                 error_code="tool_outcome_unknown",
+                                tool_name=tool_name,
                             ),
                             pending_tool_calls=tool_calls[index:],
                             step_tool_context=step_context_update,
@@ -2875,6 +2896,7 @@ class RuntimeToolStepService:
                             call_id=call_id,
                             requires_confirmation=True,
                             error_code=outcome.error_code or "tool_outcome_unknown",
+                            tool_name=tool_name,
                         ),
                         pending_tool_calls=tool_calls[index:],
                         step_tool_context=step_context_update,
