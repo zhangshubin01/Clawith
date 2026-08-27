@@ -445,6 +445,9 @@ async def test_feishu_post_at_tag_preserves_visible_mention_name(monkeypatch) ->
 async def test_feishu_image_keeps_base64_out_of_display_content(monkeypatch) -> None:
     agent_id = uuid.uuid4()
     config = SimpleNamespace(app_id="app-1", app_secret="secret-1")
+    agent = SimpleNamespace(
+        id=agent_id, tenant_id=uuid.uuid4(), creator_id=uuid.uuid4(), name="A",
+    )
     calls: dict[str, object] = {}
 
     async def download(*_args):
@@ -457,6 +460,12 @@ async def test_feishu_image_keeps_base64_out_of_display_content(monkeypatch) -> 
         calls["accept"] = kwargs
         return SimpleNamespace()
 
+    def fire_early(*_args, **_kwargs):
+        # 文件路径提前建卡：此处不关心桥，返回占位三元组即可
+        return SimpleNamespace(), lambda *_a: None, lambda *_a: None
+
+    monkeypatch.setattr(feishu, "_async_session", lambda: _Session(agent))
+    monkeypatch.setattr(feishu, "_fire_early_card", fire_early)
     monkeypatch.setattr(feishu.feishu_service, "download_message_resource", download)
     monkeypatch.setattr(feishu, "store_agent_upload", store)
     monkeypatch.setattr(feishu, "_accept_feishu_runtime_message", accept)
@@ -482,6 +491,197 @@ async def test_feishu_image_keeps_base64_out_of_display_content(monkeypatch) -> 
     assert accepted["display_content"] == "[file:image_12345678.jpg]"
     assert "base64," in accepted["content"]
     assert "base64," not in accepted["display_content"]
+
+
+@pytest.mark.asyncio
+async def test_feishu_file_card_fires_before_download_completes(monkeypatch) -> None:
+    """文件消息：卡片在下载开始前 fire，accept 复用同一 bridge/run_id 不重建。"""
+    agent_id = uuid.uuid4()
+    agent = SimpleNamespace(
+        id=agent_id, tenant_id=uuid.uuid4(), creator_id=uuid.uuid4(), name="A",
+    )
+    config = SimpleNamespace(app_id="app-1", app_secret="secret-1")
+    events: list[str] = []
+    registered: list = []
+    fire_kwargs: dict = {}
+    accepted: dict = {}
+
+    async def download(*_args):
+        await asyncio.sleep(0)  # 模拟下载 RTT：让已 fire 的卡片任务先跑
+        events.append("download")
+        return b"file-bytes"
+
+    async def store(*_args, **_kwargs):
+        return "key", "workspace/uploads/report.txt", SimpleNamespace()
+
+    async def accept(**kwargs):
+        events.append("accept")
+        accepted.update(kwargs)
+        return SimpleNamespace()
+
+    def fire_early(**kwargs):
+        events.append("card_fired")
+        fire_kwargs.update(kwargs)
+        bridge = _RecordingBridge(events)
+        task = asyncio.create_task(bridge.start())
+        task.add_done_callback(lambda t: t.exception())
+        return bridge, lambda *a: registered.append(a), lambda *_a: None
+
+    monkeypatch.setattr(feishu, "_async_session", lambda: _Session(agent))
+    monkeypatch.setattr(feishu, "_fire_early_card", fire_early)
+    monkeypatch.setattr(feishu.feishu_service, "download_message_resource", download)
+    monkeypatch.setattr(feishu, "store_agent_upload", store)
+    monkeypatch.setattr(feishu, "_accept_feishu_runtime_message", accept)
+
+    result = await feishu._accept_feishu_file_runtime(
+        agent_id=agent_id,
+        config=config,  # type: ignore[arg-type]
+        message={
+            "message_id": "om_file_1",
+            "message_type": "file",
+            "content": json.dumps({"file_key": "file_abc", "file_name": "report.txt"}),
+        },
+        sender_open_id="ou_sender",
+        sender_user_id="feishu-user-1",
+        chat_type="p2p",
+        chat_id="oc_chat_1",
+        external_event_id="event-1",
+    )
+
+    assert result is not None
+    # 建卡 fire 严格早于下载完成；卡片任务先于 accept 运行
+    assert events.index("card_fired") < events.index("download") < events.index("accept")
+    assert events.index("card_start") < events.index("accept")
+    # accept 复用提前生成的 run_id 与 bridge，不重复建卡
+    assert isinstance(accepted["pregenerated_run_id"], uuid.UUID)
+    assert accepted["pregenerated_run_id"] == fire_kwargs["pregenerated_run_id"]
+    assert accepted["early_card"] is not None
+    assert fire_kwargs["agent"] is agent
+
+
+@pytest.mark.asyncio
+async def test_feishu_file_download_failure_withdraws_early_card(monkeypatch) -> None:
+    """文件下载失败：提前建的卡片被撤回（含注册表清理），提示已发送，不入队。"""
+    agent_id = uuid.uuid4()
+    agent = SimpleNamespace(
+        id=agent_id, tenant_id=uuid.uuid4(), creator_id=uuid.uuid4(), name="A",
+    )
+    config = SimpleNamespace(app_id="app-1", app_secret="secret-1")
+    events: list[str] = []
+    unregistered: list = []
+    sent: list = []
+
+    async def download(*_args):
+        raise RuntimeError("download exploded")
+
+    async def send_message(app_id, app_secret, target, msg_type, content, **kwargs):
+        sent.append((target, msg_type, json.loads(content), kwargs))
+
+    async def accept(**_kwargs):
+        raise AssertionError("download failure must not reach intake")
+
+    def fire_early(**_kwargs):
+        bridge = _RecordingBridge(events)
+        task = asyncio.create_task(bridge.start())
+        task.add_done_callback(lambda t: t.exception())
+        return bridge, lambda *_a: None, lambda *a: unregistered.append(a)
+
+    monkeypatch.setattr(feishu, "_async_session", lambda: _Session(agent))
+    monkeypatch.setattr(feishu, "_fire_early_card", fire_early)
+    monkeypatch.setattr(feishu.feishu_service, "download_message_resource", download)
+    monkeypatch.setattr(feishu.feishu_service, "send_message", send_message)
+    monkeypatch.setattr(feishu, "_accept_feishu_runtime_message", accept)
+
+    result = await feishu._accept_feishu_file_runtime(
+        agent_id=agent_id,
+        config=config,  # type: ignore[arg-type]
+        message={
+            "message_id": "om_file_2",
+            "message_type": "file",
+            "content": json.dumps({"file_key": "file_def", "file_name": "broken.bin"}),
+        },
+        sender_open_id="ou_sender",
+        sender_user_id="feishu-user-1",
+        chat_type="p2p",
+        chat_id="oc_chat_1",
+        external_event_id="event-2",
+    )
+
+    assert result is None
+    assert "withdraw" in events  # 提前建的卡片被撤回
+    assert len(unregistered) == 1  # 注册表条目无论成败都清理
+    assert len(sent) == 1
+    assert "下载失败" in sent[0][2]["text"]
+
+
+@pytest.mark.asyncio
+async def test_feishu_runtime_message_reuses_early_card_without_refiring(monkeypatch) -> None:
+    """early_card 传入时复用调用方桥，绝不触发第二次建卡。"""
+    from app.services.agent_runtime import card_stream_bridge as bridge_module
+
+    tenant_id = uuid.uuid4()
+    agent_id = uuid.uuid4()
+    pregenerated = uuid.uuid4()
+    agent = SimpleNamespace(
+        id=agent_id, tenant_id=tenant_id, creator_id=uuid.uuid4(), name="A",
+    )
+    user = SimpleNamespace(id=uuid.uuid4(), display_name="Alice")
+    session = SimpleNamespace(id=uuid.uuid4())
+    model = SimpleNamespace(id=uuid.uuid4())
+    config = SimpleNamespace(app_id="app-1", app_secret="secret-1")
+    db = _OrderedSession(agent, None)  # 查询1=agent, 查询2=resume 检查(无进行中 run)
+    intake = _runtime(tenant_id)
+    events: list[str] = []
+    registered: list = []
+
+    async def resolve_sender(_db, **_kwargs):
+        await asyncio.sleep(0)
+        events.append("resolve")
+        return user
+
+    async def find_session(**kwargs):
+        events.append("session")
+        return session
+
+    async def load_model(_db, _agent_id):
+        return agent, model, None
+
+    async def enqueue(_db, **kwargs):
+        events.append("enqueue")
+        return intake
+
+    def forbid_fire(**_kwargs):
+        raise AssertionError("early_card provided — must not fire a second card")
+
+    monkeypatch.setattr(feishu, "_async_session", lambda: db)
+    monkeypatch.setattr(feishu, "_fire_early_card", forbid_fire)
+    monkeypatch.setattr(feishu, "_resolve_feishu_sender", resolve_sender)
+    monkeypatch.setattr(channel_session, "find_or_create_channel_session", find_session)
+    monkeypatch.setattr(feishu, "_load_agent_and_model", load_model)
+    monkeypatch.setattr(feishu, "enqueue_channel_chat_runtime", enqueue)
+    monkeypatch.setattr(bridge_module, "register_bridge", lambda *a: registered.append(a))
+    monkeypatch.setattr(bridge_module, "unregister_bridge", lambda *_a: None)
+
+    bridge = _RecordingBridge(events)
+    result = await feishu._accept_feishu_runtime_message(
+        agent_id=agent_id,
+        config=config,  # type: ignore[arg-type]
+        sender_open_id="ou_sender",
+        sender_user_id="feishu-user-1",
+        chat_type="group",
+        chat_id="oc_group_1",
+        content="Hello",
+        display_content="Hello",
+        external_event_id="evt-1",
+        pregenerated_run_id=pregenerated,
+        early_card=(bridge, lambda *a: registered.append(a), lambda *_a: None),
+    )
+
+    assert result is intake
+    # 复用桥：没有第二次 card_start；intake 流程照常
+    assert events == ["resolve", "session", "enqueue"]
+    # run_id 与预生成不一致时按实际 run_id 补注册（幂等重试保护）
+    assert len(registered) == 1
 
 
 class _OrderedSession:

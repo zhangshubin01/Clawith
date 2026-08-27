@@ -525,6 +525,49 @@ async def _withdraw_card_bridge(
     unregister_bridge(str(pregenerated_run_id))
 
 
+def _fire_early_card(
+    *,
+    agent,
+    config: ChannelConfig,
+    chat_type: str,
+    chat_id: str,
+    sender_open_id: str,
+    pregenerated_run_id: uuid.UUID,
+):
+    """提前创建卡片流式桥并 fire ``start()`` — 与其余 intake 工作并发。
+
+    建卡只依赖 agent_name + receive_id + 凭据（均来自事件与配置）；
+    返回 ``(bridge, register_bridge, unregister_bridge)``，调用方负责
+    在判定不需要这张卡时走 ``_withdraw_card_bridge``。
+    """
+    from app.services.agent_runtime.card_stream_bridge import (
+        CardStreamBridge,
+        register_bridge as _reg_bridge,
+        unregister_bridge as _unreg_bridge,
+    )
+    from app.services.feishu_service import feishu_service as fs
+    is_group = chat_type == "group" and bool(chat_id)
+    bridge = CardStreamBridge(
+        feishu_service=fs,
+        app_id=config.app_id or "",
+        app_secret=config.app_secret or "",
+        receive_id=chat_id if is_group else sender_open_id,
+        receive_id_type="chat_id" if is_group else "open_id",
+        agent_name=agent.name or str(agent.id),
+        run_id=str(pregenerated_run_id),
+    )
+    card_task = asyncio.create_task(bridge.start())
+    card_task.add_done_callback(
+        lambda t: (
+            logger.error("[FEISHU-CARD] card_task_failed: %s", t.exception())
+            if t.exception() else None
+        )
+    )
+    _reg_bridge(str(pregenerated_run_id), bridge)
+    logger.info("[FEISHU-CARD] bridge_created run_id={}", pregenerated_run_id)
+    return bridge, _reg_bridge, _unreg_bridge
+
+
 async def _accept_feishu_runtime_message(
     *,
     agent_id: uuid.UUID,
@@ -536,11 +579,17 @@ async def _accept_feishu_runtime_message(
     content: str,
     display_content: str,
     external_event_id: str | None,
+    pregenerated_run_id: uuid.UUID | None = None,
+    early_card=None,
 ) -> ChatRuntimeIntake | str:
     """Persist a Feishu message and Runtime Command before acknowledging it.
 
     Returns ``"interrupted"`` / ``"no_active_run"`` when the message was an
     in-chat interrupt command handled inline (no Runtime Command enqueued).
+
+    ``early_card``: 调用方（文件消息路径）已通过 ``_fire_early_card`` 提前
+    创建的 ``(bridge, register_bridge, unregister_bridge)`` — 本函数直接
+    复用，不再重复建卡。
     """
     from app.models.agent import Agent
     from app.services.channel_session import find_or_create_channel_session
@@ -558,7 +607,7 @@ async def _accept_feishu_runtime_message(
             raise RuntimeError(f"Feishu Agent {agent_id} not found")
         is_group = chat_type == "group" and bool(chat_id)
         card_mode = bool(config.app_id and config.app_secret)
-        pregenerated_run_id = uuid.uuid4()
+        pregenerated_run_id = pregenerated_run_id or uuid.uuid4()
         bridge = None
         register_bridge = None
         unregister_bridge = None
@@ -569,34 +618,16 @@ async def _accept_feishu_runtime_message(
         # 卡片提前创建 — 与发送者解析/会话创建并发，压缩首帧延迟。
         # 建卡只依赖 agent_name + receive_id + 凭据，全部来自事件与配置；
         # 若随后判定为 resume 会撤回（withdraw）这张提前建的卡片。
-        if card_mode and not is_interrupt:
-            from app.services.agent_runtime.card_stream_bridge import (
-                CardStreamBridge,
-                register_bridge as _reg_bridge,
-                unregister_bridge as _unreg_bridge,
-            )
-            from app.services.feishu_service import feishu_service as fs
-            register_bridge = _reg_bridge
-            unregister_bridge = _unreg_bridge
-            bridge = CardStreamBridge(
-                feishu_service=fs,
-                app_id=config.app_id or "",
-                app_secret=config.app_secret or "",
-                receive_id=chat_id if is_group else sender_open_id,
-                receive_id_type="chat_id" if is_group else "open_id",
-                agent_name=agent.name or str(agent.id),
-                run_id=str(pregenerated_run_id),
-            )
-            card_task = asyncio.create_task(bridge.start())
-            card_task.add_done_callback(
-                lambda t: (
-                    logger.error("[FEISHU-CARD] card_task_failed: %s", t.exception())
-                    if t.exception() else None
-                )
-            )
-            register_bridge(str(pregenerated_run_id), bridge)
-            logger.info(
-                "[FEISHU-CARD] bridge_created run_id={}", pregenerated_run_id,
+        if early_card is not None:
+            bridge, register_bridge, unregister_bridge = early_card
+        elif card_mode and not is_interrupt:
+            bridge, register_bridge, unregister_bridge = _fire_early_card(
+                agent=agent,
+                config=config,
+                chat_type=chat_type,
+                chat_id=chat_id,
+                sender_open_id=sender_open_id,
+                pregenerated_run_id=pregenerated_run_id,
             )
         try:
             user = await _resolve_feishu_sender(
@@ -993,6 +1024,30 @@ async def _accept_feishu_file_runtime(
         logger.warning(f"[Feishu] No file_key in {message_type} message")
         return None
 
+    # 卡片提前创建 — 与文件下载并发：建卡只依赖事件与配置，不依赖下载产物
+    pregenerated_run_id = uuid.uuid4()
+    early_card = None
+    if bool(config.app_id and config.app_secret):
+        from app.models.agent import Agent as _Agent
+
+        async with _async_session() as _db:
+            _agent_result = await _db.execute(
+                select(_Agent).where(
+                    _Agent.id == agent_id,
+                    _Agent.deleted_at.is_(None),
+                )
+            )
+            _agent = _agent_result.scalar_one_or_none()
+        if _agent is not None:
+            early_card = _fire_early_card(
+                agent=_agent,
+                config=config,
+                chat_type=chat_type,
+                chat_id=chat_id,
+                sender_open_id=sender_open_id,
+                pregenerated_run_id=pregenerated_run_id,
+            )
+
     try:
         file_bytes = await feishu_service.download_message_resource(
             config.app_id,
@@ -1009,6 +1064,13 @@ async def _accept_feishu_file_runtime(
         )
     except Exception as exc:
         logger.error(f"[Feishu] Failed to download {message_type}: {exc}")
+        if early_card is not None:
+            await _withdraw_card_bridge(
+                bridge=early_card[0],
+                pregenerated_run_id=pregenerated_run_id,
+                unregister_bridge=early_card[2],
+                reason="file_download_failure",
+            )
         reply_target = chat_id if chat_type == "group" else sender_open_id
         receive_id_type = "chat_id" if chat_type == "group" else "open_id"
         await feishu_service.send_message(
@@ -1054,6 +1116,8 @@ async def _accept_feishu_file_runtime(
             content=executable_content,
             display_content=display_content,
             external_event_id=external_event_id or provider_message_id,
+            pregenerated_run_id=pregenerated_run_id,
+            early_card=early_card,
         )
     except Exception as exc:
         from app.services.channel_user_service import ChannelUserResolutionError
