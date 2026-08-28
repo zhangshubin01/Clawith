@@ -1,11 +1,13 @@
 """Database connection and session management."""
 
+import asyncio
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
 
 from loguru import logger
-from sqlalchemy import text
+from sqlalchemy import event, text
+from sqlalchemy.exc import DisconnectionError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase
 
@@ -18,7 +20,30 @@ engine = create_async_engine(
     echo=settings.DEBUG,
     pool_size=settings.DB_POOL_SIZE,
     max_overflow=settings.DB_MAX_OVERFLOW,
+    pool_recycle=settings.DB_POOL_RECYCLE_SECONDS,
 )
+
+
+def _discard_dirty_connection(dbapi_conn, connection_record, connection_proxy) -> None:
+    """Discard pooled connections the server still considers inside a transaction.
+
+    A cancel that lands in the asyncpg lazy-start window (SQLAlchemy 2.0 sends
+    BEGIN only on first statement execution) can leave a connection in this
+    state: SQLAlchemy believes it is clean (``_started=False``), so the checkin
+    rollback is a no-op, while the server is still in 'T'. Every later checkout
+    of that connection then explodes with ``cannot use Connection.transaction()
+    in a manually started transaction`` — and ``_handle_exception`` never
+    invalidates, so the poison persists for hours (2026-08-28 incident,
+    ADR-0006). Raising DisconnectionError here makes the pool discard the
+    connection and hand out a healthy one; the check is a local client-side
+    state read, no network round-trip.
+    """
+    driver_conn = getattr(dbapi_conn, "driver_connection", None)
+    if driver_conn is not None and driver_conn.is_in_transaction():
+        raise DisconnectionError("dirty asyncpg connection: server-side transaction still open")
+
+
+event.listen(engine.sync_engine, "checkout", _discard_dirty_connection)
 
 async_session = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
@@ -77,9 +102,9 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
         token = _session_ctx.set(session)
         try:
             yield session
-            await session.commit()
+            await asyncio.shield(session.commit())
         except Exception:
-            await session.rollback()
+            await asyncio.shield(session.rollback())
             raise
         finally:
             _session_ctx.reset(token)
@@ -106,10 +131,10 @@ async def transaction(session: AsyncSession | None = None) -> AsyncGenerator[Asy
         try:
             yield session
             if hasattr(session, "commit"):
-                await session.commit()
+                await asyncio.shield(session.commit())
         except Exception:
             if hasattr(session, "rollback"):
-                await session.rollback()
+                await asyncio.shield(session.rollback())
             raise
         finally:
             _session_ctx.reset(token)
@@ -124,9 +149,9 @@ async def transaction(session: AsyncSession | None = None) -> AsyncGenerator[Asy
         token = _session_ctx.set(session)
         try:
             yield session
-            await session.commit()
+            await asyncio.shield(session.commit())
         except Exception:
-            await session.rollback()
+            await asyncio.shield(session.rollback())
             raise
         finally:
             _session_ctx.reset(token)

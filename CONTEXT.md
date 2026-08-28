@@ -34,8 +34,22 @@ run 成功收尾路径上的运行时强制检测（机制见 ADR 0005）：本 
 记忆固化（至多一轮），仍不写则放行并以 `memory_consolidation_skipped` 事件留痕。与纯提示词义务
 （D6 Memory Maintenance）是两层：提示词是语义兜底，门禁是运行时保证。
 
+**Dirty Connection（脏连接）**:
+SQLAlchemy 池中客户端与服务器端事务状态分裂的连接：服务器端仍在事务中（`idle in transaction`），
+客户端却认为连接干净（`_started=False`）。成因是取消落在 asyncpg 懒开始窗口（2.0 方言在首条语句
+执行时才发 BEGIN），checkin rollback 因客户端以为无事务而跳过。此后每次 checkout 都在懒开始处抛
+`cannot use Connection.transaction() in a manually started transaction` 且连接不被 invalidate，风暴自持
+（机制与防护见 ADR 0006）。
+
+**Checkout Probe（检出探针）**:
+`database.py` 在 engine checkout 事件上注册的防御：检查 `driver_connection.is_in_transaction()`（客户端
+缓存的服务器端事务状态，零网络往返），为真即 raise `DisconnectionError` 让池丢弃该连接并给调用者换
+健康连接。对脏连接的检测与自愈与污染成因无关。
+
 _Avoid_: retry（defer 与 attempt 重试是两种机制，勿混用）、recovery、fencing；
 Memory Consolidation Gate 勿与 Thread Compact（历史压缩）混用——门禁是收尾注入，压缩是水位触发的历史替换。
+Dirty Connection 勿与断连（disconnect）混用——断连是物理连接失效，脏连接是逻辑状态分裂且物理上完全
+健康；`pool_pre_ping` 只测断连，对脏连接无效，勿当防护手段。
 
 ## Deployment Coordination
 

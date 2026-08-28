@@ -109,6 +109,11 @@ class Settings(BaseSettings):
     # oversized base pool idles out the whole database.
     DB_POOL_SIZE: int = 8
     DB_MAX_OVERFLOW: int = 4
+    # Hard cap on pooled connection lifetime (seconds): a dirty connection that
+    # slips past the checkout probe (ADR-0006) is recycled within this window
+    # instead of poisoning the pool for hours. 30 minutes is far above any
+    # single run's duration, so healthy connections are never recycled mid-run.
+    DB_POOL_RECYCLE_SECONDS: int = 1800
     # Connections reserved for consumers the backend does not own (per-session
     # MCP runtimes, admin tooling, migration jobs). Used by the startup budget
     # check to warn before PostgreSQL max_connections is exhausted.

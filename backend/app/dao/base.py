@@ -1,3 +1,4 @@
+import asyncio
 import uuid
 from collections.abc import AsyncGenerator, Sequence
 from contextlib import asynccontextmanager, contextmanager
@@ -44,10 +45,10 @@ class BaseDAO(Generic[ModelType]):
                 try:
                     yield session
                     if not readonly and hasattr(session, "commit"):
-                        await session.commit()
+                        await asyncio.shield(session.commit())
                 except Exception:
                     if hasattr(session, "rollback"):
-                        await session.rollback()
+                        await asyncio.shield(session.rollback())
                     raise
                 finally:
                     try:

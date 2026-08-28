@@ -5,6 +5,7 @@ I/O through the DAO layer while domain-specific DAOs are introduced
 incrementally.
 """
 
+import asyncio
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from typing import Any
@@ -30,9 +31,9 @@ class QueryDAO:
             try:
                 yield session
                 if not readonly:
-                    await session.commit()
+                    await asyncio.shield(session.commit())
             except Exception:
-                await session.rollback()
+                await asyncio.shield(session.rollback())
                 raise
             finally:
                 _session_ctx.reset(token)
