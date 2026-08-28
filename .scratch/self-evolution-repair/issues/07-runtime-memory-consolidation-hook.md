@@ -36,4 +36,4 @@
 - [x] `test_agent_runtime_node_executor.py` 先红后绿：有写无记忆→强制轮；有记忆写→直通；无写→直通；强制后仍无→放行+skip_reason；预算不足→放行+skip_reason
 - [x] `test_agent_runtime_checkpoint_side_effects.py`：completed 终态事件发射（两种 reason）
 - [x] 全量 pytest + `scripts/arch-guard.sh` 通过
-- [ ] 部署后复跑 04b66f75 同类任务验证记忆固化真实发生（或 `memory_consolidation_skipped` 留痕）
+- [x] 部署后复跑 04b66f75 同类任务验证记忆固化真实发生（或 `memory_consolidation_skipped` 留痕）——4af61b58 已验证（skip_reason=no_memory_write_after_forced_round，见 ADR 勘误后生产观察）
