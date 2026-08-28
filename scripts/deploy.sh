@@ -34,6 +34,10 @@ BUILD=1
 WITH_FRONTEND=0
 NO_WAIT=0
 STRICT=0
+# 保存原始位置参数：解析循环用 shift 消费完 $@ 后，exec 重入链
+# （deploy_guard lock → Popen 重新执行本脚本）必须拿到完整参数，
+# 否则 --commit/--frontend/--no-build 等会在重入时全部丢失（2026-08-28 实测）。
+ORIG_ARGS=("$@")
 
 usage() {
     # 打印两个 "=====" 围栏之间的头注释，避免行号与注释行数耦合。
@@ -69,7 +73,7 @@ if [ "${CLAWITH_DEPLOY_LOCKED:-}" != "1" ]; then
     # 用绝对路径重入（$0 可能是相对路径，cd 后已失效）。
     CLAWITH_DEPLOY_LOCKED=1 exec "$PY" "$REPO_ROOT/scripts/deploy_guard.py" lock \
         "$STATE_DIR" "$LOCK_TIMEOUT" "$(git rev-parse --short "$COMMIT")" "$SCOPE" -- \
-        "$REPO_ROOT/scripts/deploy.sh" "$@"
+        "$REPO_ROOT/scripts/deploy.sh" "${ORIG_ARGS[@]}"
 fi
 
 # ── 0) 预检 ────────────────────────────────────────────────
