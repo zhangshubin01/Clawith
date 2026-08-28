@@ -266,3 +266,33 @@ async def test_experience_policy_is_short_and_only_names_enabled_operations():
     assert "propose_experience_draft" not in read_only
     assert "现有标签" not in read_only
     assert "propose_experience_draft" in with_draft
+
+
+@pytest.mark.asyncio
+async def test_memory_maintenance_routes_this_run_lessons_to_reflections():
+    from app.services.agent_context import build_agent_context
+
+    agent_id = uuid.uuid4()
+    holder, patches = _context_patches()
+    holder["agent_id"] = agent_id
+
+    with patches[0], patches[1], patches[2], patches[3]:
+        with_write, _stable, _unstable = await build_agent_context(
+            agent_id,
+            "TestAgent",
+            allowed_tool_names={"wait", "read_file", "write_file"},
+        )
+
+    # 常驻段把「本次 run 学到的教训」路由到 reflections 四节之一。
+    assert "memory/reflections.md" in with_write
+    assert "Open Questions" in with_write
+    assert "Hypotheses & Experiments" in with_write
+    assert "Insights & Discoveries" in with_write
+    assert "Next Cycle Seeds" in with_write
+    # 分类判据（短半衰期）与格式约束（append + 不新建节）入断言。
+    assert "shorter half-life" in with_write
+    assert "do not create new" in with_write
+    # 跳过句覆盖两条分支：既无耐用信息也无教训才不写。
+    assert "If neither durable information nor lessons" in with_write
+    # INDEX 义务句保留（废弃 INDEX 是 P2 独立决策）。
+    assert "memory/MEMORY_INDEX.md" in with_write

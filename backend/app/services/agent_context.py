@@ -373,8 +373,14 @@ _MEMORY_MAINTENANCE = """
 
 When work surfaces durable information — stable preferences, established facts,
 important decisions, or reusable knowledge — update `memory/memory.md` by
-reading the file first and merging the new information in place. Never blind-overwrite existing entries. If no durable information emerged from the current work, do not write anything.
+reading the file first and merging the new information in place. Never blind-overwrite existing entries. If neither durable information nor lessons emerged from the current work, do not write anything.
 
+- Lessons learned during this run, hypotheses this run verified or disproved,
+  and failure analyses have a shorter half-life: append them to the matching
+  section of `memory/reflections.md` (Open Questions, Hypotheses & Experiments,
+  Insights & Discoveries, or Next Cycle Seeds), defaulting to Insights &
+  Discoveries; leave sections that do not fit untouched and do not create new
+  sections.
 - Do not record temporary task progress or step-level state in Memory.
 - When a topic is added to or removed from `memory/memory.md`, keep the Topics
   list in `memory/MEMORY_INDEX.md` in sync.
@@ -382,8 +388,9 @@ reading the file first and merging the new information in place. Never blind-ove
   maintenance policy.
 - A failed Memory write never blocks delivering the task's result.
 - Before returning the final answer, decide once whether the completed work
-  surfaced durable cross-conversation information. If it did and the fact is
-  not already recorded, apply the update above. If none, do nothing.
+  surfaced durable cross-conversation information or lessons learned during
+  this run. If it did and the fact is not already recorded, apply the update
+  above. If none, do nothing.
 """.strip()
 
 

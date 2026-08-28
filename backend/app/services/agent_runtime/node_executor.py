@@ -46,15 +46,23 @@ _MEMORY_PATH_PREFIX = "memory/"
 
 # The one forced Memory Consolidation round injected before a Run finishes with
 # workspace writes but no memory/ writes. Conditional obligation: the Run may
-# legitimately skip it when there is nothing durable to record.
+# legitimately skip it when there is nothing worth recording (neither durable
+# facts nor lessons learned during the Run).
 MEMORY_CONSOLIDATION_PROMPT = (
-    "Before finishing, review this Run for durable information worth keeping: "
+    "Before finishing, review this Run for information worth keeping: "
     "decisions made, requirements discovered, user preferences, or facts about "
-    "the workspace. If any such information exists and is not yet recorded, "
-    "first read the existing files under memory/, then merge the new "
-    "information in place into memory/memory.md, and keep memory/MEMORY_INDEX.md "
-    "in sync when it exists. If there is nothing durable to record, skip this "
-    "step and finish directly without writing anything."
+    "the workspace. Route each item by how long it stays true. "
+    "Cross-conversation stable facts, preferences, and decisions go to "
+    "memory/memory.md: first read the existing files under memory/, then merge "
+    "the new information in place into memory/memory.md, and keep "
+    "memory/MEMORY_INDEX.md in sync when it exists. Lessons learned during "
+    "this Run, hypotheses it verified or disproved, and failure analyses go to "
+    "memory/reflections.md: append them to the matching section — Open "
+    "Questions, Hypotheses & Experiments, Insights & Discoveries, or Next "
+    "Cycle Seeds — defaulting to Insights & Discoveries, leave sections that "
+    "do not fit untouched, and do not create new sections. If there is nothing "
+    "worth recording — neither durable facts nor lessons — skip this step and "
+    "finish directly without writing anything."
 )
 
 ModelIntent = Literal["tool_calls", "wait", "finish", "text", "error", "compact"]

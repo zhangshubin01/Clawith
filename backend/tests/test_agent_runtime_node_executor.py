@@ -15,6 +15,7 @@ from app.config import Settings
 from app.services.agent_runtime.checkpointer import runtime_thread_config
 from app.services.agent_runtime.graph import build_agent_runtime_graph
 from app.services.agent_runtime.node_executor import (
+    MEMORY_CONSOLIDATION_PROMPT,
     CancelSignal,
     DefaultRuntimeFinalizer,
     DeterministicRuntimeNodeExecutor,
@@ -2009,3 +2010,29 @@ async def test_new_verifier_issue_starts_a_fresh_episode() -> None:
         "bad_citation"
     )
     assert model.calls == 3
+
+
+def test_memory_consolidation_prompt_routes_to_reflections() -> None:
+    """门禁强制轮 prompt 按时间属性分流：稳定信息→memory.md，本次教训→reflections 四节。"""
+    prompt = MEMORY_CONSOLIDATION_PROMPT
+    assert "memory/memory.md" in prompt
+    assert "memory/reflections.md" in prompt
+    for section in (
+        "Open Questions",
+        "Hypotheses & Experiments",
+        "Insights & Discoveries",
+        "Next Cycle Seeds",
+    ):
+        assert section in prompt
+    # 分类判据句本身与两处去向锁定（防去向对调仍全绿）。
+    assert "Route each item by how long it stays true" in prompt
+    assert "Cross-conversation stable" in prompt
+    assert "Lessons learned during" in prompt
+    # B2 格式约束：append 到匹配节、默认 Insights、不新建节。
+    assert "append them to the matching section" in prompt
+    assert "defaulting to Insights & Discoveries" in prompt
+    assert "do not create new sections" in prompt
+    # INDEX 义务句保留（废弃 INDEX 是 P2 独立决策）。
+    assert "memory/MEMORY_INDEX.md" in prompt
+    # 条件义务覆盖两条分支：既无耐用事实也无教训才放行。
+    assert "neither durable facts nor lessons" in prompt
