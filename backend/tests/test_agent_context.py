@@ -6,7 +6,15 @@ import pytest
 from app.services.storage import StorageEntry
 
 
-def _context_patches(*, soul: str = "", memory: str = "", skills: str = ""):
+def _context_patches(
+    *,
+    soul: str = "",
+    memory: str = "",
+    skills: str = "",
+    reflections: str = "",
+    user_profile: str = "",
+    inject_reflections: bool | None = None,
+):
     agent_id_holder: dict[str, uuid.UUID] = {}
 
     async def fake_read_file(key, _max_chars=3000):
@@ -15,7 +23,21 @@ def _context_patches(*, soul: str = "", memory: str = "", skills: str = ""):
             return soul
         if key in {f"{agent_id}/memory/memory.md", f"{agent_id}/memory.md"}:
             return memory
+        if key == f"{agent_id}/memory/reflections.md":
+            return reflections
+        if key == f"{agent_id}/memory/user_profile.md":
+            return user_profile
         return ""
+
+    inject_patch = (
+        patch(
+            "app.services.agent_context._load_reflections_injection_enabled",
+            new_callable=AsyncMock,
+            return_value=bool(inject_reflections),
+        )
+        if inject_reflections is not None
+        else None
+    )
 
     return agent_id_holder, (
         patch("app.services.agent_context._read_file_safe", side_effect=fake_read_file),
@@ -34,6 +56,7 @@ def _context_patches(*, soul: str = "", memory: str = "", skills: str = ""):
             new_callable=AsyncMock,
             return_value="UTC",
         ),
+        inject_patch,
     )
 
 
@@ -296,3 +319,174 @@ async def test_memory_maintenance_routes_this_run_lessons_to_reflections():
     assert "If neither durable information nor lessons" in with_write
     # INDEX 义务句保留（废弃 INDEX 是 P2 独立决策）。
     assert "memory/MEMORY_INDEX.md" in with_write
+
+
+def test_extract_reflections_injection_keeps_only_conclusions():
+    from app.services.agent_context import _extract_reflections_injection
+
+    content = "\n".join(
+        [
+            "# Reflections Journal",
+            "",
+            "## Open Questions",
+            "- 旧待办问题 A",
+            "- 旧待办问题 B",
+            "",
+            "## Hypotheses & Experiments",
+            "- ✅ 已验证：UDF 适合小应用",
+            "- ❌ 已证伪：手写 BackStack 优于状态切换",
+            "- 🔄 进行中：导航模式待需求明确",
+            "",
+            "## Insights & Discoveries",
+            "- 发现一：collectAsState 而非 observeAsState",
+            "- 发现二：Navigation3 demo 可作参考",
+            "",
+            "## Next Cycle Seeds",
+            "- 下周期探索 X",
+        ]
+    )
+
+    extracted = _extract_reflections_injection(content)
+
+    # Insights 全节进，Insights 优先于 Hypotheses。
+    assert extracted.index("发现一") < extracted.index("✅")
+    assert "发现一" in extracted
+    assert "发现二" in extracted
+    assert "✅ 已验证" in extracted
+    assert "❌ 已证伪" in extracted
+    # 待办与进行中内容一律不进。
+    assert "旧待办问题" not in extracted
+    assert "🔄" not in extracted
+    assert "下周期探索" not in extracted
+
+
+def test_extract_reflections_injection_empty_without_sections():
+    from app.services.agent_context import _extract_reflections_injection
+
+    assert _extract_reflections_injection("") == ""
+    assert _extract_reflections_injection("no section headers\njust prose\n") == ""
+
+
+def test_extract_reflections_injection_truncates_at_cap():
+    from app.services.agent_context import _extract_reflections_injection
+
+    content = (
+        "## Insights & Discoveries\n"
+        + "- " + "很长的内容" * 500 + "\n"
+    )
+    extracted = _extract_reflections_injection(content, max_chars=100)
+    assert len(extracted) <= 100 + len("\n...(truncated)")
+    assert extracted.endswith("\n...(truncated)")
+
+
+@pytest.mark.asyncio
+async def test_load_reflections_injection_enabled_switch_semantics():
+    from app.services.agent_context import _load_reflections_injection_enabled
+
+    agent_id = uuid.uuid4()
+
+    class _Setting:
+        def __init__(self, value):
+            self.value = value
+
+    class _Result:
+        def __init__(self, rows):
+            self._rows = rows
+
+        def scalar_one_or_none(self):
+            return self._rows[0] if self._rows else None
+
+    class _Db:
+        def __init__(self, rows):
+            self._rows = rows
+            self.statements = []
+
+        async def execute(self, statement):
+            self.statements.append(statement)
+            return _Result(self._rows)
+
+    # enabled: true → True，且查询键名正确。
+    db_on = _Db([_Setting({"enabled": True})])
+    assert await _load_reflections_injection_enabled(db_on, agent_id) is True
+    compiled = db_on.statements[0].compile()
+    assert list(compiled.params.values())[0] == (
+        f"context_inject_reflections_{agent_id}"
+    )
+
+    # 无行 → False（缺省关闭）。
+    db_empty = _Db([])
+    assert await _load_reflections_injection_enabled(db_empty, agent_id) is False
+
+    # 非 dict value → False（畸形行安全降级）。
+    db_bad = _Db([_Setting("not-a-dict")])
+    assert await _load_reflections_injection_enabled(db_bad, agent_id) is False
+
+    # enabled: false → False。
+    db_off = _Db([_Setting({"enabled": False})])
+    assert await _load_reflections_injection_enabled(db_off, agent_id) is False
+
+
+@pytest.mark.asyncio
+async def test_reflections_injection_off_switch_injects_nothing():
+    from app.services.agent_context import build_agent_context
+
+    agent_id = uuid.uuid4()
+    holder, patches = _context_patches(
+        reflections="## Insights & Discoveries\n- 不应出现\n",
+        user_profile="用户档案内容\n",
+        inject_reflections=False,
+    )
+    holder["agent_id"] = agent_id
+
+    with patches[0], patches[1], patches[2], patches[3], patches[4]:
+        _static, stable_dynamic, _unstable = await build_agent_context(
+            agent_id,
+            "TestAgent",
+            allowed_tool_names={"wait", "read_file", "write_file"},
+        )
+
+    assert "Reflections Snapshot" not in stable_dynamic
+    assert "User Profile" not in stable_dynamic
+    assert "不应出现" not in stable_dynamic
+    assert "用户档案内容" not in stable_dynamic
+
+
+@pytest.mark.asyncio
+async def test_reflections_injection_on_injects_filtered_sections_and_profile():
+    from app.services.agent_context import build_agent_context
+
+    agent_id = uuid.uuid4()
+    holder, patches = _context_patches(
+        memory="memory 内容\n",
+        reflections="\n".join(
+            [
+                "## Open Questions",
+                "- 待办不应出现",
+                "## Insights & Discoveries",
+                "- 已沉淀的洞察",
+                "## Next Cycle Seeds",
+                "- 种子不应出现",
+            ]
+        ),
+        user_profile="用户档案内容\n",
+        inject_reflections=True,
+    )
+    holder["agent_id"] = agent_id
+
+    with patches[0], patches[1], patches[2], patches[3], patches[4]:
+        _static, stable_dynamic, _unstable = await build_agent_context(
+            agent_id,
+            "TestAgent",
+            allowed_tool_names={"wait", "read_file", "write_file"},
+        )
+
+    assert "## Reflections Snapshot" in stable_dynamic
+    assert "<reflections_context>" in stable_dynamic
+    assert "已沉淀的洞察" in stable_dynamic
+    assert "待办不应出现" not in stable_dynamic
+    assert "种子不应出现" not in stable_dynamic
+    # 低信任声明随注入块出现。
+    assert "hypotheses with evidence, not facts" in stable_dynamic
+    # user_profile 独立注入。
+    assert "## User Profile" in stable_dynamic
+    assert "用户档案内容" in stable_dynamic

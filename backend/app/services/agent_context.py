@@ -29,6 +29,55 @@ async def _read_file_safe(key: str, max_chars: int = 3000) -> str:
         return ""
 
 
+_REFLECTIONS_INJECTION_SECTION_ORDER = (
+    "Insights & Discoveries",
+    "Hypotheses & Experiments",
+)
+
+
+def _extract_reflections_injection(content: str, *, max_chars: int = 2000) -> str:
+    """Extract conclusion-only reflections content for per-run injection.
+
+    Only Insights & Discoveries (full section) and the ✅/❌ verdict lines of
+    Hypotheses & Experiments qualify. Open Questions, in-progress hypotheses,
+    and Next Cycle Seeds are heartbeat/todo signals, not knowledge — injecting
+    them would pull the current run toward old work.
+    """
+    if not content.strip():
+        return ""
+    section_lines: dict[str, list[str]] = {}
+    current_section: str | None = None
+    for raw_line in content.split("\n"):
+        if raw_line.startswith("## "):
+            current_section = raw_line[3:].strip()
+            section_lines.setdefault(current_section, [])
+        elif current_section is not None:
+            section_lines[current_section].append(raw_line)
+
+    selected: list[str] = []
+    for name in _REFLECTIONS_INJECTION_SECTION_ORDER:
+        lines = section_lines.get(name)
+        if not lines:
+            continue
+        if name == "Hypotheses & Experiments":
+            verdicts = [
+                line
+                for line in lines
+                if line.strip().startswith(("- ✅", "- ❌"))
+            ]
+            body = "\n".join(verdicts).strip()
+        else:
+            body = "\n".join(lines).strip()
+        if body:
+            selected.append(f"### {name}\n{body}")
+    if not selected:
+        return ""
+    result = "\n\n".join(selected)
+    if len(result) > max_chars:
+        return result[:max_chars] + "\n...(truncated)"
+    return result
+
+
 def _parse_skill_frontmatter(content: str, filename: str) -> tuple[str, str]:
     """Return a compact Skill name and description from Markdown frontmatter."""
     name = filename.replace("_", " ").replace("-", " ")
@@ -133,6 +182,34 @@ async def _load_skills_index(agent_id: uuid.UUID) -> str:
         for name, description, relative_path in unique
     )
     return "\n".join(lines)
+
+
+async def _load_reflections_injection_enabled(db, agent_id: uuid.UUID) -> bool:
+    """Return True when the per-agent reflections injection switch is on.
+
+    The switch is a system_settings row keyed ``context_inject_reflections_<agent
+    id>`` whose JSONB value carries ``{"enabled": true}``. Absent or malformed
+    rows mean off (safe default: no behavior change).
+    """
+    from sqlalchemy import select
+
+    from app.models.system_settings import SystemSetting
+
+    try:
+        setting = (
+            await db.execute(
+                select(SystemSetting).where(
+                    SystemSetting.key == f"context_inject_reflections_{agent_id}"
+                )
+            )
+        ).scalar_one_or_none()
+    except Exception:
+        return False
+    return bool(
+        setting
+        and isinstance(setting.value, dict)
+        and setting.value.get("enabled") is True
+    )
 
 
 async def _load_relationships_from_db(db, agent_id: uuid.UUID) -> str:
@@ -513,17 +590,37 @@ async def build_agent_context(
 
     relationships = ""
     company_information = ""
+    inject_reflections = False
     try:
         from app.database import async_session
 
         async with async_session() as db:
             relationships = await _load_relationships_from_db(db, agent_id)
             company_information = await _load_company_information(db, agent_id)
+            inject_reflections = await _load_reflections_injection_enabled(
+                db, agent_id
+            )
     except Exception:
         # Prompt assembly must remain usable when optional organization context is
         # temporarily unavailable.
         relationships = ""
         company_information = ""
+        inject_reflections = False
+
+    reflections_snapshot = ""
+    user_profile = ""
+    if inject_reflections:
+        raw_reflections = await _read_file_safe(
+            normalize_storage_key(f"{agent_id}/memory/reflections.md"),
+            20000,
+        )
+        reflections_snapshot = _extract_reflections_injection(raw_reflections)
+        # user_profile is injected in full up to the hard cap: it is
+        # user-authored collaboration preferences, not a growing log.
+        user_profile = await _read_file_safe(
+            normalize_storage_key(f"{agent_id}/memory/user_profile.md"),
+            2000,
+        )
 
     from app.services.timezone_utils import get_agent_timezone, now_in_timezone
 
@@ -577,6 +674,28 @@ async def build_agent_context(
     if memory:
         dynamic_parts.extend(
             ["", "## Memory Snapshot", "<memory_context>", memory, "</memory_context>"]
+        )
+    if reflections_snapshot:
+        dynamic_parts.extend(
+            [
+                "",
+                "## Reflections Snapshot",
+                "<reflections_context>",
+                "Self-observed reflections from the agent's own past heartbeat "
+                "cycles; treat as hypotheses with evidence, not facts.",
+                reflections_snapshot,
+                "</reflections_context>",
+            ]
+        )
+    if user_profile:
+        dynamic_parts.extend(
+            [
+                "",
+                "## User Profile",
+                "<user_profile_context>",
+                user_profile,
+                "</user_profile_context>",
+            ]
         )
     if company_information:
         dynamic_parts.extend(
