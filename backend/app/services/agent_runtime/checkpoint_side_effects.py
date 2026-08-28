@@ -45,6 +45,7 @@ from app.services.agent_runtime.tool_execution import (
 from app.services.builtin_tool_definitions import builtin_sensitive_paths
 from app.services.experience_retrieval import record_experience_citations
 from app.services.group_realtime import publish_stored_group_message
+from app.services.observability.scores import record_terminal_scores
 
 _TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled"})
 _MODEL_ACTIONS = frozenset(
@@ -689,6 +690,7 @@ async def _record_lifecycle_events(
     now = datetime.now(UTC)
     agent_id = uuid.UUID(run.agent_id) if run.agent_id is not None else None
     events: list[tuple[str, str, dict, str, str | None]] = []
+    terminal_status: str | None = None
     if checkpoint is None:
         terminal_result = await db.execute(
             select(AgentRunEvent.id)
@@ -712,6 +714,7 @@ async def _record_lifecycle_events(
                 None,
             )
         )
+        terminal_status = "cancelled"
     else:
         observation_events, _ = _runtime_observation_events(run, checkpoint)
         events.extend(observation_events)
@@ -768,6 +771,8 @@ async def _record_lifecycle_events(
                             checkpoint.checkpoint_id,
                         )
                     )
+            if status in _TERMINAL_STATUSES:
+                terminal_status = status
 
     for position, (event_type, summary, payload, key, checkpoint_id) in enumerate(events):
         statement = (
@@ -788,6 +793,16 @@ async def _record_lifecycle_events(
             .on_conflict_do_nothing()
         )
         await db.execute(statement)
+
+    if terminal_status is not None:
+        # 第一方评分：终态事件结算的唯一出口（trace 过程视图与台账权威分工见 spec）
+        await record_terminal_scores(
+            db,
+            run=run,
+            command=command,
+            checkpoint=checkpoint,
+            status=terminal_status,
+        )
 
     if checkpoint is not None:
         await _record_direct_tool_history(db, run=run)

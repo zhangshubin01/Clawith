@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import replace
 from datetime import UTC, datetime
-from typing import cast
+from typing import Any, cast
 import uuid
 
 from langgraph.checkpoint.memory import InMemorySaver
@@ -36,6 +37,7 @@ from app.services.agent_runtime.state import (
     RuntimeStateUpdate,
     runtime_messages_as_json,
 )
+from app.services.observability import tracing
 
 
 _TINY_PNG_DATA_URL = (
@@ -830,3 +832,72 @@ async def test_read_latest_warns_and_returns_none_on_exit_stub_head() -> None:
 
     assert observed is None
     assert any("stub" in message for message in captured)
+
+
+class _ObservabilitySpan:
+    """Fake root span carrying the Langfuse trace id (StatefulSpan.trace_id)."""
+
+    def __init__(self, trace_id: str) -> None:
+        self.trace_id = trace_id
+        self.updates: list[dict[str, Any]] = []
+
+    def update(self, **kwargs: Any) -> None:
+        self.updates.append(kwargs)
+
+
+class _ObservabilityClient:
+    def __init__(self, span: _ObservabilitySpan) -> None:
+        self.span = span
+
+    @contextmanager
+    def start_as_current_observation(self, **kwargs: Any) -> Any:
+        del kwargs
+        yield self.span
+
+
+@pytest.mark.asyncio
+async def test_start_checkpoint_metadata_carries_langfuse_trace_id_when_observability_active(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """observe_run 激活时 trace id 落进 checkpoint metadata——结算链在 trace
+    上下文之外也能把它写回正确的 trace（第一方评分挂载的前提）。"""
+    span = _ObservabilitySpan("0123456789abcdef0123456789abcdef")
+    monkeypatch.setattr(
+        tracing,
+        "_get_client",
+        lambda _tenant_id=None: _ObservabilityClient(span),
+    )
+
+    run = _run(uuid.uuid4())
+    driver = _driver(CompletingExecutor())
+    await driver.execute(
+        connection=_connection(),
+        run=run,
+        command=_command(run, "start"),
+        checkpoint=None,
+    )
+
+    observed = await driver.read_latest(connection=_connection(), run=run)
+    assert observed is not None
+    assert observed.metadata["clawith_trace_id"] == "0123456789abcdef0123456789abcdef"
+
+
+@pytest.mark.asyncio
+async def test_start_checkpoint_metadata_omits_trace_id_when_observability_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """observability disabled 时 checkpoint metadata 不带 trace id（no-op 纪律）。"""
+    monkeypatch.setattr(tracing, "_get_client", lambda _tenant_id=None: None)
+
+    run = _run(uuid.uuid4())
+    driver = _driver(CompletingExecutor())
+    await driver.execute(
+        connection=_connection(),
+        run=run,
+        command=_command(run, "start"),
+        checkpoint=None,
+    )
+
+    observed = await driver.read_latest(connection=_connection(), run=run)
+    assert observed is not None
+    assert "clawith_trace_id" not in observed.metadata

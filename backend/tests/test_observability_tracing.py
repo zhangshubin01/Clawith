@@ -608,3 +608,34 @@ def test_disabled_observability_client_and_run_are_safe_noop(
         assert run_handle is None
         captured.append("ran")
     assert captured == ["ran"]
+
+
+class _TraceAwareSpan(_FakeSpan):
+    """Fake root span carrying the Langfuse trace id (StatefulSpan.trace_id)."""
+
+    def __init__(self, trace_id: str) -> None:
+        super().__init__()
+        self.trace_id = trace_id
+
+
+def test_observe_run_exposes_current_trace_id_in_context(monkeypatch: pytest.MonkeyPatch) -> None:
+    span = _TraceAwareSpan("0123456789abcdef0123456789abcdef")
+    monkeypatch.setattr(tracing, "_get_client", lambda _tenant_id=None, _span=span: _FakeClient(span=_span))
+
+    assert tracing.current_trace_id() is None
+    seen: list[str | None] = []
+    with tracing.observe_run(run_id="r-1", command_id="c-1", tenant_id="t-1"):
+        seen.append(tracing.current_trace_id())
+    # 退出 observe_run 后上下文恢复——挂载点结算读的是 checkpoint metadata，
+    # 不在 trace 上下文内。
+    assert seen == ["0123456789abcdef0123456789abcdef"]
+    assert tracing.current_trace_id() is None
+
+
+def test_current_trace_id_is_none_when_run_observations_never_start(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(tracing, "_get_client", lambda _tenant_id=None: None)
+    with tracing.observe_run(run_id="r-1", command_id="c-1", tenant_id="t-1") as run_handle:
+        assert run_handle is None
+        assert tracing.current_trace_id() is None

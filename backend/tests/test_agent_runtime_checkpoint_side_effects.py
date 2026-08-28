@@ -726,6 +726,137 @@ async def test_cancel_after_rejected_start_does_not_append_second_terminal_event
     assert not any("INSERT INTO agent_run_events" in str(statement) for statement in session.statements)
 
 
+@pytest.mark.asyncio
+async def test_terminal_settle_records_first_party_scores() -> None:
+    run, command, checkpoint = _records(lifecycle={"final_answer": "done"})
+    sessions = _SessionFactory("not_required")
+
+    with patch(
+        "app.services.agent_runtime.checkpoint_side_effects.record_terminal_scores",
+        new=AsyncMock(),
+    ) as record:
+        await RuntimeCheckpointSideEffects(
+            session_factory=sessions,  # type: ignore[arg-type]
+        ).handle(run=run, command=command, checkpoint=checkpoint)
+
+    assert record.await_count == 1
+    assert record.await_args.kwargs["run"] is run
+    assert record.await_args.kwargs["checkpoint"] is checkpoint
+    assert record.await_args.kwargs["status"] == "completed"
+
+
+@pytest.mark.asyncio
+async def test_failed_terminal_settle_records_failed_scores() -> None:
+    run, command, checkpoint = _records(
+        status="failed",
+        lifecycle={"error": {"code": "model_call_failed", "message": "boom"}},
+    )
+    sessions = _SessionFactory("not_required")
+
+    with patch(
+        "app.services.agent_runtime.checkpoint_side_effects.record_terminal_scores",
+        new=AsyncMock(),
+    ) as record:
+        await RuntimeCheckpointSideEffects(
+            session_factory=sessions,  # type: ignore[arg-type]
+        ).handle(run=run, command=command, checkpoint=checkpoint)
+
+    assert record.await_count == 1
+    assert record.await_args.kwargs["status"] == "failed"
+
+
+@pytest.mark.asyncio
+async def test_waiting_settle_does_not_record_scores() -> None:
+    run, command, checkpoint = _records(
+        status="waiting_external",
+        lifecycle={
+            "waiting_request": {
+                "waiting_type": "external",
+                "correlation_id": "poll-1",
+                "reason": "async_tool_poll_pending",
+            }
+        },
+    )
+    sessions = _SessionFactory("not_required")
+
+    with patch(
+        "app.services.agent_runtime.checkpoint_side_effects.record_terminal_scores",
+        new=AsyncMock(),
+    ) as record:
+        await RuntimeCheckpointSideEffects(
+            session_factory=sessions,  # type: ignore[arg-type]
+        ).handle(run=run, command=command, checkpoint=checkpoint)
+
+    record.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_cancel_command_settle_records_cancelled_scores() -> None:
+    run, command, checkpoint = _records(
+        status="waiting_user",
+        command_type="cancel",
+        lifecycle={
+            "waiting_request": {
+                "waiting_type": "user",
+                "correlation_id": "confirm-1",
+                "reason": "confirm",
+            }
+        },
+    )
+    sessions = _SessionFactory("not_required")
+
+    with patch(
+        "app.services.agent_runtime.checkpoint_side_effects.record_terminal_scores",
+        new=AsyncMock(),
+    ) as record:
+        await RuntimeCheckpointSideEffects(
+            session_factory=sessions,  # type: ignore[arg-type]
+        ).handle(run=run, command=command, checkpoint=checkpoint)
+
+    assert record.await_count == 1
+    assert record.await_args.kwargs["status"] == "cancelled"
+    settled_checkpoint = record.await_args.kwargs["checkpoint"]
+    assert settled_checkpoint.state["lifecycle"]["status"] == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_cancel_before_start_records_scores_without_checkpoint() -> None:
+    run, command, _ = _records(command_type="cancel")
+    stored = _StoredRun()
+    sessions = _SessionFactory(stored)
+
+    with patch(
+        "app.services.agent_runtime.checkpoint_side_effects.record_terminal_scores",
+        new=AsyncMock(),
+    ) as record:
+        await RuntimeCheckpointSideEffects(
+            session_factory=sessions,  # type: ignore[arg-type]
+        ).handle(run=run, command=command, checkpoint=None)
+
+    assert record.await_count == 1
+    assert record.await_args.kwargs["status"] == "cancelled"
+    assert record.await_args.kwargs["checkpoint"] is None
+
+
+@pytest.mark.asyncio
+async def test_cancel_after_rejected_start_does_not_record_scores() -> None:
+    run, command, _ = _records(command_type="cancel")
+    stored = _StoredRun()
+    session = _Session(stored, terminal_event=uuid.uuid4())
+    handler = RuntimeCheckpointSideEffects(
+        session_factory=_SessionFactory(),  # type: ignore[arg-type]
+    )
+    handler._session_factory = lambda: session  # type: ignore[method-assign]
+
+    with patch(
+        "app.services.agent_runtime.checkpoint_side_effects.record_terminal_scores",
+        new=AsyncMock(),
+    ) as record:
+        await handler.handle(run=run, command=command, checkpoint=None)
+
+    record.assert_not_called()
+
+
 @pytest.mark.parametrize("answer", ("NO_REPLY", " no-reply ", "NOREPLY"))
 def test_no_reply_terminal_suppresses_non_card_delivery(answer: str) -> None:
     """群聊被动指令：终态 NO_REPLY 不产生任何用户可见投递（不再字面发送）。"""

@@ -26,6 +26,7 @@ from app.services.token_tracker import TokenUsage, extract_token_usage
 __all__ = [
     "GenerationHandle",
     "RunHandle",
+    "current_trace_id",
     "flush",
     "is_enabled",
     "mask_text",
@@ -87,6 +88,23 @@ _tenant_keys: dict[str, dict[str, str]] | None = None
 _run_identity: contextvars.ContextVar[dict[str, str]] = contextvars.ContextVar(
     "clawith_observability_identity", default={}
 )
+
+# Langfuse trace id of the run observation active in this async context.
+# observe_run sets it once the root span exists and restores the previous value
+# on exit; the settlement chain resolves the trace via checkpoint metadata
+# (``clawith_trace_id``), not this context — it exists so in-context callers
+# (e.g. the graph driver binding command metadata) can read the SDK trace id.
+_run_trace_id: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "clawith_observability_run_trace_id", default=None
+)
+
+
+def current_trace_id() -> str | None:
+    """Langfuse trace id of the active run observation in this async context.
+
+    ``None`` when observability is disabled or no run observation is active.
+    """
+    return _run_trace_id.get()
 
 
 def is_enabled() -> bool:
@@ -622,6 +640,7 @@ def observe_run(
             handle = RunHandle(span)
             handle.add_metadata(**meta)
             started = time.perf_counter()
+            trace_token = _run_trace_id.set(getattr(span, "trace_id", None))
             _deferred_retry: BaseException | None = None
             try:
                 yield handle
@@ -634,6 +653,7 @@ def observe_run(
                     raise
             finally:
                 handle.finalize(started)
+                _run_trace_id.reset(trace_token)
         if _deferred_retry is not None:
             raise _deferred_retry
 

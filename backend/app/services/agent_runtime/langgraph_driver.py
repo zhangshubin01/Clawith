@@ -35,7 +35,7 @@ from app.services.agent_runtime.state import (
     RuntimeNodeExecutor,
 )
 from app.services.llm.multimodal_content import parse_multimodal_content
-from app.services.observability import observe_run
+from app.services.observability import current_trace_id, observe_run
 
 
 _TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled"})
@@ -455,6 +455,12 @@ class LangGraphRuntimeDriver:
             command_id=command.id,
             checkpoint_id=(checkpoint.checkpoint_id if checkpoint is not None else None),
         )
+        # Bind the SDK trace id of this execution into checkpoint metadata so the
+        # settlement chain (which runs outside the observe_run context) can write
+        # first-party scores back to the trace that produced the terminal state.
+        trace_id = current_trace_id()
+        if trace_id:
+            config["metadata"]["clawith_trace_id"] = trace_id
         config["recursion_limit"] = get_settings().AGENT_RUNTIME_RECURSION_LIMIT
         context = _runtime_context(run, command, self._node_executor)
 
