@@ -5244,6 +5244,195 @@ async def test_runtime_a2a_notify_continues_without_waiting(monkeypatch) -> None
 
 
 @pytest.mark.asyncio
+async def test_runtime_a2a_execution_emits_observability_tool_span(monkeypatch) -> None:
+    tenant_id = uuid.uuid4()
+    agent = _agent(tenant_id)
+    call = _a2a_call("delegate-span-1", mode="task_delegate")
+    state = _state(tenant_id, agent, (call,))
+    run_id = uuid.UUID(state["registry"].run_id)
+    execution = _execution(
+        tenant_id,
+        run_id,
+        "delegate-span-1",
+        "send_message_to_agent",
+    )
+    target_run_id = uuid.uuid4()
+    a2a_service = _A2AService(
+        A2ARuntimeToolResult(
+            outcome=ToolExecutionOutcome(
+                status="succeeded",
+                result_summary="delegation accepted",
+                result_ref=f"agent-run:{target_run_id}",
+            ),
+            target_run_id=target_run_id,
+            waiting_request={
+                "waiting_type": "agent",
+                "correlation_id": f"a2a:task_delegate:{uuid.uuid4()}",
+                "reason": "waiting_for_task_delegate",
+                "target_run_id": str(target_run_id),
+            },
+        )
+    )
+
+    fake = _FakeTraceClient()
+    monkeypatch.setattr(tracing, "_get_client", lambda _tenant_id=None: fake)
+
+    async def reserve(db, **kwargs):
+        del db, kwargs
+        return _reservation(execution)
+
+    async def forbidden(*args, **kwargs):
+        raise AssertionError(f"legacy A2A executor called: {args}, {kwargs}")
+
+    monkeypatch.setattr(tool_step_service, "reserve_tool_execution", reserve)
+    result = await _service(
+        agent,
+        _CancelSource(None),
+        forbidden,
+        a2a_service=a2a_service,
+    ).execute_pending(state, _context(state), (call,))
+
+    assert result.waiting_request is not None
+    assert [s["as_type"] for s in fake.starts] == ["tool"]
+    assert [s["name"] for s in fake.starts] == ["tool:send_message_to_agent"]
+    (update,) = fake.span.updates
+    metadata = update["metadata"]
+    assert metadata["tool_call_id"] == "delegate-span-1"
+    assert metadata["tool_execution_id"] == str(execution.id)
+    assert metadata["side_effect_classification"] == "external_write"
+    assert metadata["retry_policy"] == "never"
+    assert metadata["a2a_mode"] == "task_delegate"
+    assert metadata["target_run_id"] == str(target_run_id)
+    assert metadata["waiting"] is True
+    assert update["output"] == {
+        "status": "succeeded",
+        "result_summary": "delegation accepted",
+        "error_code": None,
+    }
+    assert "level" not in update
+
+
+@pytest.mark.asyncio
+async def test_runtime_a2a_rejection_records_failed_output_without_error_level(
+    monkeypatch,
+) -> None:
+    tenant_id = uuid.uuid4()
+    agent = _agent(tenant_id)
+    call = _a2a_call("reject-span-1", mode="notify")
+    state = _state(tenant_id, agent, (call,))
+    execution = _execution(
+        tenant_id,
+        uuid.UUID(state["registry"].run_id),
+        "reject-span-1",
+        "send_message_to_agent",
+    )
+    a2a_service = _A2AService(
+        A2ARuntimeToolResult(
+            outcome=ToolExecutionOutcome(
+                status="failed",
+                result_summary="[A2A:a2a_input_missing] A2A requires target_agent_id and message",
+                result_ref=None,
+            ),
+            target_run_id=None,
+            waiting_request=None,
+        )
+    )
+
+    fake = _FakeTraceClient()
+    monkeypatch.setattr(tracing, "_get_client", lambda _tenant_id=None: fake)
+
+    async def reserve(db, **kwargs):
+        del db, kwargs
+        return _reservation(execution)
+
+    async def forbidden(*args, **kwargs):
+        raise AssertionError(f"rejected A2A must not re-execute: {args}, {kwargs}")
+
+    monkeypatch.setattr(tool_step_service, "reserve_tool_execution", reserve)
+    result = await _service(
+        agent,
+        _CancelSource(None),
+        forbidden,
+        a2a_service=a2a_service,
+    ).execute_pending(state, _context(state), (call,))
+
+    assert result.error is None
+    assert result.pending_tool_calls == ()
+    assert result.messages[0]["execution_status"] == "failed"
+    (update,) = fake.span.updates
+    assert update["output"] == {
+        "status": "failed",
+        "result_summary": "[A2A:a2a_input_missing] A2A requires target_agent_id and message",
+        "error_code": None,
+    }
+    assert "level" not in update
+    assert "target_run_id" not in update["metadata"]
+
+
+@pytest.mark.asyncio
+async def test_runtime_a2a_exception_marks_span_error(monkeypatch) -> None:
+    tenant_id = uuid.uuid4()
+    agent = _agent(tenant_id)
+    call = _a2a_call("explode-span-1", mode="notify")
+    state = _state(tenant_id, agent, (call,))
+    execution = _execution(
+        tenant_id,
+        uuid.UUID(state["registry"].run_id),
+        "explode-span-1",
+        "send_message_to_agent",
+    )
+
+    class _RaisingA2AService:
+        async def execute(self, **kwargs):
+            del kwargs
+            raise RuntimeError("a2a exploded")
+
+    async def fake_mark_exception(self, *, tenant_id, reservation, lease_owner, policy, exc):
+        del tenant_id, reservation, lease_owner, policy
+        return ToolExecutionOutcome(
+            status="unknown",
+            result_summary=f"{type(exc).__name__}: tool execution failed",
+            result_ref=None,
+            error_code="tool_execution_exception",
+        )
+
+    fake = _FakeTraceClient()
+    monkeypatch.setattr(tracing, "_get_client", lambda _tenant_id=None: fake)
+    monkeypatch.setattr(
+        tool_step_service.RuntimeToolStepService,
+        "_mark_exception",
+        fake_mark_exception,
+    )
+
+    async def reserve(db, **kwargs):
+        del db, kwargs
+        return _reservation(execution)
+
+    async def forbidden(*args, **kwargs):
+        raise AssertionError(f"exploded A2A must not re-execute: {args}, {kwargs}")
+
+    monkeypatch.setattr(tool_step_service, "reserve_tool_execution", reserve)
+    result = await _service(
+        agent,
+        _CancelSource(None),
+        forbidden,
+        a2a_service=_RaisingA2AService(),
+    ).execute_pending(state, _context(state), (call,))
+
+    assert result.waiting_request is not None
+    assert result.waiting_request["reason"] == "tool_outcome_unknown"
+    (update,) = fake.span.updates
+    assert update["level"] == "ERROR"
+    assert "RuntimeError: a2a exploded" in update["status_message"]
+    assert update["output"] == {
+        "status": "unknown",
+        "result_summary": "RuntimeError: tool execution failed",
+        "error_code": "tool_execution_exception",
+    }
+
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "tool_name",
     (
