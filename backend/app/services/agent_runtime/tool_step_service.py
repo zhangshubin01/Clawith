@@ -96,6 +96,7 @@ from app.services.agent_runtime.tool_execution import (
     sanitize_tool_arguments,
     settle_async_operation_executions,
     takeover_tool_execution_for_reconciliation,
+    tool_outcome_summary,
 )
 from app.services.agent_runtime.tool_result_store import (
     ToolResultReconciler,
@@ -710,23 +711,6 @@ def _is_group_workspace_mutation_call(
         tool_name in SCOPED_GROUP_WORKSPACE_MUTATION_TOOL_NAMES
         and _is_group_scoped_workspace_call(state, tool_name, arguments)
     )
-
-
-def _tool_outcome_summary(raw_result: object) -> dict[str, object] | str:
-    """Span output summary for one tool execution — single source for all tool spans.
-
-    ToolExecutionOutcome → {status, result_summary (≤2000 chars), error_code};
-    anything else → its str repr (≤2000 chars). The span closes before ledger
-    settlement, so this is a process-view snapshot of the execution result,
-    identical for the main and group/scoped executor paths.
-    """
-    if isinstance(raw_result, ToolExecutionOutcome):
-        return {
-            "status": raw_result.status,
-            "result_summary": (raw_result.result_summary or "")[:2000],
-            "error_code": raw_result.error_code,
-        }
-    return str(raw_result)[:2000]
 
 
 def _delete_autonomy_details(
@@ -2437,22 +2421,35 @@ class RuntimeToolStepService:
                                 code="group_workspace_fence_unavailable",
                                 defer_without_attempt=True,
                             )
-                        outcome = await self._group_tool_service.reconcile_workspace_operation(
-                            state,
-                            context,
-                            agent,
-                            tool_name,
-                            arguments,
-                            operation_id=reservation.execution.id,
-                            lease_owner=lease_owner,
-                        )
-                        outcome = await self._settle_outcome(
-                            tenant_id=tenant_id,
-                            reservation=reservation,
-                            lease_owner=lease_owner,
-                            policy=policy,
-                            outcome=outcome,
-                        )
+                        # Fence-reconcile executor path — previously a tool-span
+                        # blind spot. Only the actual reconciliation execution
+                        # plus its settlement is wrapped; the terminal_outcome
+                        # replay above performs no execution and stays outside.
+                        with observe_tool(
+                            tool_name=tool_name,
+                            tool_call_id=call_id,
+                            tool_execution_id=reservation.execution.id,
+                            side_effect_classification=policy.side_effect_classification,
+                            retry_policy=policy.retry_policy,
+                        ) as tool_handle:
+                            outcome = await self._group_tool_service.reconcile_workspace_operation(
+                                state,
+                                context,
+                                agent,
+                                tool_name,
+                                arguments,
+                                operation_id=reservation.execution.id,
+                                lease_owner=lease_owner,
+                            )
+                            outcome = await self._settle_outcome(
+                                tenant_id=tenant_id,
+                                reservation=reservation,
+                                lease_owner=lease_owner,
+                                policy=policy,
+                                outcome=outcome,
+                            )
+                            if tool_handle is not None:
+                                tool_handle.set_output(tool_outcome_summary(outcome))
                         if outcome.status == "unknown":
                             return self._group_unknown_failure(
                                 run_id=run_id,
@@ -2582,7 +2579,7 @@ class RuntimeToolStepService:
                                 exc=exc,
                             )
                             if tool_handle is not None:
-                                tool_handle.set_output(_tool_outcome_summary(outcome))
+                                tool_handle.set_output(tool_outcome_summary(outcome))
                                 tool_handle.mark_error(exc)
                             if outcome.status == "unknown":
                                 if _is_group_agent_run(state):
@@ -2610,7 +2607,7 @@ class RuntimeToolStepService:
                         else:
                             if a2a_result is not None:
                                 if tool_handle is not None:
-                                    tool_handle.set_output(_tool_outcome_summary(a2a_result.outcome))
+                                    tool_handle.set_output(tool_outcome_summary(a2a_result.outcome))
                                     tool_handle.add_metadata(
                                         a2a_mode=arguments.get("msg_type"),
                                         target_run_id=(
@@ -2660,17 +2657,30 @@ class RuntimeToolStepService:
                         )
                     )
                     if successful_count >= heartbeat_limit:
-                        outcome = await self._mark_policy_blocked(
-                            tenant_id=tenant_id,
-                            reservation=reservation,
-                            lease_owner=lease_owner,
-                            policy=policy,
-                            result_summary=_heartbeat_blocked_summary(
-                                agent,
-                                tool_name,
-                                heartbeat_limit,
-                            ),
-                        )
+                        # Policy-blocked executor path — previously a tool-span
+                        # blind spot. A block is a fresh tool-call decision that
+                        # settles a new ledger row, so unlike replay paths it
+                        # performs settlement work and deserves a span.
+                        with observe_tool(
+                            tool_name=tool_name,
+                            tool_call_id=call_id,
+                            tool_execution_id=reservation.execution.id,
+                            side_effect_classification=policy.side_effect_classification,
+                            retry_policy=policy.retry_policy,
+                        ) as tool_handle:
+                            outcome = await self._mark_policy_blocked(
+                                tenant_id=tenant_id,
+                                reservation=reservation,
+                                lease_owner=lease_owner,
+                                policy=policy,
+                                result_summary=_heartbeat_blocked_summary(
+                                    agent,
+                                    tool_name,
+                                    heartbeat_limit,
+                                ),
+                            )
+                            if tool_handle is not None:
+                                tool_handle.set_output(tool_outcome_summary(outcome))
                         messages.append(
                             _result_message(
                                 run_id=run_id,
@@ -2721,7 +2731,7 @@ class RuntimeToolStepService:
                                     arguments,
                                 )
                             if tool_handle is not None:
-                                tool_handle.set_output(_tool_outcome_summary(raw_result))
+                                tool_handle.set_output(tool_outcome_summary(raw_result))
                     elif _is_group_scoped_workspace_call(
                         state,
                         tool_name,
@@ -2755,7 +2765,7 @@ class RuntimeToolStepService:
                                     arguments,
                                 )
                             if tool_handle is not None:
-                                tool_handle.set_output(_tool_outcome_summary(raw_result))
+                                tool_handle.set_output(tool_outcome_summary(raw_result))
                     else:
                         on_output_callback = None
                         if tool_name in _STREAM_OUTPUT_TOOL_NAMES:
@@ -2842,7 +2852,7 @@ class RuntimeToolStepService:
                                             call_id,
                                         )
                             if tool_handle is not None:
-                                tool_handle.set_output(_tool_outcome_summary(raw_result))
+                                tool_handle.set_output(tool_outcome_summary(raw_result))
                 except GroupWorkspaceReconciliationPending:
                     raise
                 except Exception as exc:

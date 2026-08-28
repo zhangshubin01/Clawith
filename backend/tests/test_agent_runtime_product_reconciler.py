@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 from datetime import UTC, datetime, timedelta
+from typing import Any, Iterator
 from unittest.mock import AsyncMock
 import uuid
 
@@ -24,6 +25,7 @@ from app.services.agent_runtime.tool_execution import (
     ToolExecutionOutcome,
     ToolExecutionTakeover,
 )
+from app.services.observability import tracing
 
 
 def _run() -> AgentRun:
@@ -389,6 +391,100 @@ async def test_late_storage_success_reopens_unknown_and_forward_finalizes() -> N
     assert second.status == "synced"
     assert candidate.execution.status == "succeeded"
     assert group_reconciler.calls == 2
+
+
+class _FakeTraceSpan:
+    def __init__(self) -> None:
+        self.updates: list[dict[str, Any]] = []
+
+    def update(self, **kwargs: Any) -> None:
+        self.updates.append(kwargs)
+
+
+@contextmanager
+def _fake_trace_span_cm(span: _FakeTraceSpan) -> Iterator[_FakeTraceSpan]:
+    yield span
+
+
+class _FakeTraceClient:
+    """Stands in for the Langfuse client so reconcile spans can be asserted."""
+
+    def __init__(self) -> None:
+        self.span = _FakeTraceSpan()
+        self.starts: list[dict[str, Any]] = []
+
+    def start_as_current_observation(self, **kwargs: Any) -> Any:
+        self.starts.append(kwargs)
+        return _fake_trace_span_cm(self.span)
+
+
+@pytest.mark.asyncio
+async def test_group_workspace_scope_reconcile_emits_observability_tool_span(
+    monkeypatch,
+) -> None:
+    run = _run()
+    candidate = _group_workspace_candidate(run)
+
+    fake = _FakeTraceClient()
+    monkeypatch.setattr(tracing, "_get_client", lambda _tenant_id=None: fake)
+
+    group_reconciler = _GroupToolReconciler(
+        ToolExecutionOutcome(
+            status="succeeded",
+            result_summary="Late storage success is now proven by revision/hash",
+            result_ref=None,
+        )
+    )
+    reconciler = RuntimeProductReconciler(
+        session_factory=AsyncMock(),  # type: ignore[arg-type]
+        checkpoint_reader=_Driver(_checkpoint(run, _command(run))),  # type: ignore[arg-type]
+        handler=_Handler(),
+        group_tool_service=group_reconciler,  # type: ignore[arg-type]
+    )
+
+    async def takeover(_candidate, *, lease_owner):
+        candidate.execution.status = "started"
+        candidate.execution.lease_owner = lease_owner
+        return ToolExecutionTakeover(
+            execution=candidate.execution,
+            acquired=True,
+            active=False,
+            terminal_outcome=None,
+        )
+
+    async def settle(_candidate, *, lease_owner, outcome):
+        assert lease_owner == candidate.execution.lease_owner
+        candidate.execution.status = outcome.status
+        candidate.execution.result_summary = outcome.result_summary
+
+    reconciler._takeover_group_workspace = takeover  # type: ignore[method-assign]
+    reconciler._settle_group_workspace = settle  # type: ignore[method-assign]
+
+    result = await reconciler._run_group_workspace_once(candidate)
+
+    assert result.status == "synced"
+    assert [s["as_type"] for s in fake.starts] == ["tool"]
+    assert [s["name"] for s in fake.starts] == ["tool:group_write_workspace_file"]
+    (update,) = fake.span.updates
+    metadata = update["metadata"]
+    assert metadata["tool_call_id"] == "group-write-call"
+    assert metadata["tool_execution_id"] == str(candidate.execution.id)
+    assert metadata["side_effect_classification"] == "write"
+    assert update["output"] == {
+        "status": "succeeded",
+        "result_summary": "Late storage success is now proven by revision/hash",
+        "error_code": None,
+    }
+    assert "level" not in update
+    assert group_reconciler.calls == [
+        {
+            "tenant_id": candidate.execution.tenant_id,
+            "group_id": candidate.group_id,
+            "tool_name": "group_write_workspace_file",
+            "operation_id": candidate.execution.id,
+            "lease_owner": candidate.execution.lease_owner,
+        }
+    ]
 
 
 @pytest.mark.asyncio

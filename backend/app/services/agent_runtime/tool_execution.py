@@ -729,6 +729,24 @@ class ToolExecutionOutcome:
         return self.result_summary
 
 
+def tool_outcome_summary(raw_result: object) -> dict[str, object] | str:
+    """Span output summary for one tool execution — single source for all tool spans.
+
+    ToolExecutionOutcome → {status, result_summary (≤2000 chars), error_code};
+    anything else → its str repr (≤2000 chars). The span closes before ledger
+    settlement, so this is a process-view snapshot of the execution result,
+    identical for the main, group/scoped, fence-reconcile and policy-blocked
+    executor paths.
+    """
+    if isinstance(raw_result, ToolExecutionOutcome):
+        return {
+            "status": raw_result.status,
+            "result_summary": (raw_result.result_summary or "")[:2000],
+            "error_code": raw_result.error_code,
+        }
+    return str(raw_result)[:2000]
+
+
 @dataclass(frozen=True, slots=True)
 class ToolExecutionInspection:
     """Current ledger state; ``not_started`` is represented by no table row."""

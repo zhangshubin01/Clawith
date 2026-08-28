@@ -36,7 +36,9 @@ from app.services.agent_runtime.tool_execution import (
     mark_tool_execution_succeeded,
     mark_tool_execution_unknown,
     takeover_tool_execution_for_reconciliation,
+    tool_outcome_summary,
 )
+from app.services.observability import observe_tool
 
 
 logger = logging.getLogger(__name__)
@@ -315,15 +317,27 @@ class RuntimeProductReconciler:
                     },
                 )
             else:
-                outcome = (
-                    await self._group_tool_service.reconcile_workspace_operation_by_scope(
+                # Scoped workspace reconcile executor path — previously a
+                # tool-span blind spot. Only the executed reconcile is wrapped;
+                # the group_id-None branch above synthesizes an outcome without
+                # execution and stays outside, matching the runtime replay
+                # convention. Settlement follows the span close.
+                with observe_tool(
+                    tool_name=candidate.execution.tool_name,
+                    tool_call_id=candidate.execution.tool_call_id,
+                    tool_execution_id=candidate.execution.id,
+                    side_effect_classification=candidate.execution.effect,
+                    retry_policy=candidate.execution.retry_policy,
+                ) as tool_handle:
+                    outcome = await self._group_tool_service.reconcile_workspace_operation_by_scope(
                         tenant_id=candidate.execution.tenant_id,
                         group_id=candidate.group_id,
                         tool_name=candidate.execution.tool_name,
                         operation_id=candidate.execution.id,
                         lease_owner=lease_owner,
                     )
-                )
+                    if tool_handle is not None:
+                        tool_handle.set_output(tool_outcome_summary(outcome))
             await self._settle_group_workspace(
                 candidate,
                 lease_owner=lease_owner,

@@ -2979,6 +2979,110 @@ async def test_group_scoped_workspace_tool_execution_emits_observability_tool_sp
 
 
 @pytest.mark.asyncio
+async def test_group_fence_reconcile_execution_emits_observability_tool_span(
+    monkeypatch,
+) -> None:
+    tenant_id = uuid.uuid4()
+    agent = _agent(tenant_id)
+    call = {
+        "id": "call-fence-reconcile-span",
+        "type": "function",
+        "function": {
+            "name": "write_file",
+            "arguments": '{"path":"workspace/report.md","content":"final"}',
+        },
+    }
+    state = _state(tenant_id, agent, (call,))
+    state["snapshots"] = RunInputSnapshots(
+        session_context={"version": 0},
+        session_context_version=0,
+        recent_session_messages=(),
+        related_run_summaries=(),
+        initial_input={
+            "group_id": str(uuid.uuid4()),
+            "target_participant_id": str(uuid.uuid4()),
+            "group_context": {"agent": {"agent_id": str(agent.id)}},
+        },
+    )
+    execution = _execution(
+        tenant_id,
+        uuid.UUID(state["registry"].run_id),
+        "call-fence-reconcile-span",
+        "write_file",
+    )
+    execution.effect = "write"
+    execution.retry_policy = "conditional"
+
+    fake = _FakeTraceClient()
+    monkeypatch.setattr(tracing, "_get_client", lambda _tenant_id=None: fake)
+
+    async def reserve(db, **kwargs):
+        del db
+        assert kwargs["arguments"]["workspace_scope"] == "group"
+        return _reservation(execution, blocked=True)
+
+    async def takeover(self, *, tenant_id, reservation, lease_owner):
+        del tenant_id, lease_owner
+        return ToolExecutionTakeover(
+            execution=reservation.execution,
+            acquired=True,
+            active=False,
+            terminal_outcome=None,
+        )
+
+    async def settle(self, *, tenant_id, reservation, lease_owner, policy, outcome):
+        del tenant_id, reservation, lease_owner, policy
+        return outcome
+
+    async def forbidden(*_args, **_kwargs):
+        raise AssertionError("Fence-reconciled calls must not reach the executor")
+
+    class _GroupToolService:
+        async def reconcile_workspace_operation(self, *_args, **_kwargs):
+            return ToolExecutionOutcome(
+                status="succeeded",
+                result_summary='{"path":"report.md"}',
+                result_ref=None,
+            )
+
+    monkeypatch.setattr(tool_step_service, "reserve_tool_execution", reserve)
+    monkeypatch.setattr(
+        tool_step_service.RuntimeToolStepService,
+        "_takeover_for_reconciliation",
+        takeover,
+    )
+    monkeypatch.setattr(
+        tool_step_service.RuntimeToolStepService,
+        "_settle_outcome",
+        settle,
+    )
+    service = tool_step_service.RuntimeToolStepService(
+        session_factory=_session_factory(agent),
+        cancel_source=_CancelSource(None),
+        tool_provider=_tools,
+        tool_executor=forbidden,
+        group_tool_service=_GroupToolService(),  # type: ignore[arg-type]
+    )
+
+    result = await service.execute_pending(state, _context(state), (call,))
+
+    assert result.error is None
+    assert [s["as_type"] for s in fake.starts] == ["tool"]
+    assert [s["name"] for s in fake.starts] == ["tool:write_file"]
+    (update,) = fake.span.updates
+    metadata = update["metadata"]
+    assert metadata["tool_call_id"] == "call-fence-reconcile-span"
+    assert metadata["tool_execution_id"] == str(execution.id)
+    assert metadata["side_effect_classification"] == "write"
+    assert update["output"] == {
+        "status": "succeeded",
+        "result_summary": '{"path":"report.md"}',
+        "error_code": None,
+    }
+    assert "level" not in update
+
+
+@pytest.mark.asyncio
 async def test_l3_private_workspace_delete_requires_approval_before_execution(
     monkeypatch,
 ) -> None:
@@ -4959,6 +5063,69 @@ async def test_private_heartbeat_plaza_call_is_receipted_without_execution(
     assert result.messages[0]["content"] == (
         "[BLOCKED] Private heartbeat Agents cannot use Agent Plaza."
     )
+
+
+@pytest.mark.asyncio
+async def test_private_heartbeat_plaza_block_emits_observability_tool_span(
+    monkeypatch,
+) -> None:
+    tenant_id = uuid.uuid4()
+    agent = _agent(tenant_id, access_mode="private")
+    call = _call("private-plaza-span", "plaza_get_new_posts")
+    state = _state(tenant_id, agent, (call,), source_type="heartbeat")
+    execution = _execution(
+        tenant_id,
+        uuid.UUID(state["registry"].run_id),
+        "private-plaza-span",
+        "plaza_get_new_posts",
+    )
+
+    fake = _FakeTraceClient()
+    monkeypatch.setattr(tracing, "_get_client", lambda _tenant_id=None: fake)
+
+    async def reserve(db, **kwargs):
+        del db, kwargs
+        return _reservation(execution)
+
+    async def mark_failed(db, **kwargs):
+        del db
+        execution.status = "failed"
+        execution.result_summary = kwargs["result_summary"]
+        return execution
+
+    async def forbidden(*args, **kwargs):
+        raise AssertionError(f"private Plaza tool executed: {args}, {kwargs}")
+
+    monkeypatch.setattr(tool_step_service, "reserve_tool_execution", reserve)
+    monkeypatch.setattr(
+        tool_step_service,
+        "mark_tool_execution_failed",
+        mark_failed,
+    )
+
+    result = await _service(agent, _CancelSource(None), forbidden).execute_pending(
+        state,
+        _context(state),
+        (call,),
+    )
+
+    assert result.error is None
+    assert result.messages[0]["execution_status"] == "failed"
+    assert result.messages[0]["content"] == (
+        "[BLOCKED] Private heartbeat Agents cannot use Agent Plaza."
+    )
+    assert [s["as_type"] for s in fake.starts] == ["tool"]
+    assert [s["name"] for s in fake.starts] == ["tool:plaza_get_new_posts"]
+    (update,) = fake.span.updates
+    metadata = update["metadata"]
+    assert metadata["tool_call_id"] == "private-plaza-span"
+    assert metadata["tool_execution_id"] == str(execution.id)
+    assert update["output"] == {
+        "status": "failed",
+        "result_summary": "[BLOCKED] Private heartbeat Agents cannot use Agent Plaza.",
+        "error_code": "tool_policy_blocked",
+    }
+    assert "level" not in update
 
 
 @pytest.mark.asyncio
