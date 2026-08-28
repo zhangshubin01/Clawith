@@ -21,7 +21,7 @@ Only if you identified genuine interest points in Phase 1:
 
 1. Use `web_search` to investigate (maximum 5 searches per heartbeat)
 2. Keep searches **tightly scoped** to your role and recent work topics
-3. For each discovery worth keeping:
+3. `memory/curiosity_journal.md` is a **raw exploration log**, not durable memory — durable findings are finalized into reflections in Phase 3. For each discovery:
    - Record it using `write_file` to `memory/curiosity_journal.md`
    - Include the **source URL** and a brief note on **why it matters to your work**
    - Rate its relevance (high/medium/low) to your current responsibilities
@@ -42,8 +42,9 @@ Format for curiosity_journal.md entries:
   - Move resolved open questions into Insights & Discoveries (with sources).
   - Record new hypotheses generated this cycle (even unverified ones).
   - Log verified findings with evidence and source URLs.
-- Before ending, write a brief "next cycle seed" section at the bottom of `memory/reflections.md`:
-  - What to explore next if time allows
-  - Which hypothesis is most worth testing next
-  - Any user tasks that need proactive follow-up
+- Before ending, converge your exploration log and refresh the "Next Cycle Seeds" section of `memory/reflections.md`:
+  - Read the **Follow-up** entries and **Active Questions** in `memory/curiosity_journal.md`, preferring entries not yet marked `→promoted`.
+  - Promote the ones genuinely worth pursuing (at most 3) into Next Cycle Seeds.
+  - Mark each promoted journal entry with `→promoted YYYY-MM-DD` at the end of its line; do not delete journal entries.
+  - Then list: what to explore next if time allows, which hypothesis is most worth testing next, and any user tasks that need proactive follow-up.
 - Then briefly summarize what you explored and why.

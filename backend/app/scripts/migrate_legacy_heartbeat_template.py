@@ -30,15 +30,18 @@ from app.services.storage_runtime.facade import get_storage_backend
 from app.services.storage_runtime.fallback import FallbackStorageBackend
 
 LEGACY_HEARTBEAT_SHA256 = "377e8e367d3aaa13d3932335787340363a88105fabe9717f758d90480843a6cd"
-# All known pre-unification HEARTBEAT templates, in the order they were shipped:
+# All known retired HEARTBEAT templates, in the order they were shipped:
 # - 377e8e36: original Plaza-era template
 # - 5aed0d8c: four-phase reflections template (former app/templates fallback)
 # - cb4dfa9c: minimal "awareness check" template (former agent_template, pre-2026-08-27)
+# - a2ae09a8: unified template without the Phase 3 curiosity-convergence step
+#   (retired 2026-08-28, replaced by the convergence template)
 LEGACY_HEARTBEAT_SHA256S = frozenset(
     {
         LEGACY_HEARTBEAT_SHA256,
         "5aed0d8c1971483e23bc7124d336e2386b1ca24b19a08ba589f075996ef440e2",
         "cb4dfa9c49a226a39cd1befd266f7d43a36685f80485c13f14833b2d330a25cd",
+        "a2ae09a8f34c1461d2473b1ad8229b855ecfb02d41088507c8c6c75e47364cc3",
     }
 )
 HEARTBEAT_FILENAME = "HEARTBEAT.md"
