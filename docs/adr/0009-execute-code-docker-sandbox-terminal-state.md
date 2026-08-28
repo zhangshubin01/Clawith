@@ -32,7 +32,12 @@ bwrap 0.12 移除 setuid 支持后，过渡态（自编译 0.11.2+setuid）可�
    超时=kill 容器+会话重置（exit 124，语义对齐 bwrap）；一次性调用（无 run_id）用临时会话。
 5. **GHSA-pxhw-h44j-8pfx 缓解**：pip 响应文件改 O_EXCL+O_NOFOLLOW 排他写入；受保护文件恢复
    拒绝穿越 symlink 组件（staging 侧宿主写路径全部加固）。
-6. **灰度开关现成**：`SandboxConfig.from_dict` 已支持 per-agent `sandbox_type`；全局
+6. **DooD 挂载源翻译**：bind-mount 源由宿主 daemon 解析，容器私有路径（/tmp）在 daemon
+   视角不存在——socket 级探针实测（2026-08-29）证明源路径会**静默变成空目录**（无任何报错）。
+   因此 staging 落在共享 bind mount `/data/agents/.sandbox-staging`，且所有 `/data/agents`
+   挂载源经 `detect_host_agent_data_root()`（自 inspect 本容器 Mounts，与 AndroidBuildBackend
+   同一模式，抽到 shared.py 单权威）翻译为宿主机路径；检测失败时回退直传（宿主直跑 dev 场景）。
+7. **灰度开关现成**：`SandboxConfig.from_dict` 已支持 per-agent `sandbox_type`；全局
    `SANDBOX_TYPE=docker` 切换。setuid bwrap 0.11.2 过渡态保持到灰度通过后从镜像删除。
 
 ## 业界对照（决策依据）
@@ -64,3 +69,6 @@ bwrap 0.12 移除 setuid 支持后，过渡态（自编译 0.11.2+setuid）可�
   `auto_remove` 保证容器停止即自动移除；容器带 `clawith.sandbox=execute-code` /
   `clawith.run_id` 标签，运营可 `docker ps --filter label=clawith.sandbox` 巡检。
   若线上观测到堆积，再补常驻 GC 任务（标签为识别基础，无需迁移数据格式）。
+- **staging 目录同属孤儿边界**：`/data/agents/.sandbox-staging/` 下的会话目录在硬崩溃时
+  同样残留（无 GC）。缓解：目录前缀唯一且 0o700、每会话 < 工作区副本大小；巡检命令
+  `ls /data/agents/.sandbox-staging | wc -l`，堆积时与容器 GC 一并清理。

@@ -137,6 +137,8 @@ async def _clean_sessions():
 @pytest.fixture
 def fake_client(monkeypatch):
     client = FakeClient()
+    # Also feeds _detect_host_agent_data_root (self-inspect): FakeClient.get
+    # raises ImageNotFound → detection returns "" (passthrough).
     monkeypatch.setattr(docker_backend, "get_docker_client", lambda: client)
 
     async def _noop_venv(venv_path, **kwargs):
@@ -377,3 +379,90 @@ async def test_invalid_cpu_limit_falls_back_to_half_cpu(backend, fake_client, tm
     _, kwargs = fake_client.run_kwargs[0]
     assert kwargs["cpu_quota"] == 50000
     await DockerSessionBackend.close_run("run-cpu")
+
+
+def test_build_container_kwargs_translates_agent_data_paths(tmp_path: Path, monkeypatch) -> None:
+    """DooD: /data/agents mount sources must be rewritten to the host path."""
+    monkeypatch.setattr(docker_backend, "get_docker_client", lambda: FakeClient())
+    backend = DockerSessionBackend(SandboxConfig())
+    backend._host_agent_data_root = "/HOSTAGENTS"
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    kwargs = backend._build_container_kwargs(
+        name="c",
+        run_id="r",
+        staging_path=staging,
+        venv_path=Path("/data/agents/agent-x/.venv"),
+        writable_path=None,
+    )
+    host_venv = [src for src, spec in kwargs["volumes"].items() if spec["bind"] == SANDBOX_VENV_PATH]
+    assert host_venv == ["/HOSTAGENTS/agent-x/.venv"]
+    # Staging under a non-/data/agents path is passed through unchanged.
+    workspace_src = [src for src, spec in kwargs["volumes"].items() if spec["bind"] == "/workspace"]
+    assert workspace_src == [str(staging / "workspace")]
+
+
+def test_build_container_kwargs_passthrough_without_host_root(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(docker_backend, "get_docker_client", lambda: FakeClient())
+    backend = DockerSessionBackend(SandboxConfig())
+    backend._host_agent_data_root = ""
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    kwargs = backend._build_container_kwargs(
+        name="c",
+        run_id="r",
+        staging_path=staging,
+        venv_path=Path("/data/agents/agent-x/.venv"),
+        writable_path=None,
+    )
+    host_venv = [src for src, spec in kwargs["volumes"].items() if spec["bind"] == SANDBOX_VENV_PATH]
+    assert host_venv == ["/data/agents/agent-x/.venv"]
+
+
+@pytest.mark.asyncio
+async def test_staging_lives_under_agent_data_when_present(backend, fake_client, tmp_path: Path, monkeypatch) -> None:
+    # Sibling of the workspace (production geometry: /data/agents/.sandbox-staging
+    # vs /data/agents/<agent>/...); a staging dir inside the work dir would make
+    # clone_workspace_to_staging copy itself recursively.
+    base = tmp_path.parent / (tmp_path.name + "-staging")
+    base.mkdir()
+    monkeypatch.setattr(docker_backend, "_staging_parent", lambda: base)
+    await backend.execute("print('x')", "python", timeout=30, work_dir=str(tmp_path), run_id="run-stg")
+    session = DockerSessionBackend._run_sessions["run-stg"]
+    assert session.temp_dir is None
+    assert session.staging_path.is_relative_to(base)
+    assert (session.staging_path / "workspace").is_dir()
+    # Mount sources come from the staging base (still untranslated: no host root).
+    _, kwargs = fake_client.run_kwargs[0]
+    assert any(str(session.staging_path / "workspace") == src for src in kwargs["volumes"])
+    await DockerSessionBackend.close_run("run-stg")
+    assert not session.staging_path.exists()
+
+
+def test_detect_host_agent_data_root_resolves_mount(monkeypatch) -> None:
+    class FakeInspectClient:
+        def __init__(self):
+            self.containers = self
+
+        def get(self, name):
+            assert name  # non-empty hostname
+            container = type("C", (), {})()
+            container.attrs = {"Mounts": [{"Destination": "/data/agents", "Source": "/HOSTROOT/agents"}]}
+            return container
+
+    monkeypatch.setattr(docker_backend, "get_docker_client", lambda: FakeInspectClient())
+    assert docker_backend._detect_host_agent_data_root() == "/HOSTROOT/agents"
+
+
+def test_detect_host_agent_data_root_missing_mount_returns_empty(monkeypatch) -> None:
+    class FakeNoMountClient:
+        def __init__(self):
+            self.containers = self
+
+        def get(self, name):
+            container = type("C", (), {})()
+            container.attrs = {"Mounts": [{"Destination": "/other", "Source": "/x"}]}
+            return container
+
+    monkeypatch.setattr(docker_backend, "get_docker_client", lambda: FakeNoMountClient())
+    assert docker_backend._detect_host_agent_data_root() == ""

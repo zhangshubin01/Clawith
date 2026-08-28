@@ -12,7 +12,10 @@ capabilities dropped, no-new-privileges, read-only rootfs, uid 1000.
 
 import asyncio
 from dataclasses import dataclass
+import os
 import shlex
+import shutil
+import socket
 import tempfile
 import time
 import uuid
@@ -43,6 +46,10 @@ _SESSION_START_TIMEOUT_SECONDS = 30
 _CONTAINER_UID_GID = "1000:1000"
 _CONTAINER_PIDS_LIMIT = 64
 _TMPFS_TMP_SIZE = "size=64m,mode=1777"
+# DooD: staging must live under /data/agents (shared bind mount) — see
+# _detect_host_agent_data_root.  Fallback is a tempfile dir when /data/agents
+# does not exist (running directly on the host in dev).
+_STAGING_PARENT = Path("/data/agents/.sandbox-staging")
 
 
 @dataclass
@@ -53,7 +60,8 @@ class _PersistentDockerSession:
     workspace_mode: str
     publish_paths: tuple[str, ...]
     work_path: Path
-    temp_dir: tempfile.TemporaryDirectory
+    # None when staging lives under /data/agents/.sandbox-staging (production).
+    temp_dir: tempfile.TemporaryDirectory | None
     staging_path: Path
     venv_path: Path
     # docker-py container object; kept untyped because tests inject a fake
@@ -72,6 +80,65 @@ def _remove_container_force(container: Any) -> None:
         pass
 
 
+def _detect_host_agent_data_root() -> str:
+    """Resolve the host-side path of /data/agents via the docker socket.
+
+    DooD (Docker-on-Docker): the backend container starts sandbox containers
+    through docker.sock, and bind-mount SOURCES are resolved by the host
+    daemon — which cannot see this container's private filesystem.  Only
+    paths on shared bind mounts (like /data/agents) are daemon-visible, via
+    their Mounts[].Source host path.  Verified by socket-level probe
+    2026-08-29: a container-private source silently becomes an EMPTY dir in
+    the spawned container (no error anywhere in the chain).
+
+    Returns "" when undetectable; the backend then passes container paths
+    through unchanged (best-effort — e.g. running directly on the host in
+    dev, or unit tests with a fake client).
+    """
+    hostname = os.environ.get("HOSTNAME") or socket.gethostname()
+    try:
+        client = get_docker_client()
+        info = client.containers.get(hostname)
+    except errors.NotFound:
+        logger.warning(f"[DockerSession] container {hostname} not found via docker.sock")
+        return ""
+    except Exception as exc:
+        logger.warning(f"[DockerSession] docker.sock unavailable: {exc}")
+        return ""
+    for mount in info.attrs.get("Mounts", []):
+        dest = (mount.get("Destination") or "").rstrip("/")
+        if dest == "/data/agents":
+            host_path = mount["Source"]
+            logger.debug(f"[DockerSession] detected host path for /data/agents: {host_path}")
+            return host_path
+    logger.warning("[DockerSession] /data/agents mount not found in container info")
+    return ""
+
+
+def _staging_parent() -> Path | None:
+    """Return the staging parent directory, or None to use a tempfile dir.
+
+    DooD: bind-mount sources are resolved by the host daemon, which cannot
+    see this container's private filesystem (/tmp).  Staging therefore lives
+    under /data/agents — a shared bind mount — so the daemon can mount it;
+    the actual host path is obtained via _detect_host_agent_data_root().
+    """
+    root = Path("/data/agents")
+    if not root.is_dir():
+        return None
+    base = _STAGING_PARENT
+    base.mkdir(mode=0o700, parents=True, exist_ok=True)
+    return base
+
+
+def _cleanup_staging_dir(temp_dir: tempfile.TemporaryDirectory | None, staging_path: Path) -> None:
+    """Best-effort removal of one session's staging tree."""
+    if temp_dir is not None:
+        temp_dir.cleanup()
+    else:
+        shutil.rmtree(staging_path, ignore_errors=True)
+
+
 class DockerSessionBackend(BaseSandboxBackend):
     """Docker-based sandbox backend with one long-lived container per Run."""
 
@@ -84,6 +151,26 @@ class DockerSessionBackend(BaseSandboxBackend):
 
     def __init__(self, config: SandboxConfig):
         self.config = config
+        # DooD: host-side path of /data/agents, used to translate bind-mount
+        # sources so the host daemon can resolve them (empty = passthrough,
+        # e.g. unit tests or running directly on the host).
+        self._host_agent_data_root = _detect_host_agent_data_root()
+
+    def _host_path(self, container_path: str) -> str:
+        """Translate a /data/agents container path to a daemon-visible host path.
+
+        The host daemon resolves bind-mount sources in its own namespace: a
+        container-private path silently becomes an EMPTY dir in the spawned
+        container (probe-verified 2026-08-29).  Everything we mount lives on
+        the shared /data/agents bind mount, so a prefix substitution is
+        sufficient.  Non-/data/agents paths are returned unchanged.
+        """
+        if not self._host_agent_data_root:
+            return container_path
+        prefix = "/data/agents"
+        if not container_path.startswith(prefix):
+            return container_path
+        return self._host_agent_data_root + container_path[len(prefix) :]
 
     @classmethod
     async def close_run(cls, run_id: str) -> None:
@@ -112,10 +199,10 @@ class DockerSessionBackend(BaseSandboxBackend):
             # best-effort, so even a failed or cancelled removal is non-fatal.
             logger.warning(f"[DockerSession] Failed to remove sandbox container: {exc}")
         try:
-            session.temp_dir.cleanup()
+            _cleanup_staging_dir(session.temp_dir, session.staging_path)
         except BaseException as exc:
-            # Staging cleanup is cosmetic (tmpfs/OS-tmp); never let it mask
-            # the caller's own exception path.
+            # Staging cleanup is cosmetic; never let it mask the caller's own
+            # exception path.
             logger.warning(f"[DockerSession] Failed to clean staging dir: {exc}")
 
     def _build_command(self, language: str, script_path: str) -> list[str]:
@@ -134,20 +221,25 @@ class DockerSessionBackend(BaseSandboxBackend):
         venv_path: Path,
         writable_path: str | None,
     ) -> dict:
-        """Assemble ``containers.run`` kwargs: mounts, env, resource limits, isolation."""
+        """Assemble ``containers.run`` kwargs: mounts, env, resource limits, isolation.
+
+        Every bind-mount source goes through ``_host_path``: the host daemon
+        cannot see this container's private filesystem, so /data/agents paths
+        must be rewritten to their daemon-visible host path (DooD).
+        """
         volumes = {
-            str(staging_path / "workspace"): {"bind": "/workspace", "mode": "rw"},
-            str(staging_path / "memory"): {"bind": "/memory", "mode": "rw"},
-            str(staging_path / "skills"): {"bind": "/skills", "mode": "rw"},
-            str(venv_path): {"bind": SANDBOX_VENV_PATH, "mode": "ro"},
+            self._host_path(str(staging_path / "workspace")): {"bind": "/workspace", "mode": "rw"},
+            self._host_path(str(staging_path / "memory")): {"bind": "/memory", "mode": "rw"},
+            self._host_path(str(staging_path / "skills")): {"bind": "/skills", "mode": "rw"},
+            self._host_path(str(venv_path)): {"bind": SANDBOX_VENV_PATH, "mode": "ro"},
         }
         for root_file in ("focus.md", "soul.md", "HEARTBEAT.md"):
             source = staging_path / root_file
             if source.exists():
-                volumes[str(source)] = {"bind": f"/{root_file}", "mode": "rw"}
+                volumes[self._host_path(str(source))] = {"bind": f"/{root_file}", "mode": "rw"}
         uv_cache = Path("/data/agents/.uv-cache")
         if uv_cache.exists():
-            volumes[str(uv_cache)] = {"bind": "/uv-cache", "mode": "ro"}
+            volumes[self._host_path(str(uv_cache))] = {"bind": "/uv-cache", "mode": "ro"}
 
         env = {
             "HOME": "/workspace",
@@ -220,8 +312,16 @@ class DockerSessionBackend(BaseSandboxBackend):
         workspace_mode: str,
         publish_paths: list[str] | None,
     ) -> _PersistentDockerSession:
-        temp_dir = tempfile.TemporaryDirectory(prefix=f"clawith-docker-{run_id[:8]}-")
-        staging_path = Path(temp_dir.name)
+        staging_base = _staging_parent()
+        if staging_base is not None:
+            # Under /data/agents (shared bind mount) so the host daemon can
+            # resolve the mount sources; see _detect_host_agent_data_root.
+            staging_path = staging_base / f"{run_id[:8]}-{uuid.uuid4().hex[:8]}"
+            staging_path.mkdir(mode=0o700)
+            temp_dir = None
+        else:
+            temp_dir = tempfile.TemporaryDirectory(prefix=f"clawith-docker-{run_id[:8]}-")
+            staging_path = Path(temp_dir.name)
         clone_workspace_to_staging(work_path, staging_path)
         (staging_path / "workspace" / ".tmp" / "pip-cache").mkdir(
             parents=True,
@@ -250,7 +350,7 @@ class DockerSessionBackend(BaseSandboxBackend):
                 ),
             )
         except Exception as exc:
-            temp_dir.cleanup()
+            _cleanup_staging_dir(temp_dir, staging_path)
             raise RuntimeError(f"Failed to start sandbox container: {type(exc).__name__}: {str(exc)[:300]}") from exc
 
         for _ in range(int(_SESSION_START_TIMEOUT_SECONDS * 10)):
@@ -263,11 +363,11 @@ class DockerSessionBackend(BaseSandboxBackend):
                 break
         else:
             await asyncio.to_thread(_remove_container_force, container)
-            temp_dir.cleanup()
+            _cleanup_staging_dir(temp_dir, staging_path)
             raise RuntimeError("Sandbox container failed to reach running state")
         if getattr(container, "status", None) != "running":
             await asyncio.to_thread(_remove_container_force, container)
-            temp_dir.cleanup()
+            _cleanup_staging_dir(temp_dir, staging_path)
             raise RuntimeError(
                 f"Sandbox container exited during startup (status={getattr(container, 'status', 'gone')})"
             )

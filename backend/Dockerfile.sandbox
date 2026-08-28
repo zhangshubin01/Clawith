@@ -14,6 +14,12 @@ RUN apt-get update \
         nodejs git ca-certificates curl unzip zip jq \
     && rm -rf /var/lib/apt/lists/*
 
+# 沙箱进程以 uid 1000 运行（staging 属主对齐，防 root 污染宿主文件）。
+# base 镜像 /etc/passwd 无该条目 → whoami/id -un 会报 "cannot find name"
+# 且部分脚本据此判断环境。直接补 passwd/group 条目（slim 镜像可能无 useradd）。
+RUN echo 'sandbox:x:1000:1000::/workspace:/bin/bash' >> /etc/passwd \
+    && echo 'sandbox:x:1000:' >> /etc/group
+
 # venv 以只读卷挂载于该路径（SANDBOX_VENV_PATH，
 # 见 backend/app/services/sandbox/local/docker_backend.py）。
 # 运行时环境变量由后端注入，此处仅兜底 PATH。
