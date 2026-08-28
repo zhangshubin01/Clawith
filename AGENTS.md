@@ -75,7 +75,25 @@ Each behavior-driving fact has one authoritative owner. Other layers may submit 
 - Keep source facts, test evidence, CI evidence, deployment evidence, and
   live-system evidence clearly separated.
 
-## 4. Type Checking
+## 4. Code Minimalism (Ponytail)
+
+Before writing code, stop at the first rung of the ladder that holds:
+
+1. **Does this need to exist at all?** Speculative need = skip it, say so in one line. (YAGNI)
+2. **Already in this codebase?** A helper, util, type, or pattern that already lives here → reuse it.
+3. **Stdlib does it?** Use it.
+4. **Native platform feature covers it?** `<input type="date">` over a picker lib, CSS over JS, DB constraint over app code.
+5. **Already-installed dependency solves it?** Use it. Never add a new one for what a few lines can do.
+6. **Can it be one line?** One line.
+7. **Only then:** the minimum code that works.
+
+The ladder runs *after* you understand the problem, not instead of it: read the code the change touches and trace the real flow before picking a rung. Bug fixes target the root cause, not the reported symptom.
+
+Never simplify away: input validation at trust boundaries, error handling that prevents data loss, security measures, accessibility basics, or anything explicitly requested. Non-trivial logic (a branch, a loop, a parser, a money/security path) leaves ONE runnable check behind. Deliberate simplifications that cut a real corner with a known ceiling get a `ponytail:` comment naming the ceiling and upgrade path.
+
+Full ruleset, intensity levels (lite/full/ultra), and companion skills (review, audit, debt, gain, help) live in the `ponytail*` skills under `.agents/skills/` (local agent config; not committed — the ladder above is the durable project rule).
+
+## 5. Type Checking
 
 Everything compiles under `strict: true` with `noImplicitAny`; every remaining `any` explains why narrowing is infeasible.
 
@@ -87,14 +105,14 @@ Every new or changed automated rule must include positive and negative coverage:
 valid cases pass, and representative invalid cases fail for the intended
 reason.
 
-## 5. Quick Command Reference
+## 6. Quick Command Reference
 
 Dev and test commands live in sub-project instruction files:
 
 - Backend: `backend/AGENTS.md` (Server start, Alembic migrations, Pytest, Ruff)
 - Frontend: `frontend/AGENTS.md` (Vite dev server, type-check, lint, build)
 
-## 6. Failure Diagnosis and Handling
+## 7. Failure Diagnosis and Handling
 
 When a command fails:
 
@@ -115,7 +133,7 @@ Do not:
 - Modify product code to accommodate the current machine before evidence shows that the environment is the failing layer and that a product-level portability change is required.
 - Dismiss a test failure as an environment problem before collecting environment evidence and ruling out a product-code regression.
 
-## 7. Verification
+## 8. Verification
 
 After code changes, verification scope is determined by the affected contracts and consumers, not by the number of modified files. Cross-layer changes must follow the real execution path and update and verify every affected layer; local changes require only local evidence.
 
