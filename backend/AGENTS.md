@@ -60,6 +60,24 @@ Read the nearest nested `AGENTS.md` before modifying a specialized subtree.
 Detailed module structure belongs to that subtree's instruction or owning
 architecture document, not this file.
 
+### Sandbox backends (`app/services/sandbox/`)
+
+`execute_code` 的执行后端由 `SandboxConfig.type`（全局 `SANDBOX_TYPE` / per-agent
+`sandbox_type`）选择，注册表在 `sandbox/registry.py`。所有权与权威契约：
+
+- **`local/subprocess_backend.py`**：bwrap 子进程后端（当前生产默认，过渡态）。
+- **`local/docker_backend.py`**：`DockerSessionBackend` — execute_code **终态**
+  （每 Run 长驻沙箱容器 + `docker exec`；ADR-0009）。`SandboxType.DOCKER` 指向它。
+- **`local/shared.py`**：两后端共享的行为权威 —— staging 克隆、网关发布
+  （`verify_and_merge_outputs`）、host 侧 pip 代理、venv 生命周期。改共享行为必须
+  两个后端一起验证。
+- 会话生命周期：Run 结束由 `agent_runtime/command_worker.py` 调
+  `close_subprocess_sandbox_run` + `close_docker_sandbox_run`（各为 no-op）；
+  超时语义 = kill 容器/进程 + 会话重置，exit 124。
+- 沙箱镜像 `clawith-code-sandbox` 由 `backend/Dockerfile.sandbox` 构建（compose
+  `code-sandbox` 服务），**必须与后端镜像同源 base**（python:3.12-slim），否则
+  per-agent venv symlink/glibc 兼容性破坏。
+
 ## Async lifecycle
 
 Represent one asynchronous operation with one lifecycle controller or

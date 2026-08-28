@@ -41,6 +41,7 @@ from app.services.agent_runtime.tool_execution import (
     SUPERSEDED_RESUME_ERROR_CODE,
     ToolExecutionReconciliationPending,
 )
+from app.services.sandbox.local.docker_backend import close_docker_sandbox_run
 from app.services.sandbox.local.subprocess_backend import close_subprocess_sandbox_run
 from app.services.storage import get_storage_backend
 from app.services.workspace_reconciliation import WorkspaceReconciliationService
@@ -1021,7 +1022,10 @@ class RuntimeCommandWorker:
             )
         finally:
             sandbox_run_scope_id.reset(sandbox_run_token)
+            # Only the configured backend type holds a session for this run;
+            # both close calls are no-ops for the inactive backend.
             await close_subprocess_sandbox_run(str(run.run_id))
+            await close_docker_sandbox_run(str(run.run_id))
 
         observed = await self._checkpoint_reader.read_for_command(
             connection=connection,

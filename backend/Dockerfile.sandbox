@@ -1,0 +1,20 @@
+# clawith-code-sandbox — execute_code 终态沙箱镜像（DockerSessionBackend）。
+# 与后端同源 base（python:3.12-slim，daocloud 镜像），保证宿主 uv 创建的
+# per-agent venv（symlink → /usr/local/bin/python3.12）与 glibc ABI 在容器内可用。
+# 部署时以 digest 钉版本（scripts/deploy.sh 构建并打 IMAGE_TAG 之外由
+# SANDBOX_IMAGE 指定 tag，默认 clawith-code-sandbox:latest）。
+#
+# CI（drone）路径注意：本文件不参与 drone 的 backend 镜像流水线，
+# 构建机上需另行 docker build + docker load（或 save/scp/load）该镜像，
+# 否则部署机上 `docker compose build code-sandbox` 会因无网络缓存而重编。
+FROM docker.m.daocloud.io/library/python:3.12-slim
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        nodejs git ca-certificates curl unzip zip jq \
+    && rm -rf /var/lib/apt/lists/*
+
+# venv 以只读卷挂载于该路径（SANDBOX_VENV_PATH，
+# 见 backend/app/services/sandbox/local/docker_backend.py）。
+# 运行时环境变量由后端注入，此处仅兜底 PATH。
+ENV PATH=/opt/clawith/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin

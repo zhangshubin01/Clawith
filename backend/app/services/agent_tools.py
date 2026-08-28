@@ -12664,7 +12664,7 @@ async def _execute_code_outcome(
             )
 
         backend = get_sandbox_backend(sandbox_config)
-        if sandbox_config.workspace_mode == "isolated_output" and getattr(backend, "name", None) != "subprocess":
+        if sandbox_config.workspace_mode == "isolated_output" and getattr(backend, "name", None) not in ("subprocess", "docker"):
             return _typed_failure(
                 "The configured sandbox backend cannot enforce isolated Session output.",
                 "sandbox_workspace_mode_unsupported",

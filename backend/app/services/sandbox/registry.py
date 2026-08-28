@@ -63,7 +63,7 @@ def get_registered_backends() -> dict[SandboxType, Type[SandboxBackend]]:
 def _register_builtin_backends() -> None:
     """Register all built-in sandbox backends."""
     from app.services.sandbox.local.subprocess_backend import SubprocessBackend
-    from app.services.sandbox.local.docker_backend import DockerBackend
+    from app.services.sandbox.local.docker_backend import DockerSessionBackend
     from app.services.sandbox.api.e2b_backend import E2bBackend
     from app.services.sandbox.api.judge0_backend import Judge0Backend
     from app.services.sandbox.api.codesandbox_backend import CodeSandboxBackend
@@ -72,7 +72,7 @@ def _register_builtin_backends() -> None:
     from app.services.sandbox.local.android_build_backend import AndroidBuildBackend
 
     _BACKEND_REGISTRY[SandboxType.SUBPROCESS] = SubprocessBackend
-    _BACKEND_REGISTRY[SandboxType.DOCKER] = DockerBackend
+    _BACKEND_REGISTRY[SandboxType.DOCKER] = DockerSessionBackend
     _BACKEND_REGISTRY[SandboxType.E2B] = E2bBackend
     _BACKEND_REGISTRY[SandboxType.JUDGE0] = Judge0Backend
     _BACKEND_REGISTRY[SandboxType.CODEDANDBOX] = CodeSandboxBackend

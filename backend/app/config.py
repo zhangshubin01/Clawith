@@ -292,6 +292,7 @@ class Settings(BaseSettings):
     SANDBOX_CPU_LIMIT: str = "0.5"
     SANDBOX_MEMORY_LIMIT: str = "256m"
     SANDBOX_ALLOW_NETWORK: bool = False
+    SANDBOX_IMAGE: str = "clawith-code-sandbox:latest"
     SANDBOX_ALLOW_UNSAFE_FALLBACK_WHEN_BWRAP_MISSING: bool = _default_allow_unsafe_bwrap_fallback()
     SANDBOX_DEFAULT_TIMEOUT: int = CODE_EXECUTION_DEFAULT_TIMEOUT_SECONDS
     SANDBOX_MAX_TIMEOUT: int = CODE_EXECUTION_MAX_TIMEOUT_SECONDS
@@ -358,6 +359,7 @@ def get_sandbox_config() -> SandboxConfig:
         cpu_limit=settings.SANDBOX_CPU_LIMIT,
         memory_limit=settings.SANDBOX_MEMORY_LIMIT,
         allow_network=settings.SANDBOX_ALLOW_NETWORK,
+        sandbox_image=settings.SANDBOX_IMAGE,
         allow_unsafe_fallback_when_bwrap_missing=settings.SANDBOX_ALLOW_UNSAFE_FALLBACK_WHEN_BWRAP_MISSING,
         default_timeout=settings.SANDBOX_DEFAULT_TIMEOUT,
         max_timeout=settings.SANDBOX_MAX_TIMEOUT,

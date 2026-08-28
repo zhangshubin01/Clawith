@@ -155,6 +155,8 @@ if [ "$BUILD" = 1 ]; then
     export CLAWITH_PIP_TRUSTED_HOST="${CLAWITH_PIP_TRUSTED_HOST:-mirrors.aliyun.com}"
     echo "→ 构建 backend 镜像..."
     docker compose --env-file "$WORKTREE/.env" -p "$COMPOSE_PROJECT" -f docker-compose.yml build backend
+    echo "→ 构建 code-sandbox 沙箱镜像（execute_code docker 后端）..."
+    docker compose --env-file "$WORKTREE/.env" -p "$COMPOSE_PROJECT" -f docker-compose.yml build code-sandbox
 fi
 
 # ── 6) up ──────────────────────────────────────────────────
@@ -180,6 +182,45 @@ docker logs --tail 200 "${COMPOSE_PROJECT}-backend-1" 2>&1 | grep -q "Alembic mi
     && echo "✅ alembic 迁移成功" || echo "⚠️  未在日志中找到 alembic 成功标记（PROCESS_ROLE 非 bootstrap 时正常）"
 if [ "$WITH_FRONTEND" = 1 ]; then
     curl -s -o /dev/null -w "✅ frontend ${FRONTEND_PORT}=%{http_code}\n" -m 3 "http://localhost:${FRONTEND_PORT}"
+fi
+
+# ── 7.5) execute_code 冒烟：docker 沙箱后端 + code-sandbox 镜像 ──
+# 冒烟失败必须在第 8 步 pending-result.json 写入之前退出，deploy_guard
+# 注册表才会与真实部署状态一致（部署被记为失败而非成功）。
+# 脚本经 stdin 传入（docker exec -i + python -），不依赖容器内落盘。
+SMOKE_PY="$STATE_DIR/execute-code-smoke.py"
+cat > "$SMOKE_PY" <<'PY'
+import asyncio
+import json
+
+from app.services.sandbox.config import SandboxConfig, SandboxType
+from app.services.sandbox.registry import get_sandbox_backend
+
+
+async def main() -> None:
+    backend = get_sandbox_backend(SandboxConfig(type=SandboxType.DOCKER))
+    result = await backend.execute(
+        "print('clawith-sandbox-ok')",
+        "python",
+        timeout=30,
+        work_dir="/tmp/clawith-smoke",
+    )
+    print(json.dumps({"success": result.success, "exit_code": result.exit_code, "error": result.error}))
+    if not (result.success and "clawith-sandbox-ok" in result.stdout):
+        raise SystemExit(1)
+
+
+asyncio.run(main())
+PY
+if docker image inspect clawith-code-sandbox:latest >/dev/null 2>&1; then
+    if SMOKE_RESULT="$(docker exec -i "${COMPOSE_PROJECT}-backend-1" python - < "$SMOKE_PY" 2>&1)"; then
+        echo "✅ execute_code docker 沙箱冒烟通过: ${SMOKE_RESULT}"
+    else
+        echo "❌ execute_code docker 沙箱冒烟失败: ${SMOKE_RESULT}" >&2
+        exit 1
+    fi
+else
+    echo "⚠️  本地无 clawith-code-sandbox 镜像，跳过 execute_code 冒烟（构建机需 build+load 该镜像）"
 fi
 
 # ── 8) 结果标记：deploy_guard 在退出时读入注册表（ADR 0003）──

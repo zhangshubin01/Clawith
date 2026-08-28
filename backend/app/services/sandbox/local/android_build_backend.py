@@ -59,8 +59,8 @@ def _detect_host_agent_data_root() -> str:
 class AndroidBuildBackend(BaseSandboxBackend):
     """Android 项目编译沙箱后端。
 
-    与 DockerBackend 的关键差异：
-    - 使用定制镜像（而非官方 language 镜像）
+    与 DockerSessionBackend 的关键差异：
+    - 使用定制镜像（而非统一 code-sandbox 镜像）
     - 挂载项目源码 + 全局 JDK/SDK 缓存 + 项目独立 Gradle 缓存
     - 最长 30 分钟超时（适配 assembleRelease）
     """

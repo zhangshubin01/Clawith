@@ -1,4 +1,15 @@
 services:
+  # execute_code 终态沙箱镜像（构建产物，不常驻容器）：
+  # DockerSessionBackend 通过 docker.sock 在宿主机 daemon 上按需拉起容器。
+  # 必须与 backend 同源 base，见 backend/Dockerfile.sandbox。
+  code-sandbox:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.sandbox
+    image: clawith-code-sandbox:latest
+    command: ["true"]
+    profiles: ["build-only"]
+
   postgres:
     image: docker.m.daocloud.io/library/postgres:15-alpine
     restart: unless-stopped
@@ -70,6 +81,7 @@ services:
       AGENT_RUNTIME_V2_SOURCE_TYPES: ""
       SANDBOX_DEFAULT_TIMEOUT: ${SANDBOX_DEFAULT_TIMEOUT:-180}
       SANDBOX_MAX_TIMEOUT: ${SANDBOX_MAX_TIMEOUT:-300}
+      SANDBOX_IMAGE: ${SANDBOX_IMAGE:-clawith-code-sandbox:latest}
       CORS_ORIGINS: '["*"]'
       FEISHU_APP_ID: ${FEISHU_APP_ID:-}
       FEISHU_APP_SECRET: ${FEISHU_APP_SECRET:-}
