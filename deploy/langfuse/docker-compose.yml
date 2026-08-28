@@ -48,6 +48,7 @@ services:
       REDIS_HOST: ${REDIS_HOST:-redis}
       REDIS_PORT: ${REDIS_PORT:-6379}
       REDIS_AUTH: ${REDIS_AUTH:-myredissecret}
+      LANGFUSE_CODE_EVAL_DISPATCHER: ${LANGFUSE_CODE_EVAL_DISPATCHER:-insecure-local}
 
   langfuse-web:
     image: docker.langfuse.com/langfuse/langfuse:4
