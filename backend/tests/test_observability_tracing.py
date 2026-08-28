@@ -161,6 +161,47 @@ def test_observe_node_retry_control_flow_not_error(monkeypatch: pytest.MonkeyPat
     assert update["metadata"]["retry_pending"] is True
 
 
+def test_observe_tool_retryable_tool_node_error_not_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    span = _FakeSpan()
+    monkeypatch.setattr(tracing, "_get_client", lambda _tenant_id=None, _span=span: _FakeClient(span=_span))
+
+    # Safe-read tool retry control flow (matched by class name, no import):
+    # every instance is caught by the graph's TOOL_RETRY_POLICY, so it is a
+    # scheduled retry, not a tool failure.
+    class RetryableToolNodeError(RuntimeError):
+        pass
+
+    with pytest.raises(RetryableToolNodeError):
+        with tracing.observe_tool(tool_name="read_file", tool_call_id="call-1") as tool_handle:
+            assert tool_handle is not None
+            raise RetryableToolNodeError("safe read tool attempt is eligible for Runtime retry")
+
+    update = span.updates[-1]
+    assert "level" not in update  # stays DEFAULT, not ERROR
+    assert update["status_message"].startswith("RetryableToolNodeError")
+    assert update["metadata"]["retry_pending"] is True
+    assert update["metadata"]["retry_type"] == "RetryableToolNodeError"
+
+
+def test_observe_run_retryable_tool_node_error_not_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    span = _FakeSpan()
+    monkeypatch.setattr(tracing, "_get_client", lambda _tenant_id=None, _span=span: _FakeClient(span=_span))
+
+    class RetryableToolNodeError(RuntimeError):
+        pass
+
+    with pytest.raises(RetryableToolNodeError):
+        with tracing.observe_run(run_id="r-1", command_id="c-1", tenant_id="t-1") as run_handle:
+            assert run_handle is not None
+            raise RetryableToolNodeError("safe read tool attempt is eligible for Runtime retry")
+
+    update = span.updates[-1]
+    assert "level" not in update
+    assert update["status_message"].startswith("RetryableToolNodeError")
+    assert update["metadata"]["retry_pending"] is True
+    assert update["metadata"]["retry_type"] == "RetryableToolNodeError"
+
+
 def test_observe_run_sets_identity_for_nested_generation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

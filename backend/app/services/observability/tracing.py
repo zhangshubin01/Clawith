@@ -66,13 +66,15 @@ _UNSET = object()
 
 # Business control-flow exceptions that schedule a command retry rather than
 # failing the run (e.g. ToolExecutionReconciliationPending for safe-read lease
-# conflicts, RetryableCommandError). They are expected noise in traces, not
-# failures. Matched by class name to keep this facade framework-agnostic.
+# conflicts, RetryableCommandError, RetryableToolNodeError for the safe-read
+# tool node retry policy). They are expected noise in traces, not failures.
+# Matched by class name to keep this facade framework-agnostic.
 _RETRY_CONTROL_FLOW_NAMES = frozenset(
     {
         "ToolExecutionReconciliationPending",
         "GroupWorkspaceReconciliationPending",
         "RetryableCommandError",
+        "RetryableToolNodeError",
     }
 )
 
