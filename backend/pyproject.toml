@@ -63,6 +63,7 @@ dev = [
     # ruff 0.16 changes the default rule set (E4/E7/E9/F -> all stable rules);
     # pin below 0.16 until the codebase opts into the new defaults explicitly.
     "ruff>=0.8.0,<0.16",
+    "pytest-timeout>=2.3.1",
 ]
 
 [tool.ruff]
@@ -71,6 +72,8 @@ line-length = 120
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+timeout = 120
+timeout_method = "thread"
 
 [build-system]
 requires = ["setuptools>=68.0", "wheel"]

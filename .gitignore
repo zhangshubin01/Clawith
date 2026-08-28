@@ -66,6 +66,7 @@ backups/
 .playwright-mcp/
 .opencode/
 .omo/
+.scratch/
 
 # Deploy lock + registry (ADR 0003): local coordination state, never committed
 .clawith-deploy/
