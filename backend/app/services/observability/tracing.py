@@ -146,6 +146,8 @@ def _build_client(*, public_key: str, secret_key: str) -> Any:
     kwargs: dict[str, str] = {}
     if settings.LANGFUSE_HOST:
         kwargs["base_url"] = settings.LANGFUSE_HOST
+    if settings.LANGFUSE_RELEASE:
+        kwargs["release"] = settings.LANGFUSE_RELEASE
     return Langfuse(public_key=public_key, secret_key=secret_key, **kwargs)
 
 

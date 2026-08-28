@@ -248,6 +248,9 @@ class Settings(BaseSettings):
     # When set, traces for a tenant with a configured key go to that tenant's
     # Langfuse project; unmatched tenants fall back to LANGFUSE_PUBLIC_KEY.
     LANGFUSE_TENANT_KEYS: str = ""
+    # Deployment version tag for traces (git commit hash, injected by
+    # scripts/deploy.sh at deploy time — zero manual maintenance). Empty = unset.
+    LANGFUSE_RELEASE: str = ""
     # Hard cap for file-upload endpoints (all of them buffer the whole body
     # into memory before writing). Without it a single authenticated request
     # can exhaust the process (see P0 fix plan D3). Override via env if a

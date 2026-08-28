@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+import sys
+from types import SimpleNamespace
 from typing import Any, Iterator
 
 import pytest
@@ -548,3 +550,61 @@ def test_map_usage_no_cache_keeps_input_as_is() -> None:
         provider="deepseek",
     )
     assert usage == {"input": 10, "output": 5, "total": 15}
+
+
+def test_build_client_passes_release_when_configured(monkeypatch: pytest.MonkeyPatch) -> None:
+    """LANGFUSE_RELEASE 非空时，client 构造 kwargs 必须含 release=部署 commit。"""
+    captured: dict[str, Any] = {}
+
+    class _FakeLangfuse:
+        def __init__(self, **kwargs: Any) -> None:
+            captured.update(kwargs)
+
+    monkeypatch.setitem(sys.modules, "langfuse", SimpleNamespace(Langfuse=_FakeLangfuse))
+    settings = tracing.get_settings()
+    monkeypatch.setattr(settings, "LANGFUSE_RELEASE", "72daf94c")
+    monkeypatch.setattr(settings, "LANGFUSE_HOST", "")
+
+    client = tracing._build_client(public_key="pk-1", secret_key="sk-1")
+
+    assert client is not None
+    assert captured["public_key"] == "pk-1"
+    assert captured["secret_key"] == "sk-1"
+    assert captured["release"] == "72daf94c"
+
+
+def test_build_client_omits_release_when_blank(monkeypatch: pytest.MonkeyPatch) -> None:
+    """LANGFUSE_RELEASE 为空（默认）时不传 release——不改变既有 client 构造行为。"""
+    captured: dict[str, Any] = {}
+
+    class _FakeLangfuse:
+        def __init__(self, **kwargs: Any) -> None:
+            captured.update(kwargs)
+
+    monkeypatch.setitem(sys.modules, "langfuse", SimpleNamespace(Langfuse=_FakeLangfuse))
+    settings = tracing.get_settings()
+    monkeypatch.setattr(settings, "LANGFUSE_RELEASE", "")
+    monkeypatch.setattr(settings, "LANGFUSE_HOST", "")
+
+    tracing._build_client(public_key="pk-1", secret_key="sk-1")
+
+    assert captured == {"public_key": "pk-1", "secret_key": "sk-1"}
+
+
+def test_disabled_observability_client_and_run_are_safe_noop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """observability disabled 时 _get_client 为 None，observe_run no-op 不抛错。"""
+    settings = tracing.get_settings()
+    monkeypatch.setattr(settings, "OBSERVABILITY_ENABLED", False)
+    monkeypatch.setattr(settings, "LANGFUSE_PUBLIC_KEY", "")
+    monkeypatch.setattr(settings, "LANGFUSE_SECRET_KEY", "")
+    monkeypatch.setattr(tracing, "_client", None)
+    monkeypatch.setattr(tracing, "_client_error", None)
+
+    assert tracing._get_client() is None
+    captured: list[str] = []
+    with tracing.observe_run(run_id="r-1", command_id="c-1", tenant_id="t-1") as run_handle:
+        assert run_handle is None
+        captured.append("ran")
+    assert captured == ["ran"]

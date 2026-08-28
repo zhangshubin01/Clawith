@@ -86,6 +86,14 @@ fi
 SHORT=$(git rev-parse --short "$COMMIT")
 WORKTREE="/tmp/clawith-deploy-${SHORT}"
 
+# trace release = 本次部署的完整 commit hash。复用上面 COMMIT/SHORT 的同一确定
+# 逻辑（默认 HEAD，--commit 覆盖），零人工维护。注入点必须放在 exec 重入链
+# （上面 deploy_guard lock 段）之后：第一次执行走到 lock 段就 exec 了，本行还没
+# 执行到；重入后脚本从头跑，参数由 ORIG_ARGS 恢复、COMMIT 重新解析，本行在
+# build/up 之前照常执行，export 生效——链上没有缺口。
+export LANGFUSE_RELEASE="$(git rev-parse "$COMMIT")"
+echo "→ LANGFUSE_RELEASE=${LANGFUSE_RELEASE}"
+
 # ── 1.5) tip 对比（ADR 0003）：展示将随本次部署上线的提交 ────
 set +e
 "$PY" "$REPO_ROOT/scripts/deploy_guard.py" check "$STATE_DIR" "$SHORT"
