@@ -712,6 +712,23 @@ def _is_group_workspace_mutation_call(
     )
 
 
+def _tool_outcome_summary(raw_result: object) -> dict[str, object] | str:
+    """Span output summary for one tool execution — single source for all tool spans.
+
+    ToolExecutionOutcome → {status, result_summary (≤2000 chars), error_code};
+    anything else → its str repr (≤2000 chars). The span closes before ledger
+    settlement, so this is a process-view snapshot of the execution result,
+    identical for the main and group/scoped executor paths.
+    """
+    if isinstance(raw_result, ToolExecutionOutcome):
+        return {
+            "status": raw_result.status,
+            "result_summary": (raw_result.result_summary or "")[:2000],
+            "error_code": raw_result.error_code,
+        }
+    return str(raw_result)[:2000]
+
+
 def _delete_autonomy_details(
     state: RuntimeGraphState,
     context: RuntimeContext,
@@ -2643,47 +2660,74 @@ class RuntimeToolStepService:
                 )
                 try:
                     if tool_name in GROUP_TOOL_NAMES:
-                        if tool_name in GROUP_WORKSPACE_MUTATION_TOOL_NAMES:
-                            raw_result = await self._group_tool_service.execute(
-                                state,
-                                context,
-                                agent,
-                                tool_name,
-                                arguments,
-                                operation_id=reservation.execution.id,
-                                lease_owner=lease_owner,
-                            )
-                        else:
-                            raw_result = await self._group_tool_service.execute(
-                                state,
-                                context,
-                                agent,
-                                tool_name,
-                                arguments,
-                            )
+                        # Group executor path — previously a tool-span blind spot.
+                        # Wrap in observe_tool exactly like the main path so group
+                        # tools get a span aligned to the ledger via
+                        # tool_execution_id. One `with` per branch: set_output must
+                        # run inside the span context while settlement stays outside
+                        # in the shared else block below — a single `with` around all
+                        # three branches would push set_output past the span close.
+                        with observe_tool(
+                            tool_name=tool_name,
+                            tool_call_id=call_id,
+                            tool_execution_id=reservation.execution.id,
+                            side_effect_classification=policy.side_effect_classification,
+                            retry_policy=policy.retry_policy,
+                        ) as tool_handle:
+                            if tool_name in GROUP_WORKSPACE_MUTATION_TOOL_NAMES:
+                                raw_result = await self._group_tool_service.execute(
+                                    state,
+                                    context,
+                                    agent,
+                                    tool_name,
+                                    arguments,
+                                    operation_id=reservation.execution.id,
+                                    lease_owner=lease_owner,
+                                )
+                            else:
+                                raw_result = await self._group_tool_service.execute(
+                                    state,
+                                    context,
+                                    agent,
+                                    tool_name,
+                                    arguments,
+                                )
+                            if tool_handle is not None:
+                                tool_handle.set_output(_tool_outcome_summary(raw_result))
                     elif _is_group_scoped_workspace_call(
                         state,
                         tool_name,
                         arguments,
                     ):
-                        if tool_name in SCOPED_GROUP_WORKSPACE_MUTATION_TOOL_NAMES:
-                            raw_result = await self._group_tool_service.execute_scoped_workspace_tool(
-                                state,
-                                context,
-                                agent,
-                                tool_name,
-                                arguments,
-                                operation_id=reservation.execution.id,
-                                lease_owner=lease_owner,
-                            )
-                        else:
-                            raw_result = await self._group_tool_service.execute_scoped_workspace_tool(
-                                state,
-                                context,
-                                agent,
-                                tool_name,
-                                arguments,
-                            )
+                        # Group-scoped workspace executor path — same span blind spot
+                        # as the GROUP_TOOL_NAMES branch; wrap identically.
+                        with observe_tool(
+                            tool_name=tool_name,
+                            tool_call_id=call_id,
+                            tool_execution_id=reservation.execution.id,
+                            side_effect_classification=policy.side_effect_classification,
+                            retry_policy=policy.retry_policy,
+                        ) as tool_handle:
+                            if tool_name in SCOPED_GROUP_WORKSPACE_MUTATION_TOOL_NAMES:
+                                raw_result = await self._group_tool_service.execute_scoped_workspace_tool(
+                                    state,
+                                    context,
+                                    agent,
+                                    tool_name,
+                                    arguments,
+                                    operation_id=reservation.execution.id,
+                                    lease_owner=lease_owner,
+                                )
+                            else:
+                                raw_result = await self._group_tool_service.execute_scoped_workspace_tool(
+                                    state,
+                                    context,
+                                    agent,
+                                    tool_name,
+                                    arguments,
+                                )
+                            if tool_handle is not None:
+                                tool_handle.set_output(_tool_outcome_summary(raw_result))
                     else:
                         on_output_callback = None
                         if tool_name in _STREAM_OUTPUT_TOOL_NAMES:
@@ -2770,16 +2814,7 @@ class RuntimeToolStepService:
                                             call_id,
                                         )
                             if tool_handle is not None:
-                                if isinstance(raw_result, ToolExecutionOutcome):
-                                    tool_handle.set_output(
-                                        {
-                                            "status": raw_result.status,
-                                            "result_summary": (raw_result.result_summary or "")[:2000],
-                                            "error_code": raw_result.error_code,
-                                        }
-                                    )
-                                else:
-                                    tool_handle.set_output(str(raw_result)[:2000])
+                                tool_handle.set_output(_tool_outcome_summary(raw_result))
                 except GroupWorkspaceReconciliationPending:
                     raise
                 except Exception as exc:

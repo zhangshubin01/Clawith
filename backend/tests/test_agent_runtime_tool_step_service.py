@@ -4,7 +4,8 @@ import asyncio
 import uuid
 from datetime import UTC, datetime
 from collections import deque
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
+from typing import Any, Iterator
 
 import pytest
 
@@ -12,6 +13,7 @@ from app.models.agent import Agent
 from app.models.agent_tool_execution import AgentToolExecution
 from app.services.builtin_tool_definitions import builtin_model_definition
 from app.services.agent_runtime import tool_step_service
+from app.services.observability import tracing
 from app.services.agent_runtime.a2a_runtime import A2ARuntimeToolResult
 from app.services.agent_runtime.node_executor import CancelSignal
 from app.services.agent_runtime.state import (
@@ -52,6 +54,31 @@ class _Begin:
 
     async def __aexit__(self, exc_type, exc, traceback):
         return False
+
+
+class _FakeTraceSpan:
+    def __init__(self) -> None:
+        self.updates: list[dict[str, Any]] = []
+
+    def update(self, **kwargs: Any) -> None:
+        self.updates.append(kwargs)
+
+
+@contextmanager
+def _fake_trace_span_cm(span: _FakeTraceSpan) -> Iterator[_FakeTraceSpan]:
+    yield span
+
+
+class _FakeTraceClient:
+    """Stands in for the Langfuse client so group-path spans can be asserted."""
+
+    def __init__(self) -> None:
+        self.span = _FakeTraceSpan()
+        self.starts: list[dict[str, Any]] = []
+
+    def start_as_current_observation(self, **kwargs: Any) -> Any:
+        self.starts.append(kwargs)
+        return _fake_trace_span_cm(self.span)
 
 
 class _DB:
@@ -2781,6 +2808,174 @@ async def test_ordinary_write_file_routes_group_scope_through_group_executor(
     }
     assert group_calls[0][5]["operation_id"] == execution.id
     assert group_calls[0][5]["lease_owner"]
+
+
+@pytest.mark.asyncio
+async def test_group_tool_execution_emits_observability_tool_span(
+    monkeypatch,
+) -> None:
+    tenant_id = uuid.uuid4()
+    agent = _agent(tenant_id)
+    call = {
+        "id": "call-group-write-span",
+        "type": "function",
+        "function": {
+            "name": "group_write_memory",
+            "arguments": '{"content":"remember"}',
+        },
+    }
+    state = _state(tenant_id, agent, (call,))
+    state["snapshots"] = RunInputSnapshots(
+        session_context={"version": 0},
+        session_context_version=0,
+        recent_session_messages=(),
+        related_run_summaries=(),
+        initial_input={"group_context": {"agent": {"agent_id": str(agent.id)}}},
+    )
+    execution = _execution(
+        tenant_id,
+        uuid.UUID(state["registry"].run_id),
+        "call-group-write-span",
+        "group_write_memory",
+    )
+
+    fake = _FakeTraceClient()
+    monkeypatch.setattr(tracing, "_get_client", lambda _tenant_id=None: fake)
+
+    async def reserve(db, **kwargs):
+        del db
+        return _reservation(execution)
+
+    async def mark(db, **kwargs):
+        del db, kwargs
+        execution.status = "succeeded"
+        execution.result_summary = '{"path":"memory.md"}'
+        return execution
+
+    async def generic_executor(*_args, **_kwargs):
+        raise AssertionError("group tools must not use the Agent workspace executor")
+
+    class _GroupToolService:
+        async def execute(self, *_args, **_kwargs):
+            return ToolExecutionOutcome(
+                status="succeeded",
+                result_summary='{"path":"memory.md"}',
+                result_ref=None,
+            )
+
+    monkeypatch.setattr(tool_step_service, "reserve_tool_execution", reserve)
+    monkeypatch.setattr(tool_step_service, "mark_tool_execution_succeeded", mark)
+    service = tool_step_service.RuntimeToolStepService(
+        session_factory=_session_factory(agent),
+        cancel_source=_CancelSource(None),
+        tool_provider=_tools,
+        tool_executor=generic_executor,
+        group_tool_service=_GroupToolService(),  # type: ignore[arg-type]
+    )
+
+    result = await service.execute_pending(state, _context(state), (call,))
+
+    assert result.error is None
+    assert [s["as_type"] for s in fake.starts] == ["tool"]
+    assert [s["name"] for s in fake.starts] == ["tool:group_write_memory"]
+    (update,) = fake.span.updates
+    metadata = update["metadata"]
+    assert metadata["tool_call_id"] == "call-group-write-span"
+    assert metadata["tool_execution_id"] == str(execution.id)
+    assert metadata["side_effect_classification"] == "write"
+    assert metadata["retry_policy"] == "conditional"
+    assert update["output"] == {
+        "status": "succeeded",
+        "result_summary": '{"path":"memory.md"}',
+        "error_code": None,
+    }
+
+
+@pytest.mark.asyncio
+async def test_group_scoped_workspace_tool_execution_emits_observability_tool_span(
+    monkeypatch,
+) -> None:
+    tenant_id = uuid.uuid4()
+    agent = _agent(tenant_id)
+    call = {
+        "id": "call-scoped-group-write-span",
+        "type": "function",
+        "function": {
+            "name": "write_file",
+            "arguments": '{"path":"workspace/report.md","content":"final"}',
+        },
+    }
+    state = _state(tenant_id, agent, (call,))
+    state["snapshots"] = RunInputSnapshots(
+        session_context={"version": 0},
+        session_context_version=0,
+        recent_session_messages=(),
+        related_run_summaries=(),
+        initial_input={
+            "group_id": str(uuid.uuid4()),
+            "target_participant_id": str(uuid.uuid4()),
+            "group_context": {"agent": {"agent_id": str(agent.id)}},
+        },
+    )
+    execution = _execution(
+        tenant_id,
+        uuid.UUID(state["registry"].run_id),
+        "call-scoped-group-write-span",
+        "write_file",
+    )
+    execution.effect = "write"
+    execution.retry_policy = "conditional"
+
+    fake = _FakeTraceClient()
+    monkeypatch.setattr(tracing, "_get_client", lambda _tenant_id=None: fake)
+
+    async def reserve(db, **kwargs):
+        del db
+        assert kwargs["arguments"]["workspace_scope"] == "group"
+        return _reservation(execution)
+
+    async def mark(db, **kwargs):
+        del db
+        execution.status = "succeeded"
+        execution.result_summary = kwargs["result_summary"]
+        return execution
+
+    async def generic_executor(*_args, **_kwargs):
+        raise AssertionError("Group-scoped file tools must not use Agent storage")
+
+    class _GroupToolService:
+        async def execute_scoped_workspace_tool(self, *_args, **_kwargs):
+            return ToolExecutionOutcome(
+                status="succeeded",
+                result_summary='{"path":"report.md"}',
+                result_ref=None,
+            )
+
+    monkeypatch.setattr(tool_step_service, "reserve_tool_execution", reserve)
+    monkeypatch.setattr(tool_step_service, "mark_tool_execution_succeeded", mark)
+    service = tool_step_service.RuntimeToolStepService(
+        session_factory=_session_factory(agent),
+        cancel_source=_CancelSource(None),
+        tool_provider=_tools,
+        tool_executor=generic_executor,
+        group_tool_service=_GroupToolService(),  # type: ignore[arg-type]
+    )
+
+    result = await service.execute_pending(state, _context(state), (call,))
+
+    assert result.error is None
+    assert [s["as_type"] for s in fake.starts] == ["tool"]
+    assert [s["name"] for s in fake.starts] == ["tool:write_file"]
+    (update,) = fake.span.updates
+    metadata = update["metadata"]
+    assert metadata["tool_call_id"] == "call-scoped-group-write-span"
+    assert metadata["tool_execution_id"] == str(execution.id)
+    assert metadata["side_effect_classification"] == "write"
+    assert update["output"] == {
+        "status": "succeeded",
+        "result_summary": '{"path":"report.md"}',
+        "error_code": None,
+    }
 
 
 @pytest.mark.asyncio
