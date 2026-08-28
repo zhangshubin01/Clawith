@@ -259,6 +259,15 @@ export default function SettingsTab(props: Props) {
                         { key: 'send_feishu_message', label: t('agent.settings.autonomy.sendFeishu'), desc: t('agent.settings.autonomy.sendFeishuDesc') },
                         { key: 'web_search', label: t('agent.settings.autonomy.webSearch'), desc: t('agent.settings.autonomy.webSearchDesc') },
                         { key: 'manage_tasks', label: t('agent.settings.autonomy.manageTasks'), desc: t('agent.settings.autonomy.manageTasksDesc') },
+                        { key: 'send_external_message', label: t('agent.settings.autonomy.sendExternalMessage'), desc: t('agent.settings.autonomy.sendExternalMessageDesc') },
+                        { key: 'modify_soul', label: t('agent.settings.autonomy.modifySoul'), desc: t('agent.settings.autonomy.modifySoulDesc') },
+                        { key: 'access_business_system_read', label: t('agent.settings.autonomy.accessBusinessRead'), desc: t('agent.settings.autonomy.accessBusinessReadDesc') },
+                        { key: 'access_business_system_write', label: t('agent.settings.autonomy.accessBusinessWrite'), desc: t('agent.settings.autonomy.accessBusinessWriteDesc') },
+                        { key: 'create_calendar_event', label: t('agent.settings.autonomy.createCalendarEvent'), desc: t('agent.settings.autonomy.createCalendarEventDesc') },
+                        { key: 'financial_operations', label: t('agent.settings.autonomy.financialOperations'), desc: t('agent.settings.autonomy.financialOperationsDesc') },
+                        { key: 'send_message_to_agent', label: t('agent.settings.autonomy.sendMessageToAgent'), desc: t('agent.settings.autonomy.sendMessageToAgentDesc') },
+                        { key: 'send_file_to_agent', label: t('agent.settings.autonomy.sendFileToAgent'), desc: t('agent.settings.autonomy.sendFileToAgentDesc') },
+                        { key: 'execute_code', label: t('agent.settings.autonomy.executeCode'), desc: t('agent.settings.autonomy.executeCodeDesc') },
                     ].map((action) => {
                         const currentLevel = (agent?.autonomy_policy as any)?.[action.key] || 'L1';
                         return (

@@ -62,7 +62,10 @@ class AutonomyService:
             }
         """
         policy = agent.autonomy_policy or {}
-        level = policy.get(action_type, "L2")  # Default to L2
+        # Missing keys fall back to L1 — matches the platform default
+        # (DEFAULT_AUTONOMY_POLICY in app.models.agent) and the Settings UI
+        # display fallback. L1 = auto-execute + log.
+        level = policy.get(action_type, "L1")
         runtime_identity = self._runtime_approval_identity(action_type, details)
 
         if runtime_identity is not None:

@@ -15,6 +15,30 @@ from app.database import Base
 # (see: https://github.com/dataelement/Clawith/issues/238).
 DEFAULT_CONTEXT_WINDOW_SIZE = 100
 
+# Default autonomy policy for newly created agents: every action defaults to
+# L1 (auto-execute + log). This is the platform-wide default per product
+# decision (2026-08-28): all agents created by default run with full L1
+# autonomy; the runtime fallback in autonomy_service.check_and_enforce is kept
+# in sync (missing keys also resolve to L1).
+# Key set must cover every action in _TOOL_AUTONOMY_MAP / tool_step_service.
+DEFAULT_AUTONOMY_POLICY: dict[str, str] = {
+    "read_files": "L1",
+    "write_workspace_files": "L1",
+    "delete_files": "L1",
+    "send_feishu_message": "L1",
+    "send_external_message": "L1",
+    "modify_soul": "L1",
+    "access_business_system_read": "L1",
+    "access_business_system_write": "L1",
+    "create_calendar_event": "L1",
+    "financial_operations": "L1",
+    "web_search": "L1",
+    "manage_tasks": "L1",
+    "send_message_to_agent": "L1",
+    "send_file_to_agent": "L1",
+    "execute_code": "L1",
+}
+
 
 class Agent(Base):
     """Digital employee (Agent) instance.
@@ -64,21 +88,11 @@ class Agent(Base):
     primary_model_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("llm_models.id"))
     fallback_model_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("llm_models.id"))
 
-    # Autonomy policy (L1/L2/L3)
+    # Autonomy policy (L1/L2/L3). Defaults to DEFAULT_AUTONOMY_POLICY (all L1);
+    # the lambda keeps each row from sharing one mutable dict instance.
     autonomy_policy: Mapped[dict] = mapped_column(
         JSON,
-        default={
-            "read_files": "L1",
-            "write_workspace_files": "L2",
-            "send_feishu_message": "L2",
-            "send_external_message": "L3",
-            "modify_soul": "L3",
-            "access_business_system_read": "L2",
-            "access_business_system_write": "L3",
-            "delete_files": "L3",
-            "create_calendar_event": "L2",
-            "financial_operations": "L3",
-        },
+        default=lambda: DEFAULT_AUTONOMY_POLICY.copy(),
     )
 
     # Token usage control
