@@ -34,6 +34,27 @@ run 成功收尾路径上的运行时强制检测（机制见 ADR 0005）：本 
 记忆固化（至多一轮），仍不写则放行并以 `memory_consolidation_skipped` 事件留痕。与纯提示词义务
 （D6 Memory Maintenance）是两层：提示词是语义兜底，门禁是运行时保证。
 
+**Memory Consolidation Run（记忆整合 run，已废止）**:
+原设计（ADR 0007）：独立 scheduled 整合 run 治理记忆膨胀。方向错误（新架构而非接通既有
+循环），已被 ADR-0008 废止，勿再引用其机制。
+
+**Memory Loop Connections（记忆循环接通，P0）**:
+把既有三层记忆循环接通的三个动作（机制见 ADR 0008）：B 门禁措辞扩展（run 内教训写入
+reflections）、G 心跳收敛（curiosity 待办条目 promote 进 reflections Next Cycle Seeds）、
+A 反思注入（reflections 节过滤 + user_profile 注入每 run 上下文，per-agent 开关
+`context_inject_reflections_{agent_id}` 灰度）。
+
+**Reflections Injection（反思注入）**:
+`build_agent_context` 对 `memory/reflections.md` 的节过滤注入：只取 Insights & Discoveries
+全节 + Hypotheses 的 ✅/❌ 结论行（上限 2000 chars），排除 Open Questions / 🔄 / Next Cycle
+Seeds（旧待办与心跳信号）；user_profile 全量注入。注入进 dynamic 段（uncached tail），
+每 model step ~1.6K token 纯线性成本，不破坏 static 前缀缓存。
+
+**Heartbeat Curiosity Convergence（心跳探索收敛）**:
+heartbeat Phase 3 的收敛步：读 `curiosity_journal.md` 的 Follow-up 与 Active Questions，
+值得跟进的 promote 进 reflections 的 Next Cycle Seeds（≤3），原条目行尾标 `→promoted`
+（不删除）。堵住「探索结果写入 curiosity 后无读取通道」的黑洞；curiosity 降为纯探索日志。
+
 **Dirty Connection（脏连接）**:
 SQLAlchemy 池中客户端与服务器端事务状态分裂的连接：服务器端仍在事务中（`idle in transaction`），
 客户端却认为连接干净（`_started=False`）。成因是取消落在 asyncpg 懒开始窗口（2.0 方言在首条语句
