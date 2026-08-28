@@ -9,7 +9,7 @@ promote 进 `memory/reflections.md` 的 Next Cycle Seeds（≤3 条），原条�
 
 **Blocked by:** None (can start immediately)
 
-**Status:** code-done（生产 24 agent 迁移待部署后执行）
+**Status:** done（部署 b222006b 后迁移完成：15/15 migrated、0 custom、0 conflict）
 
 - [x] 心跳模板 Phase 3 增加收敛步：读 curiosity 的 Follow-up 与 Active Questions，
   promote 到 Next Cycle Seeds（≤3），原条目行尾标 `→promoted YYYY-MM-DD`，不删除
@@ -18,9 +18,9 @@ promote 进 `memory/reflections.md` 的 Next Cycle Seeds（≤3 条），原条�
 - [x] 模板内容测试断言（Phase 3 含收敛步、Phase 2 含定位句）
 - [x] 迁移链：新模板双副本 byte 一致（SHA `ed3de530...`）；旧统一版 `a2ae09a8...` 加入
   LEGACY_HEARTBEAT_SHA256S；CLI/legacy 集合测试锁定
-- [ ] 对全部生产 agent 跑迁移脚本 dry-run：输出匹配/不匹配清单；匹配的 apply；
-  不匹配的逐个人工合并（抽样已确认至少 b1a73489 为模板版）——**待部署后执行**
-- [ ] 迁移后抽查：生产 agent 心跳文件 Phase 3 含收敛步；原有自定义内容未被覆盖——**待部署后执行**
+- [x] 生产迁移：dry-run 17 扫描 / 15 would_migrate / 0 custom → apply 15/15 migrated、
+  0 conflict；「不匹配人工合并」清单为空集；抽查 b1a73489 HEARTBEAT 含 converge 步
+- [x] 迁移后抽查：生产 agent 心跳文件 Phase 3 含收敛步；原有自定义内容未被覆盖
 - [x] 全量 pytest（3183 passed）+ `scripts/arch-guard.sh` 通过
 - [x] code-review 两轴 pass；修正 Spec-1（断言改 "Read the **Follow-up** entries"）、
   Spec-2（补 "finalized into reflections"）、Spec-4（"preferring entries not yet

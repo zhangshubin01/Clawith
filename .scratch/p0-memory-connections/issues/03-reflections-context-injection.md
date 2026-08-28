@@ -11,7 +11,7 @@ evidence, not facts）。开关为 per-agent 布尔键 `context_inject_reflectio
 **Blocked by:** 01（门禁扩展，保证 run 内也喂给 reflections）、02（心跳收敛，保证
 reflections 新鲜度）——均已 code-done/提交
 
-**Status:** code-done（灰度开启 + 实测待部署后执行）
+**Status:** done（部署 b222006b 后灰度开启 3 agent + 生产注入验证）
 
 - [x] 上下文组装服务增加 reflections 节过滤提取（`## ` 切分，取 Insights 全节 +
   Hypotheses 的 ✅/❌ 行，上限 2000 chars）与 user_profile 读取
@@ -21,8 +21,10 @@ reflections 新鲜度）——均已 code-done/提交
 - [x] 单元测试：开关 off 不注入；开关 on 注入且节过滤正确（Open Questions / 🔄 /
   Next Cycle Seeds 被排除）；截断生效；低信任声明存在；user_profile 注入；
   开关使能分支直测（enabled true/false、无行、畸形 value 四例）
-- [ ] 用现有 context profile 脚本实测开启 agent 的注入段 token 增量并记录——**待部署后执行**
-- [ ] 灰度：为 2-3 个生产 agent 写开关键并确认注入生效——**待部署后执行**
+- [x] 灰度：3 个 agent 开关键已写（b1a73489 / 27d55a64 / 475264c9，reflections 内容
+  最新最丰富）；容器内 probe 验证注入真实生效（Reflections Snapshot=Insights 2 条、
+  Open Questions 被排除、User Profile、低信任声明齐备）；实测注入段 ~0.7K token/step
+  （低于估算 1.6K，因节过滤裁掉待办与种子）
 - [x] 全量 pytest（3189 passed）+ `scripts/arch-guard.sh` 通过
 - [x] code-review 两轴 pass；修正 Spec-1（开关使能分支补直测）、Spec-2（user_profile
   硬上限注释）、Std-2（测试改名 off_switch_injects_nothing）；Spec-3/4、Std-1 评估为
