@@ -71,9 +71,11 @@ if [ "${CLAWITH_DEPLOY_LOCKED:-}" != "1" ]; then
     SCOPE="backend"
     if [ "$WITH_FRONTEND" = 1 ]; then SCOPE="backend+frontend"; fi
     # 用绝对路径重入（$0 可能是相对路径，cd 后已失效）。
+    # "${ORIG_ARGS[@]+...}" 包裹：bash 3.2 空数组 + set -u 下裸展开报
+    # unbound variable（02fbca7b 只在带参场景验证过，裸调用=默认部署路径会炸）。
     CLAWITH_DEPLOY_LOCKED=1 exec "$PY" "$REPO_ROOT/scripts/deploy_guard.py" lock \
         "$STATE_DIR" "$LOCK_TIMEOUT" "$(git rev-parse --short "$COMMIT")" "$SCOPE" -- \
-        "$REPO_ROOT/scripts/deploy.sh" "${ORIG_ARGS[@]}"
+        "$REPO_ROOT/scripts/deploy.sh" "${ORIG_ARGS[@]+"${ORIG_ARGS[@]}"}"
 fi
 
 # ── 0) 预检 ────────────────────────────────────────────────
