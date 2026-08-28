@@ -86,3 +86,16 @@ Dirty Connection 勿与断连（disconnect）混用——断连是物理连接�
 多会话下防止三类碰撞的协作纪律：A 同时部署（靠锁）、B 部署内容与分支 tip 错位（靠注册表 tip 对比 + `--strict` 阻塞）、C 共享 index 的提交窗口竞态（无法机制化，仅协议：提交前 `git diff --cached --stat` 复核、只用 pathspec 提交本任务文件）。
 
 _Avoid_: 锁≠注册表（一个串行化时机，一个提供信息）；Deploy Lock 勿与 Runtime 的 Lease/Fence 混用（前者在宿主部署层，后者在运行时工具执行层）。
+
+## Observability
+
+**Native Score（第一方评分）**:
+应用在 run 终态自己记录的业务事实评分——结局（succeeded/failed/cancelled）、重试次数、成本快照——挂在 run 根 trace 上；与 evaluator（CODE evaluator / judge）事后推断的评分相对：前者是第一方事实，后者是平台推断，口径分轨不混用。
+
+**Implicit Negative Signal（隐式负反馈信号）**:
+可判定的用户不满信号，窄口径三类：显式取消/打断、同目标（goal）重复发起、否定/纠正后重试。中性信号（多 run 共 thread 的继续对话）不算负反馈——宽口径会把继续对话污染成失败率虚高，并污染 judge 校准基准。
+
+**Release Tag（部署版本标签）**:
+trace 上标记本次部署的 git commit 版本，供看板、告警、实验按部署对比与指标突变归因。语义版本（如 v2.1）不适用：平台无发布节奏，commit hash 才是部署事实。
+
+_Avoid_: Native Score 勿与 evaluator score 混用（应用写事实、平台做推断，两者同源会失去交叉校验价值）；Implicit Negative Signal 勿把「继续下一步」当负反馈；Release Tag 勿用语义版本。
