@@ -109,6 +109,60 @@ def test_observe_run_creates_root_span_with_identity(
     assert "latency_ms" in update["metadata"]
 
 
+def test_observe_run_records_output_when_set(monkeypatch: pytest.MonkeyPatch) -> None:
+    span = _FakeSpan()
+    monkeypatch.setattr(tracing, "_get_client", lambda _tenant_id=None, _span=span: _FakeClient(span=_span))
+
+    with tracing.observe_run(run_id="r-1", command_id="c-1", tenant_id="t-1") as run_handle:
+        assert run_handle is not None
+        run_handle.set_output("final reply text")
+
+    update = span.updates[-1]
+    assert update["output"] == "final reply text"
+    assert update["metadata"]["run_id"] == "r-1"
+
+
+def test_observe_run_omits_output_when_never_set(monkeypatch: pytest.MonkeyPatch) -> None:
+    span = _FakeSpan()
+    monkeypatch.setattr(tracing, "_get_client", lambda _tenant_id=None, _span=span: _FakeClient(span=_span))
+
+    with tracing.observe_run(run_id="r-1", command_id="c-1", tenant_id="t-1"):
+        pass
+
+    update = span.updates[-1]
+    assert "output" not in update
+
+
+def test_observe_run_output_masks_secrets(monkeypatch: pytest.MonkeyPatch) -> None:
+    span = _FakeSpan()
+    monkeypatch.setattr(tracing, "_get_client", lambda _tenant_id=None, _span=span: _FakeClient(span=_span))
+
+    with tracing.observe_run(run_id="r-1", command_id="c-1", tenant_id="t-1") as run_handle:
+        assert run_handle is not None
+        run_handle.set_output("token is Bearer abc.def.ghi and the answer follows")
+
+    output = span.updates[-1]["output"]
+    assert isinstance(output, str)
+    assert "abc.def.ghi" not in output
+    assert "[REDACTED]" in output
+
+
+def test_observe_run_output_truncates_to_max_string_chars(monkeypatch: pytest.MonkeyPatch) -> None:
+    span = _FakeSpan()
+    monkeypatch.setattr(tracing, "_get_client", lambda _tenant_id=None, _span=span: _FakeClient(span=_span))
+
+    long_reply = "x" * 5000
+    with tracing.observe_run(run_id="r-1", command_id="c-1", tenant_id="t-1") as run_handle:
+        assert run_handle is not None
+        run_handle.set_output(long_reply)
+
+    output = span.updates[-1]["output"]
+    marker = "...<truncated 5000 chars>"
+    assert isinstance(output, str)
+    assert output == "x" * tracing._MAX_STRING_CHARS + marker
+    assert len(output) == tracing._MAX_STRING_CHARS + len(marker)
+
+
 def test_observe_run_records_error_and_reraises(monkeypatch: pytest.MonkeyPatch) -> None:
     span = _FakeSpan()
     monkeypatch.setattr(tracing, "_get_client", lambda _tenant_id=None, _span=span: _FakeClient(span=_span))

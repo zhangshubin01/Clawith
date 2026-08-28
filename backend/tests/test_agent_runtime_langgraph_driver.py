@@ -41,9 +41,7 @@ from app.services.observability import tracing
 
 
 _TINY_PNG_DATA_URL = (
-    "data:image/png;base64,"
-    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/"
-    "x8AAusB9Wl2ZQAAAABJRU5ErkJggg=="
+    "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl2ZQAAAABJRU5ErkJggg=="
 )
 
 
@@ -170,6 +168,32 @@ class WaitingExecutor:
                     "waiting_request": None,
                     "final_answer": str(resume_value),
                 }
+            }
+        return {"lifecycle": dict(state["lifecycle"])}
+
+
+class AssistantReplyCompletingExecutor:
+    """Completes without lifecycle.final_answer — only an assistant message.
+
+    Exercises the last-assistant-message fallback of the final-reply extraction
+    (completion paths that never set the canonical final_answer field).
+    """
+
+    async def execute(
+        self,
+        node: RuntimeNodeName,
+        state: RuntimeGraphState,
+        context: RuntimeContext,
+        *,
+        resume_value: JsonValue | None = None,
+    ) -> RuntimeStateUpdate:
+        del context, resume_value
+        if node == "compact":
+            return {"lifecycle": {"status": "running", "next_route": "model"}}
+        if node == "model":
+            return {
+                "lifecycle": {"status": "completed", "next_route": "terminal"},
+                "messages": [{"role": "assistant", "content": "plain assistant reply"}],
             }
         return {"lifecycle": dict(state["lifecycle"])}
 
@@ -465,12 +489,8 @@ async def test_two_direct_runs_keep_one_thread_running_summary() -> None:
     observed = await driver.read_latest(connection=_connection(), run=second)
 
     assert observed is not None
-    assert observed.state["thread_summary"]["task_goal_and_constraints"] == (
-        "preserve across Runs"
-    )
-    assert observed.state["summary_covered_through_message_id"] == (
-        "summary-boundary"
-    )
+    assert observed.state["thread_summary"]["task_goal_and_constraints"] == ("preserve across Runs")
+    assert observed.state["summary_covered_through_message_id"] == ("summary-boundary")
 
 
 @pytest.mark.asyncio
@@ -504,11 +524,14 @@ async def test_resume_validates_wait_contract_and_uses_its_own_metadata() -> Non
     assert completed.state["lifecycle"]["status"] == "completed"
     assert completed.metadata["clawith_run_id"] == str(run.run_id)
     assert completed.metadata["clawith_command_id"] == str(resume.id)
-    assert await driver.read_for_command(
-        connection=_connection(),
-        run=run,
-        command=resume,
-    ) == completed
+    assert (
+        await driver.read_for_command(
+            connection=_connection(),
+            run=run,
+            command=resume,
+        )
+        == completed
+    )
 
 
 @pytest.mark.asyncio
@@ -577,11 +600,14 @@ async def test_resume_rejects_a_mismatched_correlation_without_advancing() -> No
     unchanged = await driver.read_latest(connection=_connection(), run=run)
     assert unchanged is not None
     assert unchanged.metadata["clawith_command_id"] == str(start.id)
-    assert await driver.read_for_command(
-        connection=_connection(),
-        run=run,
-        command=resume,
-    ) is None
+    assert (
+        await driver.read_for_command(
+            connection=_connection(),
+            run=run,
+            command=resume,
+        )
+        is None
+    )
 
 
 @pytest.mark.asyncio
@@ -751,9 +777,7 @@ async def test_driver_labels_goal_when_run_has_no_durable_user_input(
     )
     driver = LangGraphRuntimeDriver(
         graph_registry=RuntimeGraphRegistry([graph]),
-        snapshot_factory=StaticRuntimeInputSnapshotFactory(
-            _snapshots(initial_input=initial_input)
-        ),
+        snapshot_factory=StaticRuntimeInputSnapshotFactory(_snapshots(initial_input=initial_input)),
         node_executor=cast(RuntimeNodeExecutor, CompletingExecutor()),
     )
 
@@ -901,3 +925,169 @@ async def test_start_checkpoint_metadata_omits_trace_id_when_observability_disab
     observed = await driver.read_latest(connection=_connection(), run=run)
     assert observed is not None
     assert "clawith_trace_id" not in observed.metadata
+
+
+@pytest.mark.asyncio
+async def test_driver_writes_final_reply_to_run_span_output(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """run 根 span 的 output 摘要 = 图执行完成后的 lifecycle.final_answer。"""
+    span = _ObservabilitySpan("0123456789abcdef0123456789abcdef")
+    monkeypatch.setattr(
+        tracing,
+        "_get_client",
+        lambda _tenant_id=None: _ObservabilityClient(span),
+    )
+
+    run = _run(uuid.uuid4())
+    driver = _driver(CompletingExecutor())
+    await driver.execute(
+        connection=_connection(),
+        run=run,
+        command=_command(run, "start"),
+        checkpoint=None,
+    )
+
+    update = span.updates[-1]
+    assert update["output"] == "done"
+
+
+@pytest.mark.asyncio
+async def test_driver_writes_no_final_reply_placeholder_for_waiting_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """waiting 执行没有最终回复——output 写明确占位而非留空。"""
+    span = _ObservabilitySpan("0123456789abcdef0123456789abcdef")
+    monkeypatch.setattr(
+        tracing,
+        "_get_client",
+        lambda _tenant_id=None: _ObservabilityClient(span),
+    )
+
+    run = _run(uuid.uuid4())
+    driver = _driver(WaitingExecutor())
+    await driver.execute(
+        connection=_connection(),
+        run=run,
+        command=_command(run, "start"),
+        checkpoint=None,
+    )
+
+    update = span.updates[-1]
+    assert update["output"] == "(no final reply)"
+
+
+@pytest.mark.asyncio
+async def test_driver_writes_final_reply_after_resume(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """resume 完成路径同样写 output——来自 Command(resume=...) 返回的终态。"""
+    span = _ObservabilitySpan("0123456789abcdef0123456789abcdef")
+    monkeypatch.setattr(
+        tracing,
+        "_get_client",
+        lambda _tenant_id=None: _ObservabilityClient(span),
+    )
+
+    run = _run(uuid.uuid4())
+    start = _command(run, "start")
+    driver = _driver(WaitingExecutor())
+    await driver.execute(connection=_connection(), run=run, command=start, checkpoint=None)
+    waiting = await driver.read_latest(connection=_connection(), run=run)
+    assert waiting is not None
+
+    resume = _command(
+        run,
+        "resume",
+        payload={
+            "resume_type": "user_input",
+            "correlation_id": "correlation-1",
+            "payload": {"confirmed": True},
+        },
+    )
+    await driver.execute(
+        connection=_connection(),
+        run=run,
+        command=resume,
+        checkpoint=waiting,
+    )
+
+    update = span.updates[-1]
+    # WaitingExecutor 的 wait 节点以 str(resume_value) 作为 final_answer；
+    # Command(resume=...) 传入的是完整 resume payload（驱动语义，非 payload.payload）。
+    assert update["output"] == (
+        "{'resume_type': 'user_input', 'correlation_id': 'correlation-1', 'payload': {'confirmed': True}}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_driver_omits_output_when_observability_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """observability disabled 时 handle 为 None——execute 照常完成不写不抛。"""
+    monkeypatch.setattr(tracing, "_get_client", lambda _tenant_id=None: None)
+
+    run = _run(uuid.uuid4())
+    driver = _driver(CompletingExecutor())
+    await driver.execute(
+        connection=_connection(),
+        run=run,
+        command=_command(run, "start"),
+        checkpoint=None,
+    )
+
+    observed = await driver.read_latest(connection=_connection(), run=run)
+    assert observed is not None
+    assert observed.state["lifecycle"]["status"] == "completed"
+
+
+@pytest.mark.asyncio
+async def test_driver_omits_output_when_execution_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """异常路径不写 output：失败 run 没有最终回复，只有 ERROR 结局。"""
+    span = _ObservabilitySpan("0123456789abcdef0123456789abcdef")
+    monkeypatch.setattr(
+        tracing,
+        "_get_client",
+        lambda _tenant_id=None: _ObservabilityClient(span),
+    )
+
+    run = _run(uuid.uuid4())
+    driver = _driver(CompletingExecutor())
+    with pytest.raises(CommandExecutionRejected):
+        await driver.execute(
+            connection=_connection(),
+            run=run,
+            command=_command(run, "resume"),
+            checkpoint=None,
+        )
+
+    update = span.updates[-1]
+    assert "output" not in update
+    assert update["level"] == "ERROR"
+
+
+@pytest.mark.asyncio
+async def test_driver_falls_back_to_last_assistant_message(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """completed 但无 final_answer 时回退到最后一条 assistant 消息文本。"""
+    span = _ObservabilitySpan("0123456789abcdef0123456789abcdef")
+    monkeypatch.setattr(
+        tracing,
+        "_get_client",
+        lambda _tenant_id=None: _ObservabilityClient(span),
+    )
+
+    run = _run(uuid.uuid4())
+    driver = _driver(AssistantReplyCompletingExecutor())
+    await driver.execute(
+        connection=_connection(),
+        run=run,
+        command=_command(run, "start"),
+        checkpoint=None,
+    )
+
+    update = span.updates[-1]
+    assert update["output"] == "plain assistant reply"

@@ -534,16 +534,21 @@ def _user_session_propagation(identity: dict[str, Any]) -> Any | None:
 class RunHandle:
     """Write-side of an in-flight run-level observation (root span). All writes are safe."""
 
-    __slots__ = ("_span", "_metadata", "_level", "_status")
+    __slots__ = ("_span", "_metadata", "_level", "_status", "_output")
 
     def __init__(self, span: Any) -> None:
         self._span = span
         self._metadata: dict[str, Any] = {}
         self._level: str | None = None
         self._status: str | None = None
+        self._output: Any = _UNSET
 
     def add_metadata(self, **values: Any) -> None:
         self._metadata.update({key: value for key, value in values.items() if value is not None})
+
+    def set_output(self, output: Any) -> None:
+        """Record the run's final reply summary (the llm-judge input window)."""
+        self._output = output
 
     def mark_error(self, exc: BaseException) -> None:
         self._level = "ERROR"
@@ -556,9 +561,14 @@ class RunHandle:
         self._status = f"{type(exc).__name__}: {str(exc)[:400]}"
 
     def finalize(self, started: float) -> None:
-        """Apply accumulated metadata/error/latency in one span update."""
+        """Apply accumulated metadata/output/error/latency in one span update."""
         self._metadata.setdefault("latency_ms", round((time.perf_counter() - started) * 1000, 2))
         update: dict[str, Any] = {"metadata": self._metadata}
+        if self._output is not _UNSET:
+            # Run output is user-visible model text; the same mask + 4000-char
+            # bound as every nested span keeps secrets out of traces and the
+            # judge payload bounded.
+            update["output"] = mask_text(self._output)
         if self._level is not None:
             update["level"] = self._level
             update["status_message"] = self._status

@@ -33,12 +33,14 @@ from app.services.agent_runtime.state import (
     RuntimeContext,
     RuntimeGraphState,
     RuntimeNodeExecutor,
+    runtime_messages_as_json,
 )
 from app.services.llm.multimodal_content import parse_multimodal_content
 from app.services.observability import current_trace_id, observe_run
 
 
 _TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled"})
+_NO_FINAL_REPLY = "(no final reply)"
 _WAITING_RESUME_TYPES = {
     "waiting_user": frozenset({"user_input", "tool_reconciliation"}),
     "waiting_agent": frozenset({"agent_result"}),
@@ -328,6 +330,40 @@ def observation_from_snapshot(snapshot: object) -> CheckpointObservation | None:
     )
 
 
+def _final_reply_text(final_state: object) -> str:
+    """Extract the run's final user-facing reply from the completed graph state.
+
+    The canonical source is ``lifecycle.final_answer`` — written by the model
+    node's finish intent and guaranteed non-empty for completed runs. The last
+    assistant message text is a fallback for completion paths that never set
+    it. Non-completed executions (waiting/failed/cancelled) have no final
+    reply: the placeholder keeps the run span's output window well-defined for
+    the llm-judge instead of leaving it empty.
+    """
+    try:
+        if not isinstance(final_state, Mapping):
+            return _NO_FINAL_REPLY
+        lifecycle = final_state.get("lifecycle")
+        if not isinstance(lifecycle, Mapping):
+            return _NO_FINAL_REPLY
+        if lifecycle.get("status") != "completed":
+            return _NO_FINAL_REPLY
+        answer = lifecycle.get("final_answer")
+        if isinstance(answer, str) and answer.strip():
+            return answer.strip()
+        messages = final_state.get("messages")
+        if isinstance(messages, list) and messages:
+            for message in reversed(runtime_messages_as_json(cast(RuntimeGraphState, final_state))):
+                if message.get("role") != "assistant":
+                    continue
+                content = message.get("content")
+                if isinstance(content, str) and content.strip():
+                    return content.strip()
+        return _NO_FINAL_REPLY
+    except Exception:  # noqa: BLE001 — tracing must never break the command path
+        return _NO_FINAL_REPLY
+
+
 class LangGraphRuntimeDriver:
     """Read checkpoints and advance them with the current compatible graph."""
 
@@ -431,13 +467,18 @@ class LangGraphRuntimeDriver:
             parent_run_id=run.parent_run_id,
             root_run_id=run.root_run_id,
             thread_id=run.thread_id,
-        ):
-            await self._execute_inner(
+        ) as run_handle:
+            final_state = await self._execute_inner(
                 connection=connection,
                 run=run,
                 command=command,
                 checkpoint=checkpoint,
             )
+            if run_handle is not None:
+                # Judge input window: the run root span's output is the final
+                # reply summary. Exception paths never reach this line — a
+                # failed run has no final reply to record.
+                run_handle.set_output(_final_reply_text(final_state))
 
     async def _execute_inner(
         self,
@@ -446,7 +487,8 @@ class LangGraphRuntimeDriver:
         run: RuntimeRunRecord,
         command: RuntimeCommandRecord,
         checkpoint: CheckpointObservation | None,
-    ) -> None:
+    ) -> RuntimeGraphState:
+        """Advance the thread and return the final graph state (for the run output summary)."""
         _require_scope(run, command)
         graph = self._graph_registry.resolve(run)
         config = runtime_command_config(
@@ -469,13 +511,15 @@ class LangGraphRuntimeDriver:
             and checkpoint.metadata.get("clawith_run_id") == str(run.run_id)
             and checkpoint.metadata.get("clawith_command_id") == str(command.id)
         ):
-            await graph.compiled.ainvoke(
-                None,
-                config,
-                context=context,
-                durability="exit",
+            return cast(
+                RuntimeGraphState,
+                await graph.compiled.ainvoke(
+                    None,
+                    config,
+                    context=context,
+                    durability="exit",
+                ),
             )
-            return
 
         if command.command_type == "start":
             if checkpoint is not None:
@@ -499,13 +543,15 @@ class LangGraphRuntimeDriver:
                     "pending_tool_calls": [],
                 },
             }
-            await graph.compiled.ainvoke(
-                initial_state,
-                config,
-                context=context,
-                durability="exit",
+            return cast(
+                RuntimeGraphState,
+                await graph.compiled.ainvoke(
+                    initial_state,
+                    config,
+                    context=context,
+                    durability="exit",
+                ),
             )
-            return
 
         if checkpoint is None:
             raise CommandExecutionRejected(
@@ -521,13 +567,15 @@ class LangGraphRuntimeDriver:
 
         if command.command_type == "resume":
             resume_value = _resume_value(checkpoint, command)
-            await graph.compiled.ainvoke(
-                Command(resume=resume_value),
-                config,
-                context=context,
-                durability="exit",
+            return cast(
+                RuntimeGraphState,
+                await graph.compiled.ainvoke(
+                    Command(resume=resume_value),
+                    config,
+                    context=context,
+                    durability="exit",
+                ),
             )
-            return
 
         if command.command_type == "cancel":
             raise CommandExecutionRejected(
