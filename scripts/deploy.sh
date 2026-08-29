@@ -190,6 +190,8 @@ fi
 # 冒烟失败必须在第 8 步 pending-result.json 写入之前退出，deploy_guard
 # 注册表才会与真实部署状态一致（部署被记为失败而非成功）。
 # 脚本经 stdin 传入（docker exec -i + python -），不依赖容器内落盘。
+# work_dir 必须落在 /data/agents 下：DooD 下 venv/staging 的 bind 源要能
+# 被宿主 daemon 解析（容器私有 /tmp 会静默挂成空目录），见 ADR-0009。
 SMOKE_PY="$STATE_DIR/execute-code-smoke.py"
 cat > "$SMOKE_PY" <<'PY'
 import asyncio
@@ -205,7 +207,7 @@ async def main() -> None:
         "print('clawith-sandbox-ok')",
         "python",
         timeout=30,
-        work_dir="/tmp/clawith-smoke",
+        work_dir="/data/agents/.sandbox-smoke/work",
     )
     print(json.dumps({"success": result.success, "exit_code": result.exit_code, "error": result.error}))
     if not (result.success and "clawith-sandbox-ok" in result.stdout):
