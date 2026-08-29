@@ -84,7 +84,8 @@ async def test_memory_maintenance_policy_follows_read_write_capabilities():
     assert "Memory Maintenance" in with_write
     # 义务要点（语义断言，非逐字文案）
     assert "memory/memory.md" in with_write
-    assert "memory/MEMORY_INDEX.md" in with_write
+    # D（2026-08-29 废弃 INDEX）：义务句已移除——平台代码零消费方。
+    assert "memory/MEMORY_INDEX.md" not in with_write
     assert "reading the file first" in with_write
     assert "Never blind-overwrite" in with_write
     assert "do not write anything" in with_write
@@ -317,8 +318,8 @@ async def test_memory_maintenance_routes_this_run_lessons_to_reflections():
     assert "do not create new" in with_write
     # 跳过句覆盖两条分支：既无耐用信息也无教训才不写。
     assert "If neither durable information nor lessons" in with_write
-    # INDEX 义务句保留（废弃 INDEX 是 P2 独立决策）。
-    assert "memory/MEMORY_INDEX.md" in with_write
+    # D（2026-08-29 废弃 INDEX）：义务句已移除——平台代码零消费方。
+    assert "memory/MEMORY_INDEX.md" not in with_write
 
 
 def test_extract_reflections_injection_keeps_only_conclusions():

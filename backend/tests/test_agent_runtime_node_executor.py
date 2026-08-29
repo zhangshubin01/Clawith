@@ -2032,8 +2032,8 @@ def test_memory_consolidation_prompt_routes_to_reflections() -> None:
     assert "append them to the matching section" in prompt
     assert "defaulting to Insights & Discoveries" in prompt
     assert "do not create new sections" in prompt
-    # INDEX 义务句保留（废弃 INDEX 是 P2 独立决策）。
-    assert "memory/MEMORY_INDEX.md" in prompt
+    # D（2026-08-29 废弃 INDEX）：义务句已移除——平台代码零消费方。
+    assert "memory/MEMORY_INDEX.md" not in prompt
     # 条件义务覆盖两条分支：既无耐用事实也无教训才放行。
     assert "neither durable facts nor lessons" in prompt
     # 契约缺口 1（2026-08-29 修复）：verdict 行格式必须锁定 `- ✅`/`- ❌` 前缀，

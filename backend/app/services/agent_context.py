@@ -459,8 +459,6 @@ reading the file first and merging the new information in place. Never blind-ove
   Discoveries; leave sections that do not fit untouched and do not create new
   sections.
 - Do not record temporary task progress or step-level state in Memory.
-- When a topic is added to or removed from `memory/memory.md`, keep the Topics
-  list in `memory/MEMORY_INDEX.md` in sync.
 - The current user's explicit instruction overrides Memory content and this
   maintenance policy.
 - A failed Memory write never blocks delivering the task's result.
