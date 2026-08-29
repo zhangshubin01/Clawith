@@ -60,7 +60,11 @@ MEMORY_CONSOLIDATION_PROMPT = (
     "memory/reflections.md: append them to the matching section — Open "
     "Questions, Hypotheses & Experiments, Insights & Discoveries, or Next "
     "Cycle Seeds — defaulting to Insights & Discoveries, leave sections that "
-    "do not fit untouched, and do not create new sections. If there is nothing "
+    "do not fit untouched, and do not create new sections. Record verified or "
+    "disproved hypotheses as verdict lines that start with `- ✅` (verified) "
+    "or `- ❌` (disproven), for example `- ✅ 已验证：结论` or "
+    "`- ❌ 已证伪：结论`, so they stay detectable by the reflections "
+    "injection filter. If there is nothing "
     "worth recording — neither durable facts nor lessons — skip this step and "
     "finish directly without writing anything."
 )

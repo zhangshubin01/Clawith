@@ -42,3 +42,18 @@ def test_agent_template_heartbeat_converges_curiosity_followups_into_seeds():
 def test_both_heartbeat_templates_are_identical():
     """app/templates 与 agent_template 必须一致，杜绝再分叉。"""
     assert AGENT_TEMPLATE_HB.read_bytes() == APP_TEMPLATE_HB.read_bytes()
+
+
+def test_heartbeat_convergence_is_unconditional_even_when_idle():
+    """收敛步必须无条件执行：08-28 生产观察——模型把收敛步读成
+    "Otherwise, update reflections" 的条件分支，无新内容时整步跳过，
+    存量 follow-up/Active Questions 永不 promote。"""
+    content = _read(AGENT_TEMPLATE_HB)
+
+    converge_pos = content.index("Converge your exploration log")
+    # 明确无条件标记
+    assert "always" in content[converge_pos : converge_pos + 400]
+    # HEARTBEAT_OK 必须在收敛步之后——禁止早退跳过收敛
+    assert content.index("HEARTBEAT_OK") > converge_pos
+    # 无条目值得 promote 时的显式处置路径（不默认丢弃，也不静默跳过）
+    assert "If no journal entry is worth promoting" in content

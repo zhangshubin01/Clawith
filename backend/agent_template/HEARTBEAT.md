@@ -37,14 +37,18 @@ Format for curiosity_journal.md entries:
 
 ## Phase 3: Reflect & Wrap Up
 
-- If nothing needed attention and no exploration was warranted: reply with `HEARTBEAT_OK`.
-- Otherwise, update `memory/reflections.md`:
-  - Move resolved open questions into Insights & Discoveries (with sources).
-  - Record new hypotheses generated this cycle (even unverified ones).
-  - Log verified findings with evidence and source URLs.
-- Before ending, converge your exploration log and refresh the "Next Cycle Seeds" section of `memory/reflections.md`:
-  - Read the **Follow-up** entries and **Active Questions** in `memory/curiosity_journal.md`, preferring entries not yet marked `→promoted`.
-  - Promote the ones genuinely worth pursuing (at most 3) into Next Cycle Seeds.
-  - Mark each promoted journal entry with `→promoted YYYY-MM-DD` at the end of its line; do not delete journal entries.
-  - Then list: what to explore next if time allows, which hypothesis is most worth testing next, and any user tasks that need proactive follow-up.
-- Then briefly summarize what you explored and why.
+1. **Update `memory/reflections.md`** if this cycle produced anything worth recording:
+   - Move resolved open questions into Insights & Discoveries (with sources).
+   - Record new hypotheses generated this cycle (even unverified ones).
+   - Log verified findings with evidence and source URLs.
+   If nothing new surfaced, skip this update and continue to step 2.
+
+2. **Converge your exploration log — always, even when nothing new surfaced.**
+   Before ending the heartbeat, refresh the "Next Cycle Seeds" section of `memory/reflections.md`:
+   - Read the **Follow-up** entries and **Active Questions** in `memory/curiosity_journal.md`, preferring entries not yet marked `→promoted`.
+   - Promote the ones genuinely worth pursuing (at most 3) into Next Cycle Seeds.
+   - Mark each promoted journal entry with `→promoted YYYY-MM-DD` at the end of its line; do not delete journal entries.
+   - If no journal entry is worth promoting, leave Next Cycle Seeds unchanged and say so in your summary.
+   - Then list: what to explore next if time allows, which hypothesis is most worth testing next, and any user tasks that need proactive follow-up.
+
+3. **Reply** with `HEARTBEAT_OK` if no exploration was warranted and nothing needed attention; otherwise briefly summarize what you explored and why.

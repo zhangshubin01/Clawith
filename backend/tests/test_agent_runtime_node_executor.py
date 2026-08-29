@@ -2036,3 +2036,9 @@ def test_memory_consolidation_prompt_routes_to_reflections() -> None:
     assert "memory/MEMORY_INDEX.md" in prompt
     # 条件义务覆盖两条分支：既无耐用事实也无教训才放行。
     assert "neither durable facts nor lessons" in prompt
+    # 契约缺口 1（2026-08-29 修复）：verdict 行格式必须锁定 `- ✅`/`- ❌` 前缀，
+    # 与反思注入过滤器（agent_context._extract_reflections_injection）的识别前缀一致。
+    assert "verdict lines that start with" in prompt
+    assert "`- ✅" in prompt
+    assert "`- ❌" in prompt
+    assert "reflections injection filter" in prompt

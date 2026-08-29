@@ -298,7 +298,7 @@ async def test_fallback_apply_does_not_cross_backend_cas_after_source_race():
 def test_cli_defaults_to_dry_run_and_requires_apply_flag():
     assert migration.LEGACY_HEARTBEAT_SHA256 == "377e8e367d3aaa13d3932335787340363a88105fabe9717f758d90480843a6cd"
     assert hashlib.sha256(migration._current_template_bytes()).hexdigest() == (
-        "ed3de530d1ae8b8fce0f59cbd2238d613f04fad48d2fae3d0dab46887ca029f6"
+        "30283e1a06bc659e737134c903990f28cbf946ef765f019c060acba93110fdd9"
     )
     assert migration.parse_args([]).apply is False
     assert migration.parse_args(["--apply"]).apply is True
