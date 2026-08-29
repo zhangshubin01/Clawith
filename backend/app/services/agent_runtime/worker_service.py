@@ -52,6 +52,7 @@ from app.services.agent_runtime.graph import (
 )
 from app.services.agent_runtime.heartbeat_completion import (
     HeartbeatRuntimeCompletionHandler,
+    HeartbeatSeedFocusHandler,
 )
 from app.services.agent_runtime.langgraph_driver import (
     LangGraphRuntimeDriver,
@@ -323,6 +324,7 @@ def build_runtime_worker_components(
             TaskRuntimeCompletionHandler(session_factory=session_factory),
             TriggerRuntimeCompletionHandler(session_factory=session_factory),
             HeartbeatRuntimeCompletionHandler(session_factory=session_factory),
+            HeartbeatSeedFocusHandler(session_factory=session_factory),
             OnboardingRuntimeCompletionHandler(session_factory=session_factory),
             A2ARuntimeCompletionHandler(session_factory=session_factory),
             SchedulingLaneCompletionHandler(session_factory=session_factory),

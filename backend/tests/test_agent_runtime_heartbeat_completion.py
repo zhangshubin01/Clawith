@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 from collections import deque
+from dataclasses import replace
 from datetime import UTC, datetime
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 import uuid
 
 import pytest
@@ -18,7 +21,10 @@ from app.services.agent_runtime.command_worker import (
 from app.services.agent_runtime.heartbeat_completion import (
     HeartbeatRuntimeCompletionError,
     HeartbeatRuntimeCompletionHandler,
+    HeartbeatSeedFocusHandler,
+    _extract_seed_lines,
 )
+from app.services.focus_service import slugify_focus_key
 from app.services.agent_runtime.state import (
     RunInputSnapshots,
     RunRegistrySnapshot,
@@ -311,3 +317,252 @@ async def test_failed_oneshot_notifies_the_triggering_user_exactly_once() -> Non
     )
     assert notification.title == "OKR Agent task failed"
     assert notification.body == "任务执行未完成（model_call_failed）"
+
+
+# ---------------------------------------------------------------------------
+# Seed → Focus projection (C channel, platform-deterministic write side)
+# ---------------------------------------------------------------------------
+
+
+def _seed_reflections(*seed_lines: str, include_section: bool = True) -> str:
+    parts = ["# Reflections Journal", "## Insights & Discoveries", "- 已验证的事实"]
+    if include_section:
+        parts.extend(
+            [
+                "## Next Cycle Seeds",
+                "_What to explore in your next heartbeat. Keep this section short and focused._",
+                "",
+                *seed_lines,
+            ]
+        )
+    parts.extend(["## Open Questions", "- 旧问题"])
+    return "\n".join(parts)
+
+
+def _focus_storage(content: str | None) -> SimpleNamespace:
+    storage = SimpleNamespace()
+    storage.exists = AsyncMock(return_value=content is not None)
+    storage.is_file = AsyncMock(return_value=content is not None)
+    if content is None:
+
+        async def read_text(*_args, **_kwargs):
+            raise OSError("reflections not found")
+
+        storage.read_text = read_text
+    else:
+        storage.read_text = AsyncMock(return_value=content)
+    return storage
+
+
+def test_extract_seed_lines_returns_entries_and_skips_helper_lines() -> None:
+    seeds = _extract_seed_lines(_seed_reflections("- 种子 A", "- 种子 B"))
+
+    assert seeds == ["种子 A", "种子 B"]
+
+
+def test_extract_seed_lines_missing_section_is_no_signal() -> None:
+    assert _extract_seed_lines(_seed_reflections(include_section=False)) is None
+    assert _extract_seed_lines("") is None
+    assert _extract_seed_lines("   ") is None
+
+
+def test_extract_seed_lines_empty_section_is_deliberate_clear() -> None:
+    content = "## Next Cycle Seeds\n_提示行_\n## Open Questions\n- 问题"
+
+    assert _extract_seed_lines(content) == []
+
+
+@pytest.mark.asyncio
+async def test_completed_heartbeat_projects_seeds_into_focus() -> None:
+    run, checkpoint, _ = _records(answer="HEARTBEAT OK")
+    upsert = AsyncMock(return_value={"key": "seed"})
+    complete = AsyncMock(return_value={"key": "stale"})
+    list_items = AsyncMock(
+        return_value=[
+            {"key": "stale_key", "source": "heartbeat", "status": "in_progress"},
+            {"key": "user_key", "source": "user", "status": "in_progress"},
+        ]
+    )
+    storage = _focus_storage(_seed_reflections("- 种子 A", "- 种子 B"))
+
+    with (
+        patch(
+            "app.services.agent_runtime.heartbeat_completion.get_storage_backend",
+            return_value=storage,
+        ),
+        patch(
+            "app.services.agent_runtime.heartbeat_completion.upsert_focus_item",
+            upsert,
+        ),
+        patch(
+            "app.services.agent_runtime.heartbeat_completion.complete_focus_item",
+            complete,
+        ),
+        patch(
+            "app.services.agent_runtime.heartbeat_completion.list_focus_items",
+            list_items,
+        ),
+    ):
+        handler = HeartbeatSeedFocusHandler(session_factory=_SessionFactory())  # type: ignore[arg-type]
+        await handler.handle(run=run, checkpoint=checkpoint)
+
+    assert upsert.await_count == 2
+    upserted = {call.kwargs["key"] for call in upsert.await_args_list}
+    assert upserted == {slugify_focus_key("种子 A"), slugify_focus_key("种子 B")}
+    for call in upsert.await_args_list:
+        assert call.args[0] == uuid.UUID(run.agent_id)
+        assert call.kwargs["source"] == "heartbeat"
+        assert call.kwargs["status"] == "in_progress"
+        assert call.kwargs["kind"] == "normal"
+        assert call.kwargs["description"] in {"种子 A", "种子 B"}
+    # 退役只打 heartbeat 源且已不在 seeds 里的项；user 源不受影响。
+    complete.assert_awaited_once_with(uuid.UUID(run.agent_id), key="stale_key")
+
+
+@pytest.mark.asyncio
+async def test_missing_seeds_section_projects_nothing() -> None:
+    run, checkpoint, _ = _records()
+    upsert = AsyncMock()
+    complete = AsyncMock()
+    list_items = AsyncMock()
+    storage = _focus_storage(_seed_reflections(include_section=False))
+
+    with (
+        patch(
+            "app.services.agent_runtime.heartbeat_completion.get_storage_backend",
+            return_value=storage,
+        ),
+        patch(
+            "app.services.agent_runtime.heartbeat_completion.upsert_focus_item",
+            upsert,
+        ),
+        patch(
+            "app.services.agent_runtime.heartbeat_completion.complete_focus_item",
+            complete,
+        ),
+        patch(
+            "app.services.agent_runtime.heartbeat_completion.list_focus_items",
+            list_items,
+        ),
+    ):
+        handler = HeartbeatSeedFocusHandler(session_factory=_SessionFactory())  # type: ignore[arg-type]
+        await handler.handle(run=run, checkpoint=checkpoint)
+
+    upsert.assert_not_awaited()
+    complete.assert_not_awaited()
+    list_items.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_unreadable_reflections_projects_nothing() -> None:
+    run, checkpoint, _ = _records()
+    upsert = AsyncMock()
+    complete = AsyncMock()
+    storage = _focus_storage(None)
+
+    with (
+        patch(
+            "app.services.agent_runtime.heartbeat_completion.get_storage_backend",
+            return_value=storage,
+        ),
+        patch(
+            "app.services.agent_runtime.heartbeat_completion.upsert_focus_item",
+            upsert,
+        ),
+        patch(
+            "app.services.agent_runtime.heartbeat_completion.complete_focus_item",
+            complete,
+        ),
+        patch(
+            "app.services.agent_runtime.heartbeat_completion.list_focus_items",
+            AsyncMock(),
+        ),
+    ):
+        handler = HeartbeatSeedFocusHandler(session_factory=_SessionFactory())  # type: ignore[arg-type]
+        await handler.handle(run=run, checkpoint=checkpoint)
+
+    upsert.assert_not_awaited()
+    complete.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_empty_seeds_section_retires_all_heartbeat_items() -> None:
+    run, checkpoint, _ = _records()
+    upsert = AsyncMock()
+    complete = AsyncMock(return_value={"key": "stale"})
+    list_items = AsyncMock(
+        return_value=[
+            {"key": "stale_a", "source": "heartbeat", "status": "in_progress"},
+            {"key": "stale_b", "source": "heartbeat", "status": "in_progress"},
+            {"key": "user_key", "source": "user", "status": "in_progress"},
+        ]
+    )
+    storage = _focus_storage(_seed_reflections())
+
+    with (
+        patch(
+            "app.services.agent_runtime.heartbeat_completion.get_storage_backend",
+            return_value=storage,
+        ),
+        patch(
+            "app.services.agent_runtime.heartbeat_completion.upsert_focus_item",
+            upsert,
+        ),
+        patch(
+            "app.services.agent_runtime.heartbeat_completion.complete_focus_item",
+            complete,
+        ),
+        patch(
+            "app.services.agent_runtime.heartbeat_completion.list_focus_items",
+            list_items,
+        ),
+    ):
+        handler = HeartbeatSeedFocusHandler(session_factory=_SessionFactory())  # type: ignore[arg-type]
+        await handler.handle(run=run, checkpoint=checkpoint)
+
+    upsert.assert_not_awaited()
+    assert complete.await_count == 2
+    completed = {call.kwargs["key"] for call in complete.await_args_list}
+    assert completed == {"stale_a", "stale_b"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("source_type", "status"),
+    [
+        ("chat", "completed"),
+        ("heartbeat", "failed"),
+        ("heartbeat", "cancelled"),
+    ],
+)
+async def test_non_completed_heartbeat_never_touches_storage(
+    source_type: str,
+    status: str,
+) -> None:
+    run, checkpoint, _ = _records(source_type=source_type, status=status)
+    get_storage = AsyncMock()
+
+    with patch(
+        "app.services.agent_runtime.heartbeat_completion.get_storage_backend",
+        get_storage,
+    ):
+        handler = HeartbeatSeedFocusHandler(session_factory=_SessionFactory())  # type: ignore[arg-type]
+        await handler.handle(run=run, checkpoint=checkpoint)
+
+    get_storage.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_invalid_agent_identity_projects_nothing_without_raising() -> None:
+    run, checkpoint, _ = _records()
+    run = replace(run, agent_id=None)
+    get_storage = AsyncMock()
+
+    with patch(
+        "app.services.agent_runtime.heartbeat_completion.get_storage_backend",
+        get_storage,
+    ):
+        handler = HeartbeatSeedFocusHandler(session_factory=_SessionFactory())  # type: ignore[arg-type]
+        await handler.handle(run=run, checkpoint=checkpoint)
+
+    get_storage.assert_not_awaited()

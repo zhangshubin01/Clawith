@@ -20,6 +20,7 @@ from app.services.agent_runtime.command_worker import CommandWorkResult, Runtime
 from app.services.agent_runtime.channel_delivery import ChannelDeliveryWorkResult
 from app.services.agent_runtime.heartbeat_completion import (
     HeartbeatRuntimeCompletionHandler,
+    HeartbeatSeedFocusHandler,
 )
 from app.services.agent_runtime.onboarding_completion import (
     OnboardingRuntimeCompletionHandler,
@@ -401,6 +402,7 @@ def test_component_builder_installs_current_agent_and_planning_graphs() -> None:
         TaskRuntimeCompletionHandler,
         TriggerRuntimeCompletionHandler,
         HeartbeatRuntimeCompletionHandler,
+        HeartbeatSeedFocusHandler,
         OnboardingRuntimeCompletionHandler,
         A2ARuntimeCompletionHandler,
         SchedulingLaneCompletionHandler,

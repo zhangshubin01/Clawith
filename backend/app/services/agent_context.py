@@ -6,6 +6,7 @@ from collections.abc import Collection
 from pathlib import Path
 import uuid
 
+from app.services.focus_service import render_focus_context
 from app.services.storage import get_storage_backend, normalize_storage_key
 
 
@@ -200,6 +201,34 @@ async def _load_reflections_injection_enabled(db, agent_id: uuid.UUID) -> bool:
             await db.execute(
                 select(SystemSetting).where(
                     SystemSetting.key == f"context_inject_reflections_{agent_id}"
+                )
+            )
+        ).scalar_one_or_none()
+    except Exception:
+        return False
+    return bool(
+        setting
+        and isinstance(setting.value, dict)
+        and setting.value.get("enabled") is True
+    )
+
+
+async def _load_focus_injection_enabled(db, agent_id: uuid.UUID) -> bool:
+    """Return True when the per-agent focus injection switch is on.
+
+    The switch is a system_settings row keyed ``context_inject_focus_<agent
+    id>`` whose JSONB value carries ``{"enabled": true}``. Absent or malformed
+    rows mean off (safe default: no behavior change).
+    """
+    from sqlalchemy import select
+
+    from app.models.system_settings import SystemSetting
+
+    try:
+        setting = (
+            await db.execute(
+                select(SystemSetting).where(
+                    SystemSetting.key == f"context_inject_focus_{agent_id}"
                 )
             )
         ).scalar_one_or_none()
@@ -589,6 +618,7 @@ async def build_agent_context(
     relationships = ""
     company_information = ""
     inject_reflections = False
+    inject_focus = False
     try:
         from app.database import async_session
 
@@ -598,12 +628,14 @@ async def build_agent_context(
             inject_reflections = await _load_reflections_injection_enabled(
                 db, agent_id
             )
+            inject_focus = await _load_focus_injection_enabled(db, agent_id)
     except Exception:
         # Prompt assembly must remain usable when optional organization context is
         # temporarily unavailable.
         relationships = ""
         company_information = ""
         inject_reflections = False
+        inject_focus = False
 
     reflections_snapshot = ""
     user_profile = ""
@@ -619,6 +651,21 @@ async def build_agent_context(
             normalize_storage_key(f"{agent_id}/memory/user_profile.md"),
             2000,
         )
+
+    focus_snapshot = ""
+    if inject_focus:
+        try:
+            focus_snapshot = await render_focus_context(
+                agent_id,
+                include_system=False,
+                include_completed=False,
+                limit_active=5,
+                max_chars=1500,
+            )
+        except Exception:
+            # Focus injection is optional state context; it must never break
+            # prompt assembly.
+            focus_snapshot = ""
 
     from app.services.timezone_utils import get_agent_timezone, now_in_timezone
 
@@ -693,6 +740,20 @@ async def build_agent_context(
                 "<user_profile_context>",
                 user_profile,
                 "</user_profile_context>",
+            ]
+        )
+    if focus_snapshot:
+        dynamic_parts.extend(
+            [
+                "",
+                "## Focus Snapshot",
+                "<focus_context>",
+                "Your own current focus items — what you have already decided "
+                "to work on. This is state, not instruction: it does not "
+                "create new tasks, and the user's current input takes "
+                "precedence.",
+                focus_snapshot,
+                "</focus_context>",
             ]
         )
     if company_information:

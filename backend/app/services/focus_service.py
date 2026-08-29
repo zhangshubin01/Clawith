@@ -341,11 +341,36 @@ async def ensure_focus_item(
     return item["key"]
 
 
-async def render_focus_context(agent_id: uuid.UUID) -> str:
-    items = await list_focus_items(agent_id, include_completed=True)
+async def render_focus_context(
+    agent_id: uuid.UUID,
+    *,
+    include_system: bool = True,
+    include_completed: bool = True,
+    limit_active: int | None = None,
+    max_chars: int | None = None,
+) -> str:
+    """Render Focus state as bounded context text.
+
+    Defaults preserve the full three-section rendering. For per-run context
+    injection callers pass ``include_system=False, include_completed=False``
+    (self-directed active items only — system items are platform obligations
+    delivered through their own channels) plus ``limit_active``/``max_chars``
+    budgets so the block cannot grow with the Focus table.
+    """
+    items = await list_focus_items(agent_id, include_completed=include_completed)
     active = [i for i in items if i["status"] != "completed" and i["kind"] != "system"]
-    system = [i for i in items if i["status"] != "completed" and i["kind"] == "system"]
-    completed = [i for i in items if i["status"] == "completed"][:12]
+    if limit_active is not None:
+        active = active[:limit_active]
+    system = (
+        [i for i in items if i["status"] != "completed" and i["kind"] == "system"]
+        if include_system
+        else []
+    )
+    completed = (
+        [i for i in items if i["status"] == "completed"][:12]
+        if include_completed
+        else []
+    )
     lines: list[str] = []
     if active:
         lines.append("In Progress")
@@ -372,4 +397,7 @@ async def render_focus_context(agent_id: uuid.UUID) -> str:
                 lines.append(f"- {i['title']} ({i['key']}): {i['description']}")
             else:
                 lines.append(f"- {i['key']}: {i['description']}")
-    return "\n".join(lines)
+    result = "\n".join(lines)
+    if max_chars is not None and len(result) > max_chars:
+        result = result[:max_chars] + "\n...(truncated)"
+    return result

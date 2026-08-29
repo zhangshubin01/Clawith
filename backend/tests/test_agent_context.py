@@ -14,6 +14,7 @@ def _context_patches(
     reflections: str = "",
     user_profile: str = "",
     inject_reflections: bool | None = None,
+    inject_focus: bool | None = None,
 ):
     agent_id_holder: dict[str, uuid.UUID] = {}
 
@@ -39,6 +40,16 @@ def _context_patches(
         else None
     )
 
+    focus_inject_patch = (
+        patch(
+            "app.services.agent_context._load_focus_injection_enabled",
+            new_callable=AsyncMock,
+            return_value=bool(inject_focus),
+        )
+        if inject_focus is not None
+        else None
+    )
+
     return agent_id_holder, (
         patch("app.services.agent_context._read_file_safe", side_effect=fake_read_file),
         patch(
@@ -57,6 +68,7 @@ def _context_patches(
             return_value="UTC",
         ),
         inject_patch,
+        focus_inject_patch,
     )
 
 
@@ -491,3 +503,88 @@ async def test_reflections_injection_on_injects_filtered_sections_and_profile():
     # user_profile 独立注入。
     assert "## User Profile" in stable_dynamic
     assert "用户档案内容" in stable_dynamic
+
+
+@pytest.mark.asyncio
+async def test_focus_snapshot_injected_as_state_not_instruction():
+    from app.services.agent_context import build_agent_context
+
+    agent_id = uuid.uuid4()
+    holder, patches = _context_patches(inject_reflections=True, inject_focus=True)
+    holder["agent_id"] = agent_id
+    render_patch = patch(
+        "app.services.agent_context.render_focus_context",
+        new_callable=AsyncMock,
+        return_value="- seed_key: 种子描述",
+    )
+
+    with (
+        patches[0],
+        patches[1],
+        patches[2],
+        patches[3],
+        patches[4],
+        patches[5],
+        render_patch,
+    ):
+        _static, stable_dynamic, _unstable = await build_agent_context(
+            agent_id,
+            "TestAgent",
+            allowed_tool_names={"wait", "read_file", "write_file"},
+        )
+
+    # C（seed→Focus 读通道）：状态语境注入，绝不使用祈使/目标句式。
+    assert "## Focus Snapshot" in stable_dynamic
+    assert "<focus_context>" in stable_dynamic
+    assert "state, not instruction" in stable_dynamic
+    assert "does not create new tasks" in stable_dynamic
+    assert "takes precedence" in stable_dynamic
+    assert "- seed_key: 种子描述" in stable_dynamic
+
+
+@pytest.mark.asyncio
+async def test_focus_snapshot_absent_when_switch_defaults_off():
+    from app.services.agent_context import build_agent_context
+
+    agent_id = uuid.uuid4()
+    holder, patches = _context_patches(inject_reflections=True)
+    holder["agent_id"] = agent_id
+
+    with patches[0], patches[1], patches[2], patches[3], patches[4]:
+        _static, stable_dynamic, _unstable = await build_agent_context(
+            agent_id,
+            "TestAgent",
+            allowed_tool_names={"wait", "read_file", "write_file"},
+        )
+
+    assert "## Focus Snapshot" not in stable_dynamic
+
+
+@pytest.mark.asyncio
+async def test_focus_snapshot_absent_when_render_returns_empty():
+    from app.services.agent_context import build_agent_context
+
+    agent_id = uuid.uuid4()
+    holder, patches = _context_patches(inject_focus=True)
+    holder["agent_id"] = agent_id
+    render_patch = patch(
+        "app.services.agent_context.render_focus_context",
+        new_callable=AsyncMock,
+        return_value="",
+    )
+
+    with (
+        patches[0],
+        patches[1],
+        patches[2],
+        patches[3],
+        patches[5],
+        render_patch,
+    ):
+        _static, stable_dynamic, _unstable = await build_agent_context(
+            agent_id,
+            "TestAgent",
+            allowed_tool_names={"wait", "read_file", "write_file"},
+        )
+
+    assert "## Focus Snapshot" not in stable_dynamic

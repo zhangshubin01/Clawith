@@ -61,3 +61,57 @@ async def test_upsert_with_caller_session_refreshes_before_serializing(monkeypat
 
     assert result == {"key": item_key}
     focus_service.focus_dao.upsert_item.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_render_focus_context_defaults_preserve_all_sections(monkeypatch):
+    items = [
+        {"key": "a1", "title": None, "description": "活动项", "status": "in_progress", "kind": "normal"},
+        {"key": "s1", "title": None, "description": "系统项", "status": "in_progress", "kind": "system"},
+        {"key": "c1", "title": None, "description": "完成项", "status": "completed", "kind": "normal"},
+    ]
+    monkeypatch.setattr(focus_service, "list_focus_items", AsyncMock(return_value=items))
+
+    rendered = await focus_service.render_focus_context(uuid.uuid4())
+
+    assert "In Progress" in rendered
+    assert "System Focus" in rendered
+    assert "Recently Completed" in rendered
+    assert "活动项" in rendered
+    assert "系统项" in rendered
+    assert "完成项" in rendered
+
+
+@pytest.mark.asyncio
+async def test_render_focus_context_scope_and_budget_parameters(monkeypatch):
+    items = [
+        {"key": "a1", "title": None, "description": "第一条", "status": "in_progress", "kind": "normal"},
+        {"key": "a2", "title": None, "description": "第二条", "status": "in_progress", "kind": "normal"},
+        {"key": "s1", "title": None, "description": "系统项", "status": "in_progress", "kind": "system"},
+        {"key": "c1", "title": None, "description": "完成项", "status": "completed", "kind": "normal"},
+    ]
+    monkeypatch.setattr(focus_service, "list_focus_items", AsyncMock(return_value=items))
+
+    scoped = await focus_service.render_focus_context(
+        uuid.uuid4(),
+        include_system=False,
+        include_completed=False,
+        limit_active=1,
+    )
+
+    assert "第一条" in scoped
+    assert "第二条" not in scoped
+    assert "系统项" not in scoped
+    assert "完成项" not in scoped
+    assert "Recently Completed" not in scoped
+    assert "System Focus" not in scoped
+
+    truncated = await focus_service.render_focus_context(
+        uuid.uuid4(),
+        include_system=False,
+        include_completed=False,
+        max_chars=8,
+    )
+
+    assert truncated.endswith("...(truncated)")
+    assert len(truncated.split("\n...(truncated)")[0]) == 8

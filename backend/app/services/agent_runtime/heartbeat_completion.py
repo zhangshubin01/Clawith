@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from collections.abc import Mapping
 from typing import Callable
+import logging
 import uuid
 
 from sqlalchemy import select
@@ -17,6 +18,15 @@ from app.services.agent_runtime.command_worker import (
     RuntimeRunRecord,
     RuntimeSessionFactory,
 )
+from app.services.focus_service import (
+    complete_focus_item,
+    list_focus_items,
+    slugify_focus_key,
+    upsert_focus_item,
+)
+from app.services.storage import get_storage_backend, normalize_storage_key
+
+logger = logging.getLogger(__name__)
 
 
 class HeartbeatRuntimeCompletionError(RuntimeError):
@@ -29,6 +39,7 @@ class HeartbeatRuntimeCompletionError(RuntimeError):
 
 _TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled"})
 _BACKGROUND_MODES = frozenset({"heartbeat", "schedule", "oneshot"})
+_NEXT_CYCLE_SEEDS_SECTION = "Next Cycle Seeds"
 
 
 def _effect_id(run_id: uuid.UUID, checkpoint_id: str, mode: str) -> uuid.UUID:
@@ -260,7 +271,125 @@ class HeartbeatRuntimeCompletionHandler:
                 await db.flush()
 
 
+def _extract_seed_lines(content: str) -> list[str] | None:
+    """Extract the Next Cycle Seeds entries from a reflections.md body.
+
+    ``None`` means "no signal": the section is absent (or the content is not a
+    usable reflections body), so callers must not project anything. An empty
+    list means the section exists but holds no seeds — the agent deliberately
+    cleared it, which *is* a signal.
+    """
+    if not content.strip():
+        return None
+    section_found = False
+    in_section = False
+    seeds: list[str] = []
+    for raw_line in content.split("\n"):
+        if raw_line.startswith("## "):
+            if in_section:
+                break
+            if raw_line[3:].strip() == _NEXT_CYCLE_SEEDS_SECTION:
+                in_section = True
+                section_found = True
+            continue
+        if not in_section:
+            continue
+        stripped = raw_line.strip()
+        if stripped.startswith("- "):
+            text = stripped[2:].strip()
+            if text:
+                seeds.append(text)
+    if not section_found:
+        return None
+    return seeds
+
+
+class HeartbeatSeedFocusHandler:
+    """Project a completed heartbeat's Next Cycle Seeds into Focus items.
+
+    Complementary to ``HeartbeatRuntimeCompletionHandler`` (which projects
+    terminal heartbeats into activity/notifications and skips HEARTBEAT_OK
+    answers): this handler takes every completed heartbeat's seed list, upserts
+    it into the Focus table as ``source="heartbeat"`` items, and retires
+    heartbeat-source items the converge dropped. Best-effort by design — any
+    failure is logged, never raised, so a projection problem can neither fail
+    the heartbeat nor block the other terminal handlers.
+    """
+
+    def __init__(self, *, session_factory: RuntimeSessionFactory) -> None:
+        # Kept for terminal-handler construction symmetry; the projection uses
+        # the Focus service, which manages its own sessions.
+        self._session_factory = session_factory
+
+    async def handle(
+        self,
+        *,
+        run: RuntimeRunRecord,
+        checkpoint: CheckpointObservation,
+    ) -> None:
+        if run.source_type != "heartbeat":
+            return
+        try:
+            status = checkpoint.state["lifecycle"].get("status")
+            if status != "completed":
+                return
+            if _mode(checkpoint) != "heartbeat":
+                return
+            agent_id = uuid.UUID(run.agent_id or "")
+        except Exception:
+            return
+        try:
+            await self._project_seeds(agent_id)
+        except Exception as exc:
+            logger.warning(
+                "Heartbeat seed→Focus projection failed for agent %s: %s",
+                agent_id,
+                exc,
+            )
+
+    async def _project_seeds(self, agent_id: uuid.UUID) -> None:
+        storage = get_storage_backend()
+        reflections_key = normalize_storage_key(
+            f"{agent_id}/memory/reflections.md"
+        )
+        try:
+            if not await storage.exists(reflections_key) or not await storage.is_file(
+                reflections_key
+            ):
+                return
+            content = await storage.read_text(
+                reflections_key,
+                encoding="utf-8",
+                errors="replace",
+            )
+        except Exception:
+            return
+        seeds = _extract_seed_lines(content)
+        if seeds is None:
+            return
+
+        seed_keys = {slugify_focus_key(text) for text in seeds}
+        items = await list_focus_items(agent_id, include_completed=True)
+        heartbeat_keys = {
+            item["key"] for item in items if item.get("source") == "heartbeat"
+        }
+
+        for text in seeds:
+            await upsert_focus_item(
+                agent_id,
+                key=slugify_focus_key(text),
+                title=text[:200],
+                description=text,
+                status="in_progress",
+                kind="normal",
+                source="heartbeat",
+            )
+        for stale_key in heartbeat_keys - seed_keys:
+            await complete_focus_item(agent_id, key=stale_key)
+
+
 __all__ = [
     "HeartbeatRuntimeCompletionError",
     "HeartbeatRuntimeCompletionHandler",
+    "HeartbeatSeedFocusHandler",
 ]
