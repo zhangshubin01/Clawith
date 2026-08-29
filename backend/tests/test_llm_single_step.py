@@ -889,3 +889,93 @@ async def test_complete_once_sends_standard_multimodal_content_to_vision_provide
     ]
     assert isinstance(original.content, str)
     assert result.content == "described"
+
+
+@pytest.mark.asyncio
+async def test_thinking_disabled_passes_provider_toggle_only_for_deepseek(monkeypatch) -> None:
+    deepseek = _model()
+    deepseek.provider = "deepseek"
+    client = _Client(LLMResponse(content="summary", finish_reason="stop"))
+    _patch_client(monkeypatch, client)
+
+    result = await single_step.complete_llm_once(
+        deepseek,
+        [LLMMessage(role="user", content="Condense it")],
+        thinking_disabled=True,
+    )
+
+    assert result.content == "summary"
+    assert client.calls[0].get("thinking") == {"type": "disabled"}
+
+
+@pytest.mark.asyncio
+async def test_thinking_disabled_is_silent_for_non_deepseek_providers(monkeypatch) -> None:
+    client = _Client(LLMResponse(content="summary", finish_reason="stop"))
+    _patch_client(monkeypatch, client)
+
+    await single_step.complete_llm_once(
+        _model(),  # provider="openai"
+        [LLMMessage(role="user", content="Condense it")],
+        thinking_disabled=True,
+    )
+
+    assert "thinking" not in client.calls[0]
+
+
+@pytest.mark.asyncio
+async def test_thinking_toggle_defaults_off(monkeypatch) -> None:
+    deepseek = _model()
+    deepseek.provider = "deepseek"
+    client = _Client(LLMResponse(content="summary", finish_reason="stop"))
+    _patch_client(monkeypatch, client)
+
+    await single_step.complete_llm_once(
+        deepseek,
+        [LLMMessage(role="user", content="Condense it")],
+    )
+
+    assert "thinking" not in client.calls[0]
+
+
+@pytest.mark.asyncio
+async def test_thinking_disabled_passes_toggle_on_the_thinking_stream_path(
+    monkeypatch,
+) -> None:
+    deepseek = _model()
+    deepseek.provider = "deepseek"
+    client = _Client(LLMResponse(content="summary", finish_reason="stop"))
+    _patch_client(monkeypatch, client)
+
+    async def collect(_delta: str) -> None:
+        pass
+
+    await single_step.complete_llm_once(
+        deepseek,
+        [LLMMessage(role="user", content="Condense it")],
+        on_thinking=collect,
+        thinking_disabled=True,
+    )
+
+    assert client.calls[0].get("thinking") == {"type": "disabled"}
+
+
+@pytest.mark.asyncio
+async def test_thinking_disabled_passes_toggle_on_the_visible_delta_stream_path(
+    monkeypatch,
+) -> None:
+    deepseek = _model()
+    deepseek.provider = "deepseek"
+    client = _Client(LLMResponse(content="summary", finish_reason="stop"))
+    _patch_client(monkeypatch, client)
+
+    async def collect(_delta: str) -> None:
+        pass
+
+    await single_step.complete_llm_once(
+        deepseek,
+        [LLMMessage(role="user", content="Condense it")],
+        on_visible_delta=collect,
+        thinking_disabled=True,
+    )
+
+    assert client.calls[0].get("thinking") == {"type": "disabled"}

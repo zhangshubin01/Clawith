@@ -335,6 +335,36 @@ async def test_at_eighty_percent_compacts_prefix_and_keeps_current_input_exact()
 
 
 @pytest.mark.asyncio
+async def test_compact_completion_requests_thinking_disabled() -> None:
+    """DeepSeek thinking shares the output budget with the summary and must
+    be switched off on the auxiliary compaction call (probe-verified)."""
+    messages = [
+        *[_normal(f"old-{index}", "old history " * 12) for index in range(8)],
+        {
+            **_normal("current", "EXACT CURRENT INPUT"),
+            "runtime_input": "current",
+        },
+    ]
+    state, context, tenant_id = _state(messages)
+    observed_thinking_disabled: bool | None = None
+
+    async def complete(*_args, **kwargs):
+        nonlocal observed_thinking_disabled
+        observed_thinking_disabled = kwargs.get("thinking_disabled")
+        return _step()
+
+    result = await _service(
+        model=_model(tenant_id),
+        completion=complete,
+        effective_budget=1_000,
+        current_tokens=800,
+    ).compact_if_needed(state, context)
+
+    assert result.compacted is True
+    assert observed_thinking_disabled is True
+
+
+@pytest.mark.asyncio
 async def test_large_image_base64_is_excluded_from_recent_budget_and_compact_prompt() -> None:
     padded_png = base64.b64encode(
         base64.b64decode(_TINY_PNG_BASE64) + b"x" * (64 * 1024)

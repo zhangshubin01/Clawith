@@ -199,6 +199,7 @@ class RunCompactCompletionPort(Protocol):
         agent_id: uuid.UUID | None = None,
         supports_vision: bool = False,
         max_output_tokens: int | None = None,
+        thinking_disabled: bool = False,
     ) -> LLMCompletionStep: ...
 
 
@@ -641,6 +642,7 @@ class RuntimeRunCompactorService:
                 agent_id=agent_id,
                 supports_vision=False,
                 max_output_tokens=summary_output_limit,
+                thinking_disabled=True,
             )
         except Exception as exc:
             if is_retryable_classification(classify_error(exc)):

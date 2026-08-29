@@ -133,6 +133,7 @@ async def complete_llm_once(
     on_visible_delta: VisibleDeltaCallback | None = None,
     on_thinking=None,
     temperature: float | None = None,
+    thinking_disabled: bool = False,
 ) -> LLMCompletionStep:
     """Call one pinned model exactly once and normalize its tool proposals.
 
@@ -147,6 +148,13 @@ async def complete_llm_once(
         base_url=model.base_url,
         timeout=_get_model_timeout(model),
     )
+    # DeepSeek enables thinking by default and its reasoning tokens share the
+    # max_tokens budget with the answer — for auxiliary calls that only
+    # condense text (Thread Compact), switch it off so the whole budget goes
+    # to the summary (probe-verified 2026-08-29, see .scratch/compaction-slimming
+    # issue 05). Provider-guarded: other providers don't accept this toggle,
+    # and tool-calling business steps must keep thinking on.
+    provider_toggle = {"thinking": {"type": "disabled"}} if thinking_disabled and model.provider == "deepseek" else {}
     request_temperature = model.temperature if temperature is None else temperature
     max_tokens = get_max_tokens(
         model.provider,
@@ -178,6 +186,7 @@ async def complete_llm_once(
                     max_tokens=max_tokens,
                     on_chunk=delta_gate.push,
                     on_thinking=on_thinking,
+                    **provider_toggle,
                 )
             elif on_thinking:
                 response = await client.stream(
@@ -186,6 +195,7 @@ async def complete_llm_once(
                     temperature=request_temperature,
                     max_tokens=max_tokens,
                     on_thinking=on_thinking,
+                    **provider_toggle,
                 )
             else:
                 response = await client.complete(
@@ -193,6 +203,7 @@ async def complete_llm_once(
                     tools=tools or None,
                     temperature=request_temperature,
                     max_tokens=max_tokens,
+                    **provider_toggle,
                 )
             if gen is not None:
                 gen.set_output(response.content)
