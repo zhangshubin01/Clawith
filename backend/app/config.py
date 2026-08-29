@@ -286,7 +286,9 @@ class Settings(BaseSettings):
     EXA_API_KEY: str = ""
 
     # Sandbox configuration
-    SANDBOX_TYPE: SandboxType = SandboxType.SUBPROCESS
+    # 默认 DOCKER：execute_code 已全量迁 DockerSessionBackend（17/17 agent），
+    # 镜像内 bwrap 无 setuid（b7043ccf），subprocess 仅限显式配置。
+    SANDBOX_TYPE: SandboxType = SandboxType.DOCKER
     SANDBOX_API_KEY: str = ""
     SANDBOX_API_URL: str = ""
     SANDBOX_CPU_LIMIT: str = "0.5"

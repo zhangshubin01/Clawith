@@ -1055,7 +1055,7 @@ _BUILTIN_TOOL_SOURCE = [
             "required": ["language", "code"],
         },
         "config": {
-            "sandbox_type": "subprocess",
+            "sandbox_type": "docker",
             "cpu_limit": "0.5",
             "memory_limit": "256m",
             "allow_network": True,

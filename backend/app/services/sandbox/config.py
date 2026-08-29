@@ -29,7 +29,7 @@ class SandboxType(str, Enum):
 class SandboxConfig(BaseModel):
     """Configuration for sandbox backend."""
 
-    type: SandboxType = SandboxType.SUBPROCESS
+    type: SandboxType = SandboxType.DOCKER
     enabled: bool = True
 
     # Local sandbox options
@@ -122,8 +122,9 @@ class SandboxConfig(BaseModel):
 
         # Map config key names to SandboxConfig attributes
         # Fail closed: an invalid sandbox_type must never silently degrade to
-        # SUBPROCESS, which would move code execution to a weaker boundary.
-        sandbox_type_str = get_value("sandbox_type", "subprocess")
+        # a weaker boundary (e.g. SUBPROCESS). Missing key defaults to DOCKER,
+        # the platform-wide default since all agents run DockerSessionBackend.
+        sandbox_type_str = get_value("sandbox_type", "docker")
         try:
             sandbox_type = SandboxType(sandbox_type_str)
         except ValueError:
