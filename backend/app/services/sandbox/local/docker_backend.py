@@ -274,7 +274,9 @@ class DockerSessionBackend(BaseSandboxBackend):
             "user": _CONTAINER_UID_GID,
             "volumes": volumes,
             "environment": env,
-            "working_dir": "/workspace",
+            # bwrap parity: sandbox root "/" is the working base (see exec_run
+            # workdir below); HOME remains /workspace for tooling.
+            "working_dir": "/",
             "mem_limit": self.config.memory_limit,
             "cpu_period": 100000,
             "cpu_quota": cpu_quota,
@@ -517,7 +519,12 @@ class DockerSessionBackend(BaseSandboxBackend):
                         session.container.exec_run,
                         ["bash", "-c", shell_line],
                         user=_CONTAINER_UID_GID,
-                        workdir="/workspace",
+                        # bwrap parity: the subprocess backend --chdir's to the
+                        # sandbox root "/", so agent scripts' relative paths
+                        # ("workspace/CalculatorApp") resolve as /workspace/…
+                        # A workdir of /workspace would resolve them to
+                        # /workspace/workspace/… (grayscale-observed 2026-08-30).
+                        workdir="/",
                     ),
                     timeout=timeout,
                 )

@@ -178,6 +178,11 @@ async def test_persistent_session_reused_for_same_run(backend, fake_client, tmp_
     assert r2.success, r2.error
     assert len(fake_client.run_kwargs) == 1
     assert len(fake_client.container.exec_calls) == 2
+    # bwrap parity regression: every exec runs from sandbox root "/", never
+    # /workspace (which would break agent scripts' "workspace/..." paths).
+    for _, exec_kwargs in fake_client.container.exec_calls:
+        assert exec_kwargs.get("workdir") == "/"
+        assert exec_kwargs.get("user") == "1000:1000"
     await DockerSessionBackend.close_run("run-abc")
 
 
@@ -215,7 +220,10 @@ async def test_container_isolation_defaults(backend, fake_client, tmp_path: Path
     assert kwargs["mem_limit"] == "256m"
     assert kwargs["pids_limit"] == 64
     assert kwargs["auto_remove"] is True
-    assert kwargs["working_dir"] == "/workspace"
+    # bwrap parity: sandbox root "/" is the working base (subprocess backend
+    # --chdir's to "/"), so agent scripts' relative "workspace/..." paths
+    # keep resolving — see docker_backend.exec_run workdir.
+    assert kwargs["working_dir"] == "/"
     assert kwargs["environment"]["HOME"] == "/workspace"
     assert kwargs["environment"]["VIRTUAL_ENV"] == SANDBOX_VENV_PATH
     workspace_binds = [spec for spec in kwargs["volumes"].values() if spec["bind"] == "/workspace"]
