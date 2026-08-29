@@ -192,6 +192,10 @@ fi
 # 脚本经 stdin 传入（docker exec -i + python -），不依赖容器内落盘。
 # work_dir 必须落在 /data/agents 下：DooD 下 venv/staging 的 bind 源要能
 # 被宿主 daemon 解析（容器私有 /tmp 会静默挂成空目录），见 ADR-0009。
+# 冒烟必须以 -u clawith 运行（与生产主进程同 uid1000）：staging 树由
+# 后端进程创建，沙箱容器同样跑 uid1000——root 建的 staging/workspace/.tmp
+# (0755 root) 会让沙箱内 uid1000 写 stdout/stderr 文件 EACCES，bash 重定向
+# 失败不执行命令，冒烟 exit_code=1 且 stdout/stderr 全空（2026-08-30 实锤）。
 SMOKE_PY="$STATE_DIR/execute-code-smoke.py"
 cat > "$SMOKE_PY" <<'PY'
 import asyncio
@@ -209,7 +213,8 @@ async def main() -> None:
         timeout=30,
         work_dir="/data/agents/.sandbox-smoke/work",
     )
-    print(json.dumps({"success": result.success, "exit_code": result.exit_code, "error": result.error}))
+    print(json.dumps({"success": result.success, "exit_code": result.exit_code, "error": result.error,
+                      "stdout": result.stdout[:200], "stderr": result.stderr[:200]}))
     if not (result.success and "clawith-sandbox-ok" in result.stdout):
         raise SystemExit(1)
 
@@ -217,7 +222,11 @@ async def main() -> None:
 asyncio.run(main())
 PY
 if docker image inspect clawith-code-sandbox:latest >/dev/null 2>&1; then
-    if SMOKE_RESULT="$(docker exec -i "${COMPOSE_PROJECT}-backend-1" python - < "$SMOKE_PY" 2>&1)"; then
+    # 历史 root 冒烟可能留下 root 属主的 staging/smoke 目录（0755 root 的
+    # .tmp 会让沙箱 uid1000 写不了 stdout/stderr），幂等 chown 到 clawith。
+    docker exec "${COMPOSE_PROJECT}-backend-1" chown -R clawith:clawith \
+        /data/agents/.sandbox-staging /data/agents/.sandbox-smoke 2>/dev/null || true
+    if SMOKE_RESULT="$(docker exec -u clawith -i "${COMPOSE_PROJECT}-backend-1" python - < "$SMOKE_PY" 2>&1)"; then
         echo "✅ execute_code docker 沙箱冒烟通过: ${SMOKE_RESULT}"
     else
         echo "❌ execute_code docker 沙箱冒烟失败: ${SMOKE_RESULT}" >&2
