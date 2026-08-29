@@ -7,6 +7,7 @@ from collections import deque
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from loguru import logger
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.exc import IntegrityError
 
@@ -148,6 +149,7 @@ async def _reserve(
     resume_safe_read: bool = False,
     arguments: dict | None = None,
     tool_call_id: str = "call-1",
+    tool_name: str = "send_message",
     assistant_message_id: str = "assistant-message-1",
     provider_call_id: str | None = None,
     contract_version: str | None = None,
@@ -157,7 +159,7 @@ async def _reserve(
         tenant_id=tenant_id,
         run_id=run_id,
         tool_call_id=tool_call_id,
-        tool_name="send_message",
+        tool_name=tool_name,
         assistant_message_id=assistant_message_id,
         arguments=arguments or _ARGUMENTS,
         sanitized_arguments=_SANITIZED_ARGUMENTS,
@@ -798,34 +800,94 @@ async def test_started_replay_with_different_provider_call_id_falls_to_decision(
 
 
 @pytest.mark.asyncio
-async def test_idempotency_key_rejects_changed_arguments_or_execution_metadata():
+async def test_replay_divergence_logs_and_reuses_ledger_decision():
+    """A committed row hit by diverging request content is a deterministic
+    replay, not a conflict: log the divergence for audit and let the recorded
+    ledger row decide the outcome (2026-08-30, run c83675d7)."""
     tenant_id = uuid.uuid4()
     run_id = uuid.uuid4()
     existing = _execution(tenant_id=tenant_id, run_id=run_id, status="started")
 
-    changed_arguments_db = _FakeSession(run_id, existing)
-    with pytest.raises(tool_execution.ToolExecutionError) as arguments_error:
-        await _reserve(
+    messages: list[str] = []
+    sink_id = logger.add(messages.append, level="WARNING")
+    try:
+        changed_arguments_db = _FakeSession(run_id, existing)
+        decision = await _reserve(
             changed_arguments_db,
             tenant_id=tenant_id,
             run_id=run_id,
             arguments={"channel": "finance", "message": "hello"},
         )
-    assert arguments_error.value.code == "tool_call_idempotency_mismatch"
-    assert "arguments_hash" in str(arguments_error.value)
+    finally:
+        logger.remove(sink_id)
 
-    changed_effect_db = _FakeSession(run_id, existing)
-    with pytest.raises(tool_execution.ToolExecutionError) as effect_error:
-        await _reserve(
+    assert decision.execution is existing
+    assert decision.created is False
+    assert decision.reusable_result is None
+    # Started row with an expired lease → reconciliation, never re-execution.
+    assert decision.blocked is True
+    assert decision.reconciliation_required is True
+    assert decision.error_code == "tool_execution_started"
+    assert any("request divergence on replay" in message for message in messages)
+    assert any("arguments_hash" in message for message in messages)
+
+    messages.clear()
+    sink_id = logger.add(messages.append, level="WARNING")
+    try:
+        changed_effect_db = _FakeSession(run_id, existing)
+        decision = await _reserve(
             changed_effect_db,
             tenant_id=tenant_id,
             run_id=run_id,
             effect="read",
             retry_policy="safe",
         )
-    assert effect_error.value.code == "tool_call_idempotency_mismatch"
-    assert "effect" in str(effect_error.value)
-    assert "retry_policy" in str(effect_error.value)
+    finally:
+        logger.remove(sink_id)
+
+    assert decision.blocked is True
+    assert any("request divergence on replay" in message for message in messages)
+    assert any("effect" in message for message in messages)
+    assert any("retry_policy" in message for message in messages)
+
+
+@pytest.mark.asyncio
+async def test_replay_divergence_reuses_recorded_succeeded_outcome():
+    """The exact c83675d7 shape: a regenerated request (different tool name
+    and arguments) hits the position-derived call id of an already-succeeded
+    ledger row — the recorded outcome is reused and the run continues."""
+    tenant_id = uuid.uuid4()
+    run_id = uuid.uuid4()
+    succeeded = _execution(
+        tenant_id=tenant_id,
+        run_id=run_id,
+        status="succeeded",
+        result_summary="read 3 lines",
+        result_ref="ref://read-result",
+    )
+    db = _FakeSession(run_id, succeeded)
+
+    messages: list[str] = []
+    sink_id = logger.add(messages.append, level="WARNING")
+    try:
+        decision = await _reserve(
+            db,
+            tenant_id=tenant_id,
+            run_id=run_id,
+            tool_name="list_files",
+            arguments={"path": "/src", "depth": 2},
+        )
+    finally:
+        logger.remove(sink_id)
+
+    assert decision.created is False
+    assert decision.reusable_result is not None
+    assert decision.reusable_result.status == "succeeded"
+    assert decision.reusable_result.result_summary == "read 3 lines"
+    assert decision.reusable_result.result_ref == "ref://read-result"
+    assert any("request divergence on replay" in message for message in messages)
+    assert any("tool_name" in message for message in messages)
+    assert any("arguments_hash" in message for message in messages)
 
 
 @pytest.mark.asyncio

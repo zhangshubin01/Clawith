@@ -78,12 +78,16 @@ Clawith 执行模型：**一个 run = 一个 start command**（`langgraph_driver
 - 引擎源码（容器 1.2.11）：`pregel/_checkpoint.py`（delta snapshot/ancestor walk）、`pregel/_loop.py`（exit 模式 `_exit_delta_writes`）、`channels/delta.py`（`snapshot_frequency=1000`）
 - 官方 API 面：`AsyncPostgresSaver` 仅 `adelete_thread` 线程级删除，无单 checkpoint 删除——wrapper 层不存在「安全跳过」的空间。
 
-## 六、exit 模式的恢复重放语义（2026-08-26 补充，事故驱动）
+## 六、exit 模式的恢复重放语义（2026-08-26 补充，2026-08-30 修订，事故驱动）
 
-**事故**：run f7e7e5a0 执行中途（18 个工具已 succeeded，全部只在台账）后端容器被重建 → 中间零 checkpoint → 恢复（attempt 2）时模型重新生成相同内容的消息：`assistant_message_id`/`tool_call_id` 为确定性 uuid5（相同输入→相同 id），而 `provider_call_id`（DeepSeek 每次响应的 `call_00_xxx`）是新随机值 → `_require_exact_request` 将 provider_call_id 差异当「不可变输入冲突」raise `tool_call_idempotency_mismatch` → run 被杀。
+**事故 1（provider_call_id 漂移）**：run f7e7e5a0 执行中途（18 个工具已 succeeded，全部只在台账）后端容器被重建 → 中间零 checkpoint → 恢复（attempt 2）时模型重新生成相同内容的消息：`assistant_message_id`/`tool_call_id` 为确定性 uuid5（相同输入→相同 id），而 `provider_call_id`（DeepSeek 每次响应的 `call_00_xxx`）是新随机值 → `_require_exact_request` 将 provider_call_id 差异当「不可变输入冲突」raise `tool_call_idempotency_mismatch` → run 被杀。
 
 **修复（d6df1c11）**：provider_call_id 从幂等身份检查移除（它是 provider 相关性字段，非 runtime 身份——与 1dbad6d9 声明意图「separate Provider correlation from Runtime identity」一致，其实现当时存在偏差），差异降级为 warning；重放交给 `_decision_for_existing`：succeeded→复用结果、started→按 lease/attempt（blocked/reconcile/重试）、failed→prior_failure、unknown→reconciliation。其余身份字段（tool_name/assistant_message_id/arguments_hash/request_ref/contract_version/effect/retry_policy/sanitized_arguments）检查不变。
 
-**剩余边界（设计权衡，非缺陷）**：恢复后模型输出与 attempt 1 有实质差异（参数/工具名变化）时 `arguments_hash` mismatch 仍 fail-closed——刻意保留（参数不同可能是真不同请求），重放语义只覆盖「完全相同输入」。
+**事故 2（内容分叉，2026-08-29 run c83675d7）**：Direct Chat run 执行「P0」期间（17:52 创建）后端容器因部署被重建（8eb83643）→ attempt 1 在 android_compile 工具节点内被杀（账本孤儿 started 行）→ attempt 2 从起点全量重放：第 1 步 DeepSeek 缓存命中、输出逐字节一致（幂等命中），第 2 步采样分叉——同一位置派生 call id `6fed2097` 的调用从 `read_file` 再生成为 `list_files` → `_require_exact_request` 对 tool_name/arguments_hash/sanitized_arguments/contract_version 四项不一致 fail-closed → run_failed（checkpoint 1f1a3d2d 终态），用户看到「任务执行未完成」。上文「内容实质差异仍 fail-closed」的边界被实际事故击穿。
 
-**How to apply**：exit 模式下任何中途被打断的 run 都会以「重放」恢复；台账（agent_tool_executions）是恢复正确性的权威，任何「确定性 id 重放」路径都必须幂等复用而非失败。
+**修复（2026-08-30，本次变更）**：重放路径（`reserve_tool_execution` pre-check——行已存在即先前 attempt 的已提交账本，非并发争用）不再 fail-closed：分歧字段以 warning 完整记录审计，落入 `_decision_for_existing` 复用账本终态（succeeded→复用结果、started→lease/attempt 判定、failed→prior_failure、unknown→reconciliation）；真并发路径（IntegrityError 竞态：两个活 worker 同时认领同一 call id）保持 fail-closed 不变。依据：①账本是恢复正确性的权威（durable-execution 重放语义——Event History 是真相，已记录结果被复用而非重算）；②LLM 采样非确定性是常态而非故障，「参数不同可能是真不同请求」在重放场景不成立（位置派生 call id 已锁定请求身份）。配套：`scripts/deploy.sh` 增加在途检查（默认告警，`--require-idle` 中止），消除本事故最高频触发源（部署换容器）。
+
+**剩余边界（设计权衡，非缺陷）**：①真并发竞态下两个活 worker 内容不一致仍 fail-closed（防同一调用双执行）；②重放撞上 attempt 1 的孤儿 `started` 行（被杀进程无法自行结算）时按 lease/attempt 判定：写类工具 blocked+reconciliation，不静默重开，safe-read 有界重试——不会静默重复执行；③若重放时 assistant message id 未复现，call id 全新、工具会真实重跑（at-least-once 重放固有代价），根治靠可续 checkpoint（与 checkpoint 表膨胀治理合并排期）。
+
+**How to apply**：exit 模式下任何中途被打断的 run 都会以「重放」恢复；台账（agent_tool_executions）是恢复正确性的权威，任何「确定性 id 重放」路径都必须幂等复用而非失败。部署前跑 `scripts/deploy.sh`（在途检查默认告警）；长期任务（如 30 分钟编译）勿在部署窗口启动，或部署加 `--require-idle`。

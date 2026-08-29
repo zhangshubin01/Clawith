@@ -9,6 +9,7 @@
 #   scripts/deploy.sh --commit <ref>  # 部署指定 commit（默认 HEAD）
 #   scripts/deploy.sh --no-wait       # 部署锁被占用时立即失败（默认排队 600s）
 #   scripts/deploy.sh --strict        # 存在未部署提交时中止（默认仅提示）
+#   scripts/deploy.sh --require-idle  # 存在在途 run 时中止（默认仅告警）
 #
 # 流程: 部署锁 → 预检 → tip 对比 → worktree → .env 校验 → 回滚标签 → build → up → 验证
 #
@@ -34,6 +35,7 @@ BUILD=1
 WITH_FRONTEND=0
 NO_WAIT=0
 STRICT=0
+REQUIRE_IDLE=0
 # 保存原始位置参数：解析循环用 shift 消费完 $@ 后，exec 重入链
 # （deploy_guard lock → Popen 重新执行本脚本）必须拿到完整参数，
 # 否则 --commit/--frontend/--no-build 等会在重入时全部丢失（2026-08-28 实测）。
@@ -51,6 +53,7 @@ while [[ $# -gt 0 ]]; do
         --no-build) BUILD=0; shift ;;
         --no-wait) NO_WAIT=1; shift ;;
         --strict) STRICT=1; shift ;;
+        --require-idle) REQUIRE_IDLE=1; shift ;;
         --commit) COMMIT="$2"; shift 2 ;;
         -h|--help) usage ;;
         *) echo "未知参数: $1"; usage; exit 1 ;;
@@ -147,6 +150,51 @@ if [ -n "$OLD_IMG" ]; then
     fi
 else
     echo "⚠️  未找到运行中的 backend 容器，跳过回滚标签"
+fi
+
+# ── 4.5) 在途检查（2026-08-30 run c83675d7 教训）─────────────
+# up 会杀掉在途 run：durability="exit" 下被杀 run 只能从起点全量重放，
+# 模型重生成内容可能撞幂等账本（事故即由此起）。默认仅告警，
+# --require-idle 时中止——长期跑的任务（如 30 分钟编译）建议先等完再部署。
+IDLE_CHECK_PY="$STATE_DIR/idle-check.py"
+cat > "$IDLE_CHECK_PY" <<'PY'
+import asyncio
+import json
+
+from sqlalchemy import text
+
+from app.database import engine
+
+
+async def main() -> None:
+    async with engine.connect() as conn:
+        live_commands = (await conn.execute(text(
+            "SELECT count(*) FROM agent_run_commands "
+            "WHERE status = 'claimed' AND claim_expires_at > now()"
+        ))).scalar_one()
+        live_tools = (await conn.execute(text(
+            "SELECT count(*) FROM agent_tool_executions "
+            "WHERE status = 'started' AND lease_expires_at > now()"
+        ))).scalar_one()
+    print(json.dumps({"live_commands": live_commands, "live_tools": live_tools}))
+    if live_commands or live_tools:
+        raise SystemExit(1)
+
+
+asyncio.run(main())
+PY
+if docker ps --format '{{.Names}}' | grep -qx "${COMPOSE_PROJECT}-backend-1"; then
+    if IDLE_JSON="$(docker exec -i "${COMPOSE_PROJECT}-backend-1" python - < "$IDLE_CHECK_PY" 2>&1)"; then
+        echo "→ 在途检查: 无在途命令/工具执行"
+    else
+        echo "⚠️  在途检查: 存在在途 run（${IDLE_JSON}）——up 会杀掉它们并触发全量重放"
+        if [ "$REQUIRE_IDLE" = 1 ]; then
+            echo "❌ --require-idle：存在在途 run，中止部署" >&2
+            exit 1
+        fi
+    fi
+else
+    echo "⚠️  未找到运行中的 backend 容器，跳过在途检查"
 fi
 
 # ── 5) 构建（默认）——阿里云 pip 源为必填 build-arg ─────────

@@ -999,6 +999,65 @@ async def inspect_tool_execution(
     return ToolExecutionInspection(status=execution.status, execution=execution)  # type: ignore[arg-type]
 
 
+def _warn_provider_call_id_drift(
+    existing: AgentToolExecution,
+    *,
+    provider_call_id: str | None,
+) -> None:
+    # provider_call_id is a per-call correlation id minted by the provider on
+    # every response — NOT part of the runtime request identity. Deterministic
+    # replay after a mid-run restart (durability="exit" drops intermediate
+    # checkpoints) regenerates the same runtime identity with a fresh
+    # provider_call_id; that is a legal idempotent hit, not a conflict. The
+    # request identity is fully covered by the tool_name/assistant_message_id/
+    # arguments_hash checks plus the contract_version, effect, retry_policy and
+    # sanitized_arguments checks. Keep the divergence visible for audit but do
+    # not fail closed on it.
+    stored_provider_call_id = getattr(existing, "provider_call_id", None)
+    if stored_provider_call_id is not None and stored_provider_call_id != provider_call_id:
+        logger.warning(
+            "[ToolExecution] provider_call_id drift on {}: stored={!r} incoming={!r} "
+            "(replay after recovery is expected; outcome decided by execution state)",
+            existing.tool_call_id,
+            stored_provider_call_id,
+            provider_call_id,
+        )
+
+
+def _detect_request_divergence(
+    existing: AgentToolExecution,
+    *,
+    tool_name: str,
+    assistant_message_id: str,
+    arguments_hash: str,
+    stored_arguments: dict[str, Any],
+    request_ref: str | None,
+    side_effect_classification: str,
+    retry_policy: str,
+    contract_version: str | None,
+) -> list[str]:
+    """Return the request-identity fields whose incoming value differs from
+    the recorded ledger row (empty list = exact idempotent hit)."""
+    expected = {
+        "tool_name": tool_name,
+        "assistant_message_id": assistant_message_id,
+        "arguments_hash": arguments_hash,
+        "request_ref": request_ref,
+    }
+    mismatched = [field for field, value in expected.items() if getattr(existing, field) != value]
+    for identity_field, value in (
+        ("contract_version", contract_version),
+    ):
+        stored = getattr(existing, identity_field, None)
+        if stored is not None and stored != value:
+            mismatched.append(identity_field)
+    if _execution_arguments(existing) != stored_arguments:
+        mismatched.append("sanitized_arguments")
+    if _execution_metadata(existing) != (side_effect_classification, retry_policy):
+        mismatched.extend(("effect", "retry_policy"))
+    return mismatched
+
+
 def _require_exact_request(
     existing: AgentToolExecution,
     *,
@@ -1012,41 +1071,28 @@ def _require_exact_request(
     provider_call_id: str | None,
     contract_version: str | None,
 ) -> None:
-    expected = {
-        "tool_name": tool_name,
-        "assistant_message_id": assistant_message_id,
-        "arguments_hash": arguments_hash,
-        "request_ref": request_ref,
-    }
-    mismatched = [field for field, value in expected.items() if getattr(existing, field) != value]
-    # provider_call_id is a per-call correlation id minted by the provider on
-    # every response — NOT part of the runtime request identity. Deterministic
-    # replay after a mid-run restart (durability="exit" drops intermediate
-    # checkpoints) regenerates the same runtime identity with a fresh
-    # provider_call_id; that is a legal idempotent hit, not a conflict. The
-    # request identity is fully covered by the tool_name/assistant_message_id/
-    # arguments_hash checks above plus the contract_version, effect,
-    # retry_policy and sanitized_arguments checks below. Keep the divergence
-    # visible for audit but do not fail closed on it.
-    stored_provider_call_id = getattr(existing, "provider_call_id", None)
-    if stored_provider_call_id is not None and stored_provider_call_id != provider_call_id:
-        logger.warning(
-            "[ToolExecution] provider_call_id drift on {}: stored={!r} incoming={!r} "
-            "(replay after recovery is expected; outcome decided by execution state)",
-            existing.tool_call_id,
-            stored_provider_call_id,
-            provider_call_id,
-        )
-    for identity_field, value in (
-        ("contract_version", contract_version),
-    ):
-        stored = getattr(existing, identity_field, None)
-        if stored is not None and stored != value:
-            mismatched.append(identity_field)
-    if _execution_arguments(existing) != stored_arguments:
-        mismatched.append("sanitized_arguments")
-    if _execution_metadata(existing) != (side_effect_classification, retry_policy):
-        mismatched.extend(("effect", "retry_policy"))
+    """Fail closed on any request divergence against the recorded ledger row.
+
+    This check guards the true-concurrency race in ``reserve_tool_execution``:
+    two live workers claiming the same call id must agree on content. The
+    deterministic replay path (a row already committed by an earlier attempt)
+    deliberately does NOT call this — there the ledger is the source of truth
+    for what already executed, divergence is logged for audit and the recorded
+    outcome is reused (see the 2026-08-30 note in
+    docs/technical-plans/20260826-checkpoint-persistence-root-fix.md).
+    """
+    _warn_provider_call_id_drift(existing, provider_call_id=provider_call_id)
+    mismatched = _detect_request_divergence(
+        existing,
+        tool_name=tool_name,
+        assistant_message_id=assistant_message_id,
+        arguments_hash=arguments_hash,
+        stored_arguments=stored_arguments,
+        request_ref=request_ref,
+        side_effect_classification=side_effect_classification,
+        retry_policy=retry_policy,
+        contract_version=contract_version,
+    )
     if mismatched:
         raise ToolExecutionError(
             "tool_call_idempotency_mismatch",
@@ -1358,7 +1404,18 @@ async def reserve_tool_execution(
         lock=True,
     )
     if existing is not None:
-        _require_exact_request(
+        # A committed row with the same call id is a deterministic replay of
+        # an earlier attempt, not concurrent contention: durability="exit"
+        # drops intermediate checkpoints, so a recovered run re-executes from
+        # the input checkpoint and regenerates call ids positionally — and the
+        # model may regenerate *different* request content for the same
+        # position. The ledger is the source of truth for what already
+        # executed (durable-execution replay semantics): log the divergence
+        # for audit and reuse the recorded outcome, do not fail closed. The
+        # IntegrityError race below is true concurrency between live workers
+        # and stays fail-closed via _require_exact_request.
+        _warn_provider_call_id_drift(existing, provider_call_id=provider_call_id)
+        diverged = _detect_request_divergence(
             existing,
             tool_name=tool_name,
             assistant_message_id=assistant_message_id,
@@ -1367,9 +1424,17 @@ async def reserve_tool_execution(
             request_ref=request_ref,
             side_effect_classification=side_effect_classification,
             retry_policy=retry_policy,
-            provider_call_id=provider_call_id,
             contract_version=contract_version,
         )
+        if diverged:
+            logger.warning(
+                "[ToolExecution] request divergence on replay for {}: {} — "
+                "reusing the recorded ledger outcome instead of failing closed "
+                "(deterministic replay regenerated different request content; "
+                "see docs/technical-plans/20260826-checkpoint-persistence-root-fix.md)",
+                existing.tool_call_id,
+                ", ".join(sorted(diverged)),
+            )
         prior_status = existing.status
         decision = _decision_for_existing(
             existing,
