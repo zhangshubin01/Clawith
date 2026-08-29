@@ -103,6 +103,21 @@ Rules:
   drop stale ones, and merge newer information into a single consolidated
   summary under the same structure."""
 
+# The checkpoint's fixed section headings. Structure validation (F1.5) is
+# deliberately lenient: weak models occasionally merge a section, and the cost
+# of one retry outweighs the cost of a slightly merged checkpoint.
+_COMPACTION_SECTION_HEADINGS = (
+    "## Primary Request and Intent",
+    "## Key Technical Concepts",
+    "## Files and Code",
+    "## Errors and Fixes",
+    "## Pending Jobs",
+    "## Current Work",
+    "## Next Step",
+    "## Critical Context",
+)
+_MIN_COMPACTION_SECTIONS = 5
+
 
 @dataclass(frozen=True, slots=True)
 class CompactContextBudgets:
@@ -511,30 +526,14 @@ def _summary_from_step(step: LLMCompletionStep) -> JsonObject:
             "empty_thread_compact_output",
             "Thread Compact model returned no summary text",
         )
-    return {"format": _SUMMARY_FORMAT, "text": text}
-
-
-def _summary_from_step(step: LLMCompletionStep) -> JsonObject:
-    if step.tool_calls or step.retry_instruction is not None:
-        raise RunCompactorError(
-            "invalid_thread_compact_output",
-            "Thread Compact model returned an unexpected tool protocol",
-        )
-    if step.finish_reason == "length":
+    present = sum(
+        1 for heading in _COMPACTION_SECTION_HEADINGS if heading in text
+    )
+    if present < _MIN_COMPACTION_SECTIONS:
         raise _RepairableCompactOutput(
-            "thread_compact_output_truncated",
-            "Thread Compact model output was truncated",
-        )
-    if step.finish_reason in {"content_filter", "refusal", "tool_calls", "unknown"}:
-        raise RunCompactorError(
-            "invalid_thread_compact_output",
-            f"Thread Compact model stopped with {step.finish_reason}",
-        )
-    text = (step.content or "").strip()
-    if not text:
-        raise _RepairableCompactOutput(
-            "empty_thread_compact_output",
-            "Thread Compact model returned no summary text",
+            "thread_compact_output_unstructured",
+            "Thread Compact output has "
+            f"{present} of {len(_COMPACTION_SECTION_HEADINGS)} required sections",
         )
     return {"format": _SUMMARY_FORMAT, "text": text}
 

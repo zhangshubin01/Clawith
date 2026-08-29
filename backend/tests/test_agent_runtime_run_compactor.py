@@ -154,11 +154,14 @@ def _state(messages: list[JsonObject]) -> tuple[RuntimeGraphState, RuntimeContex
 
 def _step(**overrides: str) -> LLMCompletionStep:
     sections = {
-        "Goal": "Complete the work accurately",
-        "Completed Work": "Reviewed earlier context",
-        "Key Decisions and Evidence": "Use the durable receipt",
-        "Unfinished or Blocked": "No blockers",
-        "Next Actions": "Answer the exact current request",
+        "Primary Request and Intent": "Complete the work accurately",
+        "Key Technical Concepts": "Runtime compact internals",
+        "Files and Code": "run_compactor.py",
+        "Errors and Fixes": "No errors",
+        "Pending Jobs": "None",
+        "Current Work": "Compacting completed history",
+        "Next Step": "Answer the exact current request",
+        "Critical Context": "Use the durable receipt",
         **overrides,
     }
     return LLMCompletionStep(
@@ -323,7 +326,7 @@ async def test_at_eighty_percent_compacts_prefix_and_keeps_current_input_exact()
     assert result.compacted is True
     assert result.thread_summary is not None
     assert result.thread_summary["format"] == "thread_running_summary_markdown_v1"
-    assert "## Goal" in result.thread_summary["text"]
+    assert "## Primary Request and Intent" in result.thread_summary["text"]
     assert observed_tools == []
     assert result.recent_messages is not None
     assert result.recent_messages[-1]["content"] == "EXACT CURRENT INPUT"
@@ -809,7 +812,7 @@ async def test_summary_over_4096_tokens_is_rejected() -> None:
     )
 
     async def complete(*_args, **_kwargs):
-        return _step(**{"Completed Work": "x" * 20_000})
+        return _step(**{"Files and Code": "x" * 20_000})
 
     with pytest.raises(RunCompactorError) as raised:
         await _service(
@@ -1005,7 +1008,7 @@ async def test_shrink_failure_single_block_degrades_with_shrink_failed_flag() ->
     async def complete(*_args, **_kwargs):
         nonlocal calls
         calls += 1
-        return _step(**{"Completed Work": "x" * 2_000})
+        return _step(**{"Files and Code": "x" * 2_000})
 
     result = await _service(
         model=_model(tenant_id),
@@ -1020,6 +1023,85 @@ async def test_shrink_failure_single_block_degrades_with_shrink_failed_flag() ->
     assert result.thread_summary["degraded"] is True
     assert result.thread_summary["shrink_failed"] is True
     assert result.thread_summary["reason"] == "model_summary_incomplete"
+
+
+@pytest.mark.asyncio
+async def test_unstructured_output_degrades_single_block() -> None:
+    state, context, tenant_id = _state(
+        [_normal("old", "old " * 300), _normal("current")]
+    )
+    calls = 0
+
+    async def complete(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        return LLMCompletionStep(
+            content=(
+                "## Primary Request and Intent\nKeep going\n\n"
+                "## Errors and Fixes\nNo errors"
+            ),
+            tool_calls=(),
+            reasoning_content=None,
+            retry_instruction=None,
+            usage=TokenUsage(total_tokens=1),
+        )
+
+    result = await _service(
+        model=_model(tenant_id),
+        completion=complete,
+        effective_budget=1_000,
+        current_tokens=900,
+    ).compact_if_needed(state, context)
+
+    assert calls == 1
+    assert result.compacted is True
+    assert result.thread_summary is not None
+    assert result.thread_summary["degraded"] is True
+    assert result.thread_summary.get("shrink_failed") is not True
+
+
+@pytest.mark.asyncio
+async def test_unstructured_output_splits_batch_instead_of_degrading() -> None:
+    state, context, tenant_id = _state(
+        [
+            _normal("old-1", "old one " * 200),
+            _normal("old-2", "old two " * 200),
+            _normal("current"),
+        ]
+    )
+    responses = [
+        LLMCompletionStep(
+            content=(
+                "## Primary Request and Intent\nKeep going\n\n"
+                "## Key Technical Concepts\npython\n\n"
+                "## Files and Code\nrun_compactor.py\n\n"
+                "## Errors and Fixes\nNo errors"
+            ),
+            tool_calls=(),
+            reasoning_content=None,
+            retry_instruction=None,
+            usage=TokenUsage(total_tokens=1),
+        ),
+        _step(),
+        _step(),
+    ]
+    prompts: list[list] = []
+
+    async def complete(_model, messages, **_kwargs):
+        prompts.append(messages)
+        return responses.pop(0)
+
+    result = await _service(
+        model=_model(tenant_id),
+        completion=complete,
+        effective_budget=1_000,
+        current_tokens=900,
+    ).compact_if_needed(state, context)
+
+    assert result.compacted is True
+    assert len(prompts) == 3
+    assert result.thread_summary is not None
+    assert result.thread_summary.get("degraded") is not True
 
 
 @pytest.mark.asyncio
