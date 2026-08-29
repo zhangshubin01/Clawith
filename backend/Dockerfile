@@ -64,7 +64,6 @@ RUN rm -rf /app/.venv /app/.venv-test /app/agent_data /app/data /app/.pytest_cac
 RUN useradd --create-home clawith && \
     mkdir -p /data/agents && \
     chmod +x /app/entrypoint.sh && \
-    chmod u+s /usr/bin/bwrap && \
     chown -R clawith:clawith /data
 
 RUN su - clawith -c "git config --global user.name 'Clawith Agent' && git config --global user.email 'agent@clawith.local' && git config --global safe.directory /data/agents"
