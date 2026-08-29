@@ -348,7 +348,7 @@ async def test_large_image_base64_is_excluded_from_recent_budget_and_compact_pro
     payloads: list[dict] = []
 
     async def complete(_model, prompt, **_kwargs):
-        payloads.append(json.loads(prompt[1].content))
+        payloads.append(json.loads(prompt[0].content))
         return _step()
 
     result = await _service(
@@ -380,7 +380,7 @@ async def test_long_single_run_compacts_safe_work_after_exact_current_input() ->
     payloads: list[dict] = []
 
     async def complete(_model, prompt, **_kwargs):
-        payloads.append(json.loads(prompt[1].content))
+        payloads.append(json.loads(prompt[0].content))
         return _step()
 
     result = await _service(
@@ -472,7 +472,7 @@ async def test_prior_run_plain_candidates_and_repairs_never_enter_compact_summar
     payloads: list[dict] = []
 
     async def complete(_model, prompt, **_kwargs):
-        payloads.append(json.loads(prompt[1].content))
+        payloads.append(json.loads(prompt[0].content))
         return _step()
 
     result = await _service(
@@ -520,7 +520,7 @@ async def test_current_run_repair_state_stays_raw_but_out_of_compact_prompt() ->
     payloads: list[dict] = []
 
     async def complete(_model, prompt, **_kwargs):
-        payloads.append(json.loads(prompt[1].content))
+        payloads.append(json.loads(prompt[0].content))
         return _step()
 
     result = await _service(
@@ -689,7 +689,7 @@ async def test_oversized_settled_exchange_enters_summary_as_facts_and_refs() -> 
     payloads: list[dict] = []
 
     async def complete(_model, prompt, **_kwargs):
-        payloads.append(json.loads(prompt[1].content))
+        payloads.append(json.loads(prompt[0].content))
         return _step()
 
     result = await _service(
@@ -910,6 +910,116 @@ async def test_length_output_splits_batch_instead_of_repeating_same_prompt() -> 
     assert len(prompts) == 3
     assert prompts[0] != prompts[1]
     assert prompts[0] != prompts[2]
+
+
+@pytest.mark.asyncio
+async def test_compaction_instruction_is_final_user_message_without_system() -> None:
+    state, context, tenant_id = _state(
+        [_normal("old", "old " * 300), _normal("current")]
+    )
+    prompts: list[list] = []
+
+    async def complete(_model, messages, **_kwargs):
+        prompts.append(messages)
+        return _step()
+
+    result = await _service(
+        model=_model(tenant_id),
+        completion=complete,
+        effective_budget=1_000,
+        current_tokens=900,
+    ).compact_if_needed(state, context)
+
+    assert result.compacted is True
+    assert len(prompts) == 1
+    messages = prompts[0]
+    assert len(messages) == 2
+    assert all(message.role != "system" for message in messages)
+    assert messages[0].role == "user"
+    json.loads(messages[0].content)
+    assert messages[1].role == "user"
+    instruction = messages[1].content
+    for section in (
+        "## Primary Request and Intent",
+        "## Key Technical Concepts",
+        "## Files and Code",
+        "## Errors and Fixes",
+        "## Pending Jobs",
+        "## Current Work",
+        "## Next Step",
+        "## Critical Context",
+    ):
+        assert section in instruction
+    assert "stuck loop" in instruction
+    assert "Next Step never controls Runtime routing" in instruction
+
+
+@pytest.mark.asyncio
+async def test_shrink_failure_splits_batch_instead_of_repeating_same_prompt() -> None:
+    state, context, tenant_id = _state(
+        [
+            _normal("old-1", "old one " * 200),
+            _normal("old-2", "old two " * 200),
+            _normal("current"),
+        ]
+    )
+    responses = [
+        LLMCompletionStep(
+            content="x" * 4_000,
+            tool_calls=(),
+            reasoning_content=None,
+            retry_instruction=None,
+            usage=TokenUsage(total_tokens=1),
+        ),
+        _step(),
+        _step(),
+    ]
+    prompts: list[list] = []
+
+    async def complete(_model, messages, **_kwargs):
+        prompts.append(messages)
+        return responses.pop(0)
+
+    result = await _service(
+        model=_model(tenant_id),
+        completion=complete,
+        effective_budget=1_000,
+        current_tokens=900,
+    ).compact_if_needed(state, context)
+
+    assert result.compacted is True
+    assert len(prompts) == 3
+    assert prompts[0] != prompts[1]
+    assert prompts[0] != prompts[2]
+    assert result.thread_summary is not None
+    assert result.thread_summary.get("degraded") is not True
+
+
+@pytest.mark.asyncio
+async def test_shrink_failure_single_block_degrades_with_shrink_failed_flag() -> None:
+    state, context, tenant_id = _state(
+        [_normal("old", "x" * 1_500), _normal("current")]
+    )
+    calls = 0
+
+    async def complete(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        return _step(**{"Completed Work": "x" * 2_000})
+
+    result = await _service(
+        model=_model(tenant_id),
+        completion=complete,
+        effective_budget=1_000,
+        current_tokens=900,
+    ).compact_if_needed(state, context)
+
+    assert calls == 1
+    assert result.compacted is True
+    assert result.thread_summary is not None
+    assert result.thread_summary["degraded"] is True
+    assert result.thread_summary["shrink_failed"] is True
+    assert result.thread_summary["reason"] == "model_summary_incomplete"
 
 
 @pytest.mark.asyncio
