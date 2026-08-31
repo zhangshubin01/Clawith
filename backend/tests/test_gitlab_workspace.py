@@ -1,6 +1,7 @@
 """Unit tests for the GitLab workspace init service (three-state logic)."""
 
 import asyncio
+import uuid
 
 import pytest
 
@@ -368,3 +369,65 @@ def test_guide_content_written(tmp_path):
     gw._write_guide(tmp_path, "wwg1b", "liuyl/wwg1b", "f_android_ai", adopt_note=True)
     text = (tmp_path / "GITLAB_GUIDE.md").read_text(encoding="utf-8")
     assert "尚未发现 `main`" in text
+
+
+# ── 幂等调度（schedule_gitlab_workspace_init）─────────────────
+
+
+def _schedule_scenario(monkeypatch):
+    """在一个事件循环内跑完整调度场景。返回 (calls, results)。"""
+
+    calls: list[tuple] = []
+
+    async def _slow_init(agent_id, project_path, default_branch, pat, base_url=None):
+        calls.append((project_path, default_branch, base_url))
+        await asyncio.sleep(0.05)
+
+    monkeypatch.setattr(gw, "run_gitlab_workspace_init", _slow_init)
+
+    async def _run():
+        agent_id = uuid.uuid4()
+        results = []
+        results.append(("first", gw.schedule_gitlab_workspace_init(agent_id, "g/r", "f_android_ai", "pat", "http://h")))
+        # 在途同签名重存：复用，不重复排队
+        results.append(("dup", gw.schedule_gitlab_workspace_init(agent_id, "g/r", "f_android_ai", "pat", "http://h")))
+        assert gw.init_in_flight(agent_id) is True
+        # 在途但签名变化：新任务排队（agent 锁串行）
+        results.append(("changed", gw.schedule_gitlab_workspace_init(agent_id, "g/r2", "f_android_ai", "pat", "http://h")))
+        await asyncio.sleep(0.2)  # 等两个任务完成并自清理
+        assert gw.init_in_flight(agent_id) is False
+        # 任务结束后再次相同保存：重新调度
+        results.append(("after-done", gw.schedule_gitlab_workspace_init(agent_id, "g/r", "f_android_ai", "pat", "http://h")))
+        await asyncio.sleep(0.1)
+        return calls, results
+
+    return asyncio.run(_run())
+
+
+def test_schedule_dedups_identical_inflight_signature(monkeypatch):
+    calls, results = _schedule_scenario(monkeypatch)
+    assert results == [("first", True), ("dup", False), ("changed", True), ("after-done", True)]
+    assert calls == [
+        ("g/r", "f_android_ai", "http://h"),
+        ("g/r2", "f_android_ai", "http://h"),
+        ("g/r", "f_android_ai", "http://h"),
+    ]
+
+
+def test_schedule_signature_distinguishes_base_url(monkeypatch):
+    calls: list[tuple] = []
+
+    async def _counting_init(agent_id, project_path, default_branch, pat, base_url=None):
+        calls.append((project_path, base_url))
+        await asyncio.sleep(0.02)
+
+    monkeypatch.setattr(gw, "run_gitlab_workspace_init", _counting_init)
+
+    async def _run():
+        agent_id = uuid.uuid4()
+        assert gw.schedule_gitlab_workspace_init(agent_id, "g/r", "f_android_ai", "pat", "http://h1") is True
+        assert gw.schedule_gitlab_workspace_init(agent_id, "g/r", "f_android_ai", "pat", "http://h2") is True
+        await asyncio.sleep(0.1)
+
+    asyncio.run(_run())
+    assert calls == [("g/r", "http://h1"), ("g/r", "http://h2")]

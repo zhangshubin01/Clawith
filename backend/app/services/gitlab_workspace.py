@@ -35,6 +35,10 @@ from app.config import get_settings
 
 _AGENT_INIT_LOCKS: dict[uuid.UUID, asyncio.Lock] = {}
 
+# 幂等调度注册表：agent_id → (in-flight task, 调度签名)。
+# 同签名任务在途时复用（连点保存不重复排队）；签名变化才新调度；任务结束自清理。
+_INIT_TASKS: dict[uuid.UUID, tuple[asyncio.Task, tuple]] = {}
+
 _SANDBOX_JUNK = {".tmp"}
 
 _BRANCH_RE = re.compile(r"^[A-Za-z0-9_\-./]+$")
@@ -390,6 +394,7 @@ async def run_gitlab_workspace_init(
     project_path: str,
     default_branch: str,
     pat: str,
+    base_url: str | None = None,
 ) -> None:
     """Initialize (or refresh credentials of) the agent's bound repo. Best-effort
     background task: all failures are recorded in the binding's init state."""
@@ -399,7 +404,7 @@ async def run_gitlab_workspace_init(
     from app.models.agent import Agent as AgentModel
 
     settings = get_settings()
-    base_url = settings.GITLAB_BASE_URL.rstrip("/")
+    base_url = (base_url or settings.GITLAB_BASE_URL).rstrip("/")
     root = repo_root(agent_id)
     try:
         repo = repo_path(agent_id, project_path)
@@ -487,3 +492,45 @@ async def run_gitlab_workspace_init(
                 elif mode == "adopt" and (repo / ".git").exists():
                     shutil.rmtree(repo / ".git", ignore_errors=True)
                 await _update_state(session, agent_id, status="failed", error=err)
+
+
+def _init_signature(
+    project_path: str,
+    default_branch: str,
+    base_url: str | None,
+    pat: str,
+) -> tuple:
+    return (project_path, default_branch, (base_url or "").rstrip("/"), pat)
+
+
+def init_in_flight(agent_id: uuid.UUID) -> bool:
+    """Whether an init task for this agent is currently running (not finished)."""
+    entry = _INIT_TASKS.get(agent_id)
+    return entry is not None and not entry[0].done()
+
+
+def schedule_gitlab_workspace_init(
+    agent_id: uuid.UUID,
+    project_path: str,
+    default_branch: str,
+    pat: str,
+    base_url: str | None = None,
+) -> bool:
+    """幂等调度 init 任务。同签名任务在途时复用（返回 False 不再排队）；
+    签名变化（路径/分支/实例/token 任一不同）则新任务排队，由 agent 锁串行执行。"""
+    sig = _init_signature(project_path, default_branch, base_url, pat)
+    entry = _INIT_TASKS.get(agent_id)
+    if entry is not None and not entry[0].done() and entry[1] == sig:
+        return False
+    task = asyncio.create_task(
+        run_gitlab_workspace_init(agent_id, project_path, default_branch, pat, base_url)
+    )
+    _INIT_TASKS[agent_id] = (task, sig)
+
+    def _on_done(t: asyncio.Task) -> None:
+        cur = _INIT_TASKS.get(agent_id)
+        if cur is not None and cur[0] is t:
+            _INIT_TASKS.pop(agent_id, None)
+
+    task.add_done_callback(_on_done)
+    return True

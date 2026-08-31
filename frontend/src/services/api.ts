@@ -391,15 +391,16 @@ export const channelApi = {
 };
 
 // ─── GitLab agent binding ────────────────────────────────
+// 路径带尾斜杠：后端路由为 `/gitlab-binding/`，不带斜杠会先 307 再重发。
 export const gitlabBindingApi = {
     get: (agentId: string) =>
-        request<any>(`/agents/${agentId}/gitlab-binding`).catch(() => null),
+        request<any>(`/agents/${agentId}/gitlab-binding/`).catch(() => null),
 
     put: (agentId: string, data: any) =>
-        request<any>(`/agents/${agentId}/gitlab-binding`, { method: 'PUT', body: JSON.stringify(data) }),
+        request<any>(`/agents/${agentId}/gitlab-binding/`, { method: 'PUT', body: JSON.stringify(data) }),
 
     del: (agentId: string) =>
-        request<void>(`/agents/${agentId}/gitlab-binding`, { method: 'DELETE' }),
+        request<void>(`/agents/${agentId}/gitlab-binding/`, { method: 'DELETE' }),
 };
 
 // ─── Enterprise ───────────────────────────────────────
