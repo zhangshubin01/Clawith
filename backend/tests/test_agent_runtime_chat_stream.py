@@ -54,11 +54,19 @@ class _SessionFactory:
 class _EventSource:
     """Fixed event source; with ``hang=True`` it never yields again after the
     given events (like a Run whose delivery event was idempotently
-    deduplicated away)."""
+    deduplicated away). ``boundary``, when given, is what the source's
+    ``current_waiting_boundary`` probe reports to the attachment logic."""
 
-    def __init__(self, events: list[RuntimeEvent], *, hang: bool = False) -> None:
+    def __init__(
+        self,
+        events: list[RuntimeEvent],
+        *,
+        hang: bool = False,
+        boundary: RuntimeEvent | None = None,
+    ) -> None:
         self.events = events
         self.hang = hang
+        self.boundary = boundary
         self.after: RuntimeEventCursor | None = None
 
     async def stream_run(self, handle, *, after=None):
@@ -68,6 +76,10 @@ class _EventSource:
             yield event
         if self.hang:
             await asyncio.Event().wait()
+
+    async def current_waiting_boundary(self, handle) -> RuntimeEvent | None:
+        del handle
+        return self.boundary
 
 
 def _handle() -> RunHandle:
@@ -748,3 +760,152 @@ async def test_tool_output_content_preserves_trailing_newline() -> None:
     assert live[0]["output"] == "▶ 正在执行 :app:preBuild\n✓ 完成 :app:preBuild\n", (
         "tool_output 末尾换行不能被 strip，否则前端逐块 append 会粘连"
     )
+
+
+def _cursor_at(
+    event: RuntimeEvent,
+    *,
+    offset_seconds: float,
+    event_id: uuid.UUID | None = None,
+) -> RuntimeEventCursor:
+    return RuntimeEventCursor(
+        event.created_at + timedelta(seconds=offset_seconds),
+        event_id or uuid.uuid4(),
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("offset_seconds", "same_event_id"),
+    [(0.0, True), (1.0, False)],
+)
+async def test_attach_to_parked_wait_with_cursor_at_or_past_boundary_ends_immediately(
+    offset_seconds: float,
+    same_event_id: bool,
+) -> None:
+    """A reconnection whose cursor is at or past the waiting boundary must
+    end the attachment at that boundary without sending a single packet — the
+    boundary is behind the cursor, so nothing may be replayed, and the idle
+    120s kill must never be reached. ``offset_seconds=0`` pins the equality
+    branch of the boundary comparison (``<=``)."""
+    handle = _handle()
+    waiting = _waiting_started_event(handle)
+    packets: list[dict] = []
+
+    async def send(packet: dict) -> None:
+        packets.append(packet)
+
+    outcome = await asyncio.wait_for(
+        stream_web_chat_run(
+            handle=handle,
+            session_factory=_SessionFactory(),  # type: ignore[arg-type]
+            send_packet=send,
+            agent_id=uuid.uuid4(),
+            session_id=uuid.uuid4(),
+            user_id=uuid.uuid4(),
+            after=_cursor_at(
+                waiting,
+                offset_seconds=offset_seconds,
+                event_id=waiting.event_id if same_event_id else None,
+            ),
+            event_source=_EventSource([], hang=True, boundary=waiting),
+            waiting_grace_seconds=0.05,
+        ),
+        timeout=1.0,
+    )
+
+    assert outcome.status == "waiting_user"
+    assert outcome.correlation_id == "publish-confirmation"
+    assert outcome.content == "Should I publish it?"
+    assert outcome.cursor.event_id == waiting.event_id
+    assert packets == []
+
+
+@pytest.mark.asyncio
+async def test_attach_with_cursor_before_boundary_replays_the_boundary() -> None:
+    """A cursor behind the boundary means the client has not seen the wait
+    yet: the probe must not short-circuit, and the live replay path delivers
+    the waiting event normally."""
+    handle = _handle()
+    waiting = _waiting_started_event(handle)
+    packets: list[dict] = []
+
+    async def send(packet: dict) -> None:
+        packets.append(packet)
+
+    outcome = await asyncio.wait_for(
+        stream_web_chat_run(
+            handle=handle,
+            session_factory=_SessionFactory(),  # type: ignore[arg-type]
+            send_packet=send,
+            agent_id=uuid.uuid4(),
+            session_id=uuid.uuid4(),
+            user_id=uuid.uuid4(),
+            after=_cursor_at(waiting, offset_seconds=-1.0),
+            event_source=_EventSource([waiting], hang=True, boundary=waiting),
+            waiting_grace_seconds=0.05,
+        ),
+        timeout=1.0,
+    )
+
+    assert outcome.status == "waiting_user"
+    assert [packet["type"] for packet in packets] == ["runtime_status"]
+
+
+@pytest.mark.asyncio
+async def test_null_boundary_probe_falls_back_to_replay() -> None:
+    """When the source reports no boundary (Run not parked at a first user
+    wait), the attachment behaves exactly as before the probe existed."""
+    handle = _handle()
+    waiting = _waiting_started_event(handle)
+    packets: list[dict] = []
+
+    async def send(packet: dict) -> None:
+        packets.append(packet)
+
+    outcome = await asyncio.wait_for(
+        stream_web_chat_run(
+            handle=handle,
+            session_factory=_SessionFactory(),  # type: ignore[arg-type]
+            send_packet=send,
+            agent_id=uuid.uuid4(),
+            session_id=uuid.uuid4(),
+            user_id=uuid.uuid4(),
+            after=_cursor_at(waiting, offset_seconds=1.0),
+            event_source=_EventSource([waiting], hang=True, boundary=None),
+            waiting_grace_seconds=0.05,
+        ),
+        timeout=1.0,
+    )
+
+    assert outcome.status == "waiting_user"
+    assert [packet["type"] for packet in packets] == ["runtime_status"]
+
+
+@pytest.mark.asyncio
+async def test_boundary_without_correlation_fails_loudly() -> None:
+    """A user wait whose payload lost its correlation cannot be resumed; the
+    attachment must fail loudly instead of fabricating an outcome."""
+    handle = _handle()
+    boundary = _event(
+        handle,
+        "waiting_started",
+        position=2,
+        payload={"status": "waiting_user", "waiting_type": "user"},
+    )
+
+    with pytest.raises(ChatRuntimeStreamError) as exc_info:
+        await asyncio.wait_for(
+            stream_web_chat_run(
+                handle=handle,
+                session_factory=_SessionFactory(),  # type: ignore[arg-type]
+                send_packet=lambda packet: None,
+                agent_id=uuid.uuid4(),
+                session_id=uuid.uuid4(),
+                user_id=uuid.uuid4(),
+                after=_cursor_at(boundary, offset_seconds=1.0),
+                event_source=_EventSource([], hang=True, boundary=boundary),
+            ),
+            timeout=2.0,
+        )
+    assert exc_info.value.code == "runtime_wait_correlation_missing"

@@ -6,7 +6,7 @@ import asyncio
 from collections import deque
 from datetime import UTC, datetime
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 import uuid
 
 from fastapi import WebSocketDisconnect
@@ -1111,3 +1111,81 @@ async def test_followup_message_is_durably_accepted_while_current_stream_runs() 
         and packet.get("run_id") == str(queued.runtime.run.handle.run_id)
         for packet in websocket.sent
     )
+
+
+@pytest.mark.asyncio
+async def test_attach_logs_the_client_cursor_for_forensics() -> None:
+    """The attach cursor decides whether a reconnection replays or parks at a
+    waiting boundary; it must land in the logs so idle-kill incidents are
+    directly observable instead of inferred from behavior.
+
+    websocket.py logs via loguru (intercepted by the app's logging config), so
+    the assertion patches the module's logger object instead of using caplog,
+    which only sees stdlib records."""
+    handler = _handler(_WebSocket())
+    handler.agent = SimpleNamespace(id=handler.agent_id, tenant_id=handler.user.tenant_id)
+    session = ChatSession(
+        id=uuid.UUID(handler.conv_id),
+        tenant_id=handler.user.tenant_id,
+        session_type="direct",
+        agent_id=handler.agent_id,
+        user_id=handler.user.id,
+        title="Direct",
+        source_channel="web",
+        is_group=False,
+        is_primary=True,
+    )
+    run = AgentRun(
+        id=uuid.uuid4(),
+        tenant_id=handler.user.tenant_id,
+        agent_id=handler.agent_id,
+        session_id=session.id,
+        source_type="chat",
+        goal="Answer",
+        run_kind="foreground",
+        model_id=uuid.uuid4(),
+        model_turn_limit=50,
+        runtime_type="langgraph",
+        runtime_thread_id=str(session.id),
+        graph_name="runtime_graph",
+        graph_version="v1",
+        scheduling_lane_key=(
+            f"direct_chat_thread:{handler.user.tenant_id}:{session.id}"
+        ),
+        scheduling_position_created_at=datetime.now(UTC),
+        scheduling_position_id=uuid.uuid4(),
+        lane_held=True,
+        delivery_status="pending",
+        origin_user_id=handler.user.id,
+    )
+    command = AgentRunCommand(
+        id=uuid.uuid4(),
+        tenant_id=run.tenant_id,
+        run_id=run.id,
+        command_type="start",
+        payload={},
+        idempotency_key=f"start:{run.id}",
+        status="applied",
+        attempt_count=0,
+        created_at=datetime.now(UTC),
+        applied_at=datetime.now(UTC),
+    )
+    db = _Session({User: handler.user, ChatSession: session}, run, command)
+    cursor = f"2026-07-17T10:00:00+00:00|{uuid.uuid4()}"
+
+    with patch("app.api.websocket.async_session", return_value=db), patch(
+        "app.api.websocket.logger", new=MagicMock()
+    ) as mock_logger:
+        intake = await handler._attach_runtime_run(
+            {"run_id": str(run.id), "cursor": cursor}
+        )
+
+    assert intake is not None
+    assert intake.stream_after is not None
+    attach_logs = [
+        call_args
+        for call_args in mock_logger.info.call_args_list
+        if str(run.id) in str(call_args)
+    ]
+    assert attach_logs
+    assert any(cursor in str(call_args) for call_args in attach_logs)

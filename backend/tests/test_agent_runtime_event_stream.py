@@ -7,6 +7,7 @@ from collections import deque
 from contextlib import suppress
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
+from unittest.mock import patch
 import uuid
 
 import pytest
@@ -82,12 +83,16 @@ class _DispatchSession:
         delivery_status: str = "pending",
         command_row: SimpleNamespace | None = None,
         lease_active: bool = False,
+        latest_lifecycle_row: SimpleNamespace | None = None,
+        resume_command_exists: bool = False,
     ) -> None:
         self.run = run
         self.event_batches = deque(event_batches)
         self.delivery_status = delivery_status
         self.command_row = command_row
         self.lease_active = lease_active
+        self.latest_lifecycle_row = latest_lifecycle_row
+        self.resume_command_exists = resume_command_exists
 
     async def __aenter__(self):
         return self
@@ -102,6 +107,12 @@ class _DispatchSession:
             table = getattr(columns[0], "table", None)
             table = table.name if table is not None else None
         if table == "agent_run_events":
+            if len(columns) == 2:
+                # The idle-liveness waiting probe: latest non-delivery event type.
+                return _Result(one=self.latest_lifecycle_row)
+            if len(columns) == 9:
+                # current_waiting_boundary: the latest non-delivery event row.
+                return _Result(one=self.latest_lifecycle_row)
             batch = self.event_batches.popleft() if self.event_batches else []
             return _Result(rows=batch)
         if table == "agent_runs":
@@ -110,6 +121,9 @@ class _DispatchSession:
             return _Result(scalar=self.run)
         if table == "agent_run_commands":
             return _Result(one=self.command_row)
+        if "agent_run_commands" in str(statement):
+            # The resume-command existence probe (EXISTS subquery).
+            return _Result(scalar=self.resume_command_exists)
         return _Result(scalar=self.lease_active)
 
 
@@ -504,3 +518,149 @@ async def test_idle_stream_raises_when_no_liveness_signal_remains(command_presen
     with pytest.raises(RuntimeEventStreamError) as exc_info:
         await asyncio.wait_for(anext(agent), timeout=2)
     assert exc_info.value.code == "runtime_event_stream_idle_timeout"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("waiting_type", ["user", "external"])
+async def test_idle_stream_keeps_waiting_when_run_is_parked_at_waiting_boundary(
+    waiting_type: str,
+) -> None:
+    """A Run parked at a waiting boundary is legitimately idle, not dead.
+
+    The parked Run has no command claim and no tool lease by design
+    (its command is applied and the graph waits indefinitely for input),
+    so only the waiting signal can keep the idle stream open — and it must
+    leave a warning trace, since a silently hung stream would hide a worker
+    that died while parked.
+    """
+    run, handle = _run()
+    base = datetime.now(UTC)
+    first_event = _event(run, "status_changed", created_at=base)
+    session = _DispatchSession(
+        run=run,
+        event_batches=((first_event,),),
+        command_row=SimpleNamespace(status="applied", claim_expires_at=None),
+        lease_active=False,
+        latest_lifecycle_row=SimpleNamespace(
+            event_type="waiting_started",
+            payload={"waiting_type": waiting_type},
+        ),
+    )
+    stream = DatabaseRuntimeEventStream(
+        session_factory=lambda: session,  # type: ignore[arg-type]
+        poll_interval_seconds=0.001,
+        idle_timeout_seconds=0.05,
+    )
+    with patch("app.services.agent_runtime.event_stream.logger") as mock_logger:
+        agent = stream.stream_run(handle)
+        assert (await anext(agent)).event_id == first_event.id
+
+        waiter = asyncio.create_task(anext(agent))
+        try:
+            await asyncio.sleep(0.3)
+            assert not waiter.done(), "a parked waiting Run must keep the idle stream open"
+        finally:
+            waiter.cancel()
+            with suppress(asyncio.CancelledError):
+                await waiter
+        with suppress(Exception):
+            await agent.aclose()
+
+    keep_alive_logs = [
+        args
+        for call_args in mock_logger.warning.call_args_list
+        for args in [call_args.args]
+        if len(args) > 1 and str(handle.run_id) in str(args[1])
+    ]
+    assert keep_alive_logs
+    assert any(
+        len(args) > 2
+        and "waiting_type={}" in args[0]
+        and args[2] == waiting_type
+        for args in keep_alive_logs
+    )
+
+
+def _lifecycle_row(
+    run: AgentRun,
+    *,
+    event_type: str,
+    payload: dict | None = None,
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        tenant_id=run.tenant_id,
+        run_id=run.id,
+        event_type=event_type,
+        payload=payload if payload is not None else {"status": event_type},
+        created_at=datetime(2026, 8, 31, 1, 46, 13, tzinfo=UTC),
+        id=uuid.uuid4(),
+        summary=event_type.replace("_", " "),
+        artifact_refs=[],
+        source_checkpoint_id="checkpoint-1",
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("waiting_type", ["user", "waiting_user"])
+async def test_current_waiting_boundary_returns_first_user_wait(waiting_type: str) -> None:
+    run, handle = _run()
+    boundary = _lifecycle_row(
+        run,
+        event_type="waiting_started",
+        payload={
+            "waiting_type": waiting_type,
+            "correlation_id": "corr-1",
+            "question": "credentials?",
+        },
+    )
+    session = _DispatchSession(
+        run=run,
+        latest_lifecycle_row=boundary,
+        resume_command_exists=False,
+    )
+    stream = DatabaseRuntimeEventStream(
+        session_factory=lambda: session,  # type: ignore[arg-type]
+    )
+    event = await stream.current_waiting_boundary(handle)
+    assert event is not None
+    assert event.event_type == "waiting_started"
+    assert event.payload["correlation_id"] == "corr-1"
+    assert event.created_at == boundary.created_at
+    assert event.event_id == boundary.id
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("latest", "resume_exists", "reason"),
+    [
+        (None, False, "no lifecycle events at all"),
+        ("status_changed", False, "latest event is not a waiting boundary"),
+        ("waiting_started_external", False, "non-user wait"),
+        ("waiting_started_user", True, "run has resume history"),
+    ],
+)
+async def test_current_waiting_boundary_declines_when_not_parked_first_wait(
+    latest: str | None, resume_exists: bool, reason: str
+) -> None:
+    del reason
+    run, handle = _run()
+    row = None
+    if latest == "status_changed":
+        row = _lifecycle_row(run, event_type="status_changed")
+    elif latest == "waiting_started_external":
+        row = _lifecycle_row(
+            run, event_type="waiting_started", payload={"waiting_type": "external"}
+        )
+    elif latest == "waiting_started_user":
+        row = _lifecycle_row(
+            run, event_type="waiting_started", payload={"waiting_type": "user"}
+        )
+    session = _DispatchSession(
+        run=run,
+        latest_lifecycle_row=row,
+        resume_command_exists=resume_exists,
+    )
+    stream = DatabaseRuntimeEventStream(
+        session_factory=lambda: session,  # type: ignore[arg-type]
+    )
+    assert await stream.current_waiting_boundary(handle) is None

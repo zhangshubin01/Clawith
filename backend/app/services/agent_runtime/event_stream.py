@@ -10,6 +10,7 @@ import math
 import time as time_module
 from typing import cast
 
+from loguru import logger
 from sqlalchemy import and_, exists, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -134,6 +135,34 @@ def _runtime_event(row: AgentRunEvent) -> RuntimeEvent:
     )
 
 
+async def _latest_lifecycle_row(
+    db: AsyncSession,
+    handle: RunHandle,
+    *columns: object,
+):
+    """Newest non-delivery event row for a Run, or None.
+
+    The keep-alive probe and the waiting-boundary probe share this exact
+    shape — same tenant/run filter, same delivery exclusion, same
+    ``created_at desc, id desc`` ordering — with different column sets.
+    """
+    return (
+        await db.execute(
+            select(*columns)
+            .where(
+                AgentRunEvent.tenant_id == handle.tenant_id,
+                AgentRunEvent.run_id == handle.run_id,
+                AgentRunEvent.event_type.notin_(_DELIVERY_EVENT_TYPES),
+            )
+            .order_by(
+                AgentRunEvent.created_at.desc(),
+                AgentRunEvent.id.desc(),
+            )
+            .limit(1)
+        )
+    ).one_or_none()
+
+
 class DatabaseRuntimeEventStream:
     """Yield ordered AgentRunEvents through short-lived read sessions."""
 
@@ -196,6 +225,13 @@ class DatabaseRuntimeEventStream:
         without persisting events, so an idle event table alone does not mean
         the worker stopped processing the Run. Only when every liveness signal
         has gone cold is the Run truly unattended.
+
+        A Run parked at a waiting boundary (LangGraph interrupt) is a third,
+        legitimate resting state: its command is applied with no claim, no
+        tool lease is open, and it stays parked until external input resumes
+        it. Such a Run is idle by design, not dead. It is kept alive with a
+        warning trace so a worker that actually died while parked remains
+        forensically visible (repeated keep-alive logs with no recovery).
         """
         now = datetime.now(UTC)
         command_result = await db.execute(
@@ -227,7 +263,67 @@ class DatabaseRuntimeEventStream:
                 )
             )
         )
-        return bool(lease_result.scalar())
+        if lease_result.scalar():
+            return True
+        lifecycle_row = await _latest_lifecycle_row(
+            db, handle, AgentRunEvent.event_type, AgentRunEvent.payload
+        )
+        if lifecycle_row is not None and lifecycle_row.event_type == "waiting_started":
+            payload = (
+                lifecycle_row.payload if isinstance(lifecycle_row.payload, dict) else {}
+            )
+            logger.warning(
+                "Run {} is parked at a waiting boundary; keeping its idle "
+                "event stream alive (waiting_type={})",
+                handle.run_id,
+                payload.get("waiting_type"),
+            )
+            return True
+        return False
+
+    async def current_waiting_boundary(self, handle: RunHandle) -> RuntimeEvent | None:
+        """Return the Run's open user waiting boundary when it is safely parked.
+
+        Short-circuit signal for a stream attachment whose client cursor is
+        already at or past the boundary: a Run parked at a user-facing wait
+        with no resume command in its history is definitively parked. Any
+        resume command row disqualifies the short-circuit — the Run resumed
+        at least once and may be mid-execution or re-waiting, and the
+        ``resumed`` event can lag the checkpoint boundary by a long time, so
+        the event order is not a reliable signal there. Returns None unless
+        the attachment may end at the boundary immediately.
+        """
+        async with self._session_factory() as db:
+            row = await _latest_lifecycle_row(
+                db,
+                handle,
+                AgentRunEvent.tenant_id,
+                AgentRunEvent.run_id,
+                AgentRunEvent.event_type,
+                AgentRunEvent.payload,
+                AgentRunEvent.created_at,
+                AgentRunEvent.id,
+                AgentRunEvent.summary,
+                AgentRunEvent.artifact_refs,
+                AgentRunEvent.source_checkpoint_id,
+            )
+            if row is None or row.event_type != "waiting_started":
+                return None
+            payload = row.payload if isinstance(row.payload, dict) else {}
+            if payload.get("waiting_type") not in {"user", "waiting_user"}:
+                return None
+            resume_result = await db.execute(
+                select(
+                    exists().where(
+                        AgentRunCommand.tenant_id == handle.tenant_id,
+                        AgentRunCommand.run_id == handle.run_id,
+                        AgentRunCommand.command_type == "resume",
+                    )
+                )
+            )
+            if resume_result.scalar():
+                return None
+        return _runtime_event(row)
 
     async def stream_run(
         self,

@@ -16,6 +16,9 @@ daemon 对 Command 的带 TTL 排他占用；持有期间心跳续期，到期�
 **Lease（执行租约）**:
 Tool Execution 处于 started 时的排他执行窗口；持有者定期续期，到期视为执行者死亡。safe read 的自动重试与孤儿收据的接管都以 lease 为界。
 
+**Waiting（等待边界）**:
+LangGraph interrupt 造成的合法长驻态：Run 停在 waiting_started 事件处等待外部输入（用户回复/审批），收到 resume 命令后继续。驻留期间命令已 applied、无 claim、无工具 lease，也不产生新事件——事件流的 idle-timeout 不得将其误判为死亡；重连附着时若客户端 cursor 已在边界之后，附着直接在边界处以 waiting_user 收尾，不再重放。
+
 **Fence（收据栅栏）**:
 safe read execution 处于 started 且 lease 未到期时，对同 call_id 的后续尝试形成的排他阻挡；撞上 fence 的 Command 走 defer 而不是执行。
 

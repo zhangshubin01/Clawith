@@ -45,6 +45,17 @@ class RuntimeEventSource(Protocol):
         after: RuntimeEventCursor | None = None,
     ) -> AsyncIterator[RuntimeEvent]: ...
 
+    async def current_waiting_boundary(
+        self,
+        handle: RunHandle,
+    ) -> RuntimeEvent | None:
+        """The Run's open user waiting boundary, or None when not parked.
+
+        Probe used by an attachment to decide whether its cursor has already
+        reached the boundary (short-circuit to ``waiting_user``) or the
+        boundary must still be delivered by the normal replay path.
+        """
+
 
 class ChatRuntimeStreamError(RuntimeError):
     """A stable Runtime event cannot be mapped to the requested Web session."""
@@ -140,6 +151,27 @@ async def _close_iterator_quietly(iterator: AsyncIterator[RuntimeEvent]) -> None
         pass
 
 
+def _boundary_at_or_before(
+    after: RuntimeEventCursor,
+    boundary: RuntimeEvent,
+) -> bool:
+    """True when the client cursor has already reached the waiting boundary.
+
+    A boundary at or behind the cursor is one the client already processed,
+    so an attachment may end there without replaying anything. A boundary
+    ahead of the cursor must still be delivered by the normal replay path.
+    """
+    if boundary.created_at is None or boundary.event_id is None:
+        raise ChatRuntimeStreamError(
+            "invalid_runtime_event_position",
+            "Runtime waiting boundary has no reconnect position",
+        )
+    return (boundary.created_at, boundary.event_id) <= (
+        after.created_at,
+        after.event_id,
+    )
+
+
 async def _next_stream_event(
     iterator: AsyncIterator[RuntimeEvent],
     *,
@@ -196,6 +228,28 @@ async def stream_web_chat_run(
     terminal_trace_id: str | None = None
     waiting_text = waiting_content({})
     grace_deadline: float | None = None
+
+    if after is not None:
+        # Attaching to a Run that is already parked at a user-facing wait
+        # with the cursor at or past the boundary must end the attachment
+        # there: the boundary is behind the cursor, so no event will ever be
+        # replayed, and waiting for the event stream's 120s idle kill would
+        # surface a false "worker lost" warning for a healthy parked Run.
+        # A boundary ahead of the cursor is left to the replay path below.
+        boundary = await source.current_waiting_boundary(handle)
+        if boundary is not None and _boundary_at_or_before(after, boundary):
+            correlation_id = _text(boundary.payload.get("correlation_id"))
+            if correlation_id is None:
+                raise ChatRuntimeStreamError(
+                    "runtime_wait_correlation_missing",
+                    "waiting_user Runtime event has no resume correlation",
+                )
+            return ChatRuntimeStreamOutcome(
+                status="waiting_user",
+                content=waiting_content(boundary.payload),
+                cursor=_cursor(boundary),
+                correlation_id=correlation_id,
+            )
 
     iterator = source.stream_run(handle, after=after)
     while True:

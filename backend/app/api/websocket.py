@@ -629,6 +629,12 @@ class WebSocketChatHandler:
                 )
             )
             return None
+        raw_cursor = data.get("cursor")
+        logger.info(
+            "[WS] attach_run run_id=%s cursor=%s",
+            run_id,
+            raw_cursor if raw_cursor else None,
+        )
 
         async with async_session() as db:
             result = await db.execute(
