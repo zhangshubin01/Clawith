@@ -6,6 +6,7 @@ from collections.abc import Collection
 from pathlib import Path
 import uuid
 
+from app.services.experience_retrieval import build_experience_hint
 from app.services.focus_service import render_focus_context
 from app.services.storage import get_storage_backend, normalize_storage_key
 
@@ -229,6 +230,34 @@ async def _load_focus_injection_enabled(db, agent_id: uuid.UUID) -> bool:
             await db.execute(
                 select(SystemSetting).where(
                     SystemSetting.key == f"context_inject_focus_{agent_id}"
+                )
+            )
+        ).scalar_one_or_none()
+    except Exception:
+        return False
+    return bool(
+        setting
+        and isinstance(setting.value, dict)
+        and setting.value.get("enabled") is True
+    )
+
+
+async def _load_experience_hint_injection_enabled(db, agent_id: uuid.UUID) -> bool:
+    """Return True when the per-agent experience-hint injection switch is on.
+
+    The switch is a system_settings row keyed ``context_inject_experience_<agent
+    id>`` whose JSONB value carries ``{"enabled": true}``. Absent or malformed
+    rows mean off (safe default: no behavior change).
+    """
+    from sqlalchemy import select
+
+    from app.models.system_settings import SystemSetting
+
+    try:
+        setting = (
+            await db.execute(
+                select(SystemSetting).where(
+                    SystemSetting.key == f"context_inject_experience_{agent_id}"
                 )
             )
         ).scalar_one_or_none()
@@ -619,6 +648,7 @@ async def build_agent_context(
     company_information = ""
     inject_reflections = False
     inject_focus = False
+    inject_experience_hint = False
     try:
         from app.database import async_session
 
@@ -629,6 +659,9 @@ async def build_agent_context(
                 db, agent_id
             )
             inject_focus = await _load_focus_injection_enabled(db, agent_id)
+            inject_experience_hint = (
+                await _load_experience_hint_injection_enabled(db, agent_id)
+            )
     except Exception:
         # Prompt assembly must remain usable when optional organization context is
         # temporarily unavailable.
@@ -636,6 +669,7 @@ async def build_agent_context(
         company_information = ""
         inject_reflections = False
         inject_focus = False
+        inject_experience_hint = False
 
     reflections_snapshot = ""
     user_profile = ""
@@ -666,6 +700,16 @@ async def build_agent_context(
             # Focus injection is optional state context; it must never break
             # prompt assembly.
             focus_snapshot = ""
+
+    experience_hint = ""
+    if inject_experience_hint and "search_experience" in allowed:
+        try:
+            # build_experience_hint already swallows its own errors and returns
+            # "" on empty libraries; this outer guard is belt-and-braces so a
+            # defect in the builder can never break prompt assembly.
+            experience_hint = await build_experience_hint(agent_id)
+        except Exception:
+            experience_hint = ""
 
     from app.services.timezone_utils import get_agent_timezone, now_in_timezone
 
@@ -754,6 +798,17 @@ async def build_agent_context(
                 "precedence.",
                 focus_snapshot,
                 "</focus_context>",
+            ]
+        )
+    if experience_hint:
+        # The hint text already carries its own `## Team Experience Library`
+        # heading — wrap it verbatim, never duplicate the heading.
+        dynamic_parts.extend(
+            [
+                "",
+                "<experience_context>",
+                experience_hint.strip(),
+                "</experience_context>",
             ]
         )
     if company_information:

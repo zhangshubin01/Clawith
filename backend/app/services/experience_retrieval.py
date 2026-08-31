@@ -133,8 +133,11 @@ def _freshness_marker(entry: ExperienceEntry) -> str:
 
 
 async def build_experience_hint(agent_id: uuid.UUID) -> str:
-    """Return the always-on hint, or "" when the tenant has no published entries.
+    """Build the team-experience hint block for context injection.
 
+    Returns "" when the tenant has no published entries — the caller (agent
+    context assembly) additionally gates injection on the per-agent switch and
+    tool availability, so the hint never nags an agent that cannot pull.
     Cold-start / empty library → no hint, so we never nudge the agent to search
     a library that has nothing in it.
     """
@@ -160,10 +163,14 @@ async def build_experience_hint(agent_id: uuid.UUID) -> str:
                 return ""
             hint = _HINT
             # ④ Existing tag vocabulary — nudge the agent to reuse tags instead of coining near-duplicates.
+            # Published non-legacy only, mirroring the has_any gate above: draft
+            # tags must never leak into the hint before human review, and
+            # legacy_plaza imports are excluded from the AI-visible set.
             tag_rows = await db.execute(
                 select(ExperienceEntry.tags).where(
                     ExperienceEntry.tenant_id == agent.tenant_id,
-                    ExperienceEntry.status != "retired",
+                    ExperienceEntry.status == "published",
+                    ExperienceEntry.origin != "legacy_plaza",
                 )
             )
             counts: dict[str, int] = {}
