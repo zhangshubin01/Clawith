@@ -1,4 +1,6 @@
+import asyncio
 from contextlib import asynccontextmanager
+from typing import cast
 from unittest.mock import AsyncMock, Mock
 import uuid
 
@@ -6,6 +8,13 @@ import pytest
 
 from app.services import agent_tools
 from app.services import workspace_collaboration
+from app.services.sandbox.local.run_workspace import (
+    RunWorkspaceIdentity,
+    close_run_workspace,
+    refresh_run_workspace_path,
+    use_run_workspace,
+)
+from app.services.sandbox.run_scope import sandbox_run_scope_id
 from app.services.storage_runtime.base import StorageBackend, StorageEntry, StorageVersion, WriteCondition, ConditionalWriteResult
 
 
@@ -908,3 +917,367 @@ async def test_flush_temp_workspace_conflicts_on_concurrent_new_file(monkeypatch
 
     assert result["conflicted"] == ["workspace/build.tar.gz"]
     assert storage.files[f"{agent_id}/workspace/build.tar.gz"] == b"concurrent-edit"
+
+
+# --- ADR 0011: direct storage writes refresh the run-scoped workspace ---------
+
+
+@asynccontextmanager
+async def _fake_async_session():
+    db = Mock()
+    db.commit = AsyncMock()
+    yield db
+
+
+async def _noop_active_lock(*_args, **_kwargs):
+    return None
+
+
+async def _noop_revision(*_args, **_kwargs):
+    return None
+
+
+def _patch_workspace_db(monkeypatch):
+    """Stub the DB touchpoints inside write/delete/move workspace helpers."""
+    monkeypatch.setattr(agent_tools, "async_session", _fake_async_session)
+    monkeypatch.setattr(workspace_collaboration, "get_active_lock", _noop_active_lock)
+    monkeypatch.setattr(workspace_collaboration, "record_revision", _noop_revision)
+
+
+def _patch_storage(monkeypatch, storage):
+    """Point every module-level get_storage_backend at the in-memory backend.
+
+    _execute_workspace_mutation mixes agent_tools' storage lookups (edit_file
+    reads) with workspace_collaboration's (write_workspace_file etc.), so both
+    must resolve to the same instance.
+    """
+    monkeypatch.setattr(agent_tools, "get_storage_backend", lambda: storage)
+    monkeypatch.setattr(workspace_collaboration, "get_storage_backend", lambda: storage)
+
+
+async def _materialize_run_workspace(
+    agent_id: uuid.UUID,
+    paths: list[str],
+) -> tuple[str, "agent_tools.TempWorkspace"]:
+    """Materialize a run-scoped workspace exactly as production does.
+
+    The state stays registered in the run-workspace registry after the
+    context exits (same as one settled Agent loop between executions); the
+    caller must `close_run_workspace(run_id)` to clean up.
+    """
+    run_id = str(uuid.uuid4())
+    identity = RunWorkspaceIdentity(
+        agent_id=str(agent_id),
+        tenant_id=None,
+        session_id=None,
+        workspace_mode="direct",
+        materialized_paths=tuple(paths),
+        publish_paths=tuple(paths),
+    )
+
+    async def factory():
+        return await agent_tools._prepare_temp_workspace(agent_id, paths=paths)
+
+    async with use_run_workspace(run_id=run_id, identity=identity, factory=factory) as run_ws:
+        workspace = run_ws
+    return run_id, cast(agent_tools.TempWorkspace, workspace)
+
+
+@pytest.mark.asyncio
+async def test_edit_file_direct_write_refreshes_run_workspace_so_flush_does_not_conflict(
+    monkeypatch,
+    tmp_path,
+):
+    agent_id = uuid.uuid4()
+    storage_key = f"{agent_id}/workspace/notes.txt"
+    storage = MemoryStorageBackend({storage_key: b"# Notes\nline one\n"})
+    _patch_storage(monkeypatch, storage)
+    _patch_workspace_db(monkeypatch)
+
+    run_id, run_ws = await _materialize_run_workspace(agent_id, ["workspace"])
+    token = sandbox_run_scope_id.set(run_id)
+    try:
+        result = await agent_tools._execute_workspace_mutation(
+            "edit_file",
+            {"path": "workspace/notes.txt", "old_string": "line one", "new_string": "line ONE"},
+            agent_id=agent_id,
+            base_dir=tmp_path / str(agent_id),
+            session_id=None,
+        )
+        assert "Replaced 1 occurrence(s)" in result
+
+        # Simulate the run's execute_code changing the same path differently.
+        (run_ws.root / "workspace" / "notes.txt").write_text(
+            "# Notes\nline ONE\nextra\n", encoding="utf-8"
+        )
+        flush = await agent_tools.flush_temp_workspace(run_ws)
+
+        assert flush["conflicted"] == []
+        assert "workspace/notes.txt" in flush["updated"]
+        assert storage.files[storage_key] == b"# Notes\nline ONE\nextra\n"
+    finally:
+        sandbox_run_scope_id.reset(token)
+        await close_run_workspace(run_id)
+
+
+@pytest.mark.asyncio
+async def test_edit_file_direct_write_updates_run_workspace_view(monkeypatch, tmp_path):
+    agent_id = uuid.uuid4()
+    storage_key = f"{agent_id}/workspace/notes.txt"
+    storage = MemoryStorageBackend({storage_key: b"# Notes\nline one\n"})
+    _patch_storage(monkeypatch, storage)
+    _patch_workspace_db(monkeypatch)
+
+    run_id, run_ws = await _materialize_run_workspace(agent_id, ["workspace"])
+    token = sandbox_run_scope_id.set(run_id)
+    try:
+        await agent_tools._execute_workspace_mutation(
+            "edit_file",
+            {"path": "workspace/notes.txt", "old_string": "line one", "new_string": "line ONE"},
+            agent_id=agent_id,
+            base_dir=tmp_path / str(agent_id),
+            session_id=None,
+        )
+
+        # The run workspace temp view is immediately consistent with storage.
+        assert (run_ws.root / "workspace" / "notes.txt").read_bytes() == b"# Notes\nline ONE\n"
+        entry = run_ws.manifest["workspace/notes.txt"]
+        assert entry.base_version_token == (await storage.get_version(storage_key)).token
+        assert entry.base_hash == agent_tools.content_hash_bytes(b"# Notes\nline ONE\n")
+    finally:
+        sandbox_run_scope_id.reset(token)
+        await close_run_workspace(run_id)
+
+
+@pytest.mark.asyncio
+async def test_delete_file_direct_delete_removes_from_run_workspace(monkeypatch, tmp_path):
+    agent_id = uuid.uuid4()
+    storage_key = f"{agent_id}/workspace/notes.txt"
+    storage = MemoryStorageBackend({storage_key: b"# Notes\n"})
+    _patch_storage(monkeypatch, storage)
+    _patch_workspace_db(monkeypatch)
+
+    run_id, run_ws = await _materialize_run_workspace(agent_id, ["workspace"])
+    token = sandbox_run_scope_id.set(run_id)
+    try:
+        result = await agent_tools._execute_workspace_mutation(
+            "delete_file",
+            {"path": "workspace/notes.txt"},
+            agent_id=agent_id,
+            base_dir=tmp_path / str(agent_id),
+            session_id=None,
+        )
+        assert "✅ Deleted" in result
+
+        # Temp file and manifest entry are gone immediately.
+        assert not (run_ws.root / "workspace" / "notes.txt").exists()
+        assert "workspace/notes.txt" not in run_ws.manifest
+
+        # A later flush (e.g. execute_code also removed the file) produces no
+        # delete candidate conflict.
+        flush = await agent_tools.flush_temp_workspace(run_ws)
+        assert flush["conflicted"] == []
+        assert flush["deleted"] == []
+    finally:
+        sandbox_run_scope_id.reset(token)
+        await close_run_workspace(run_id)
+
+
+@pytest.mark.asyncio
+async def test_per_call_flush_refreshes_run_workspace(monkeypatch):
+    agent_id = uuid.uuid4()
+    storage_key = f"{agent_id}/workspace/notes.txt"
+    storage = MemoryStorageBackend({storage_key: b"first"})
+    _patch_storage(monkeypatch, storage)
+
+    run_id, run_ws = await _materialize_run_workspace(agent_id, ["workspace"])
+    token = sandbox_run_scope_id.set(run_id)
+    try:
+        # A Family-2 per-call temp workspace publishes to the same path.
+        other_ws = await agent_tools._prepare_temp_workspace(agent_id, paths=["workspace"])
+        try:
+            (other_ws.root / "workspace" / "notes.txt").write_bytes(b"second")
+            flush = await agent_tools.flush_temp_workspace(other_ws)
+        finally:
+            other_ws.cleanup()
+
+        assert flush["updated"] == ["workspace/notes.txt"]
+        assert storage.files[storage_key] == b"second"
+
+        # The run workspace temp view and manifest track the publication.
+        assert (run_ws.root / "workspace" / "notes.txt").read_bytes() == b"second"
+        entry = run_ws.manifest["workspace/notes.txt"]
+        assert entry.base_version_token == (await storage.get_version(storage_key)).token
+        assert entry.base_hash == agent_tools.content_hash_bytes(b"second")
+    finally:
+        sandbox_run_scope_id.reset(token)
+        await close_run_workspace(run_id)
+
+
+@pytest.mark.asyncio
+async def test_write_file_direct_write_materializes_new_path_into_run_workspace(
+    monkeypatch,
+    tmp_path,
+):
+    agent_id = uuid.uuid4()
+    storage_key = f"{agent_id}/workspace/new.md"
+    storage = MemoryStorageBackend()
+    _patch_storage(monkeypatch, storage)
+    _patch_workspace_db(monkeypatch)
+
+    run_id, run_ws = await _materialize_run_workspace(agent_id, ["workspace"])
+    token = sandbox_run_scope_id.set(run_id)
+    try:
+        result = await agent_tools._execute_workspace_mutation(
+            "write_file",
+            {"path": "workspace/new.md", "content": "# New\n"},
+            agent_id=agent_id,
+            base_dir=tmp_path / str(agent_id),
+            session_id=None,
+        )
+        assert "✅ Written to workspace/new.md" in result
+
+        # The brand-new path was materialized into the run workspace.
+        assert (run_ws.root / "workspace" / "new.md").read_bytes() == b"# New\n"
+        entry = run_ws.manifest["workspace/new.md"]
+        assert entry.base_version_token == (await storage.get_version(storage_key)).token
+
+        # execute_code then edits the new path; the flush CAS matches.
+        (run_ws.root / "workspace" / "new.md").write_text("# New\nedited\n", encoding="utf-8")
+        flush = await agent_tools.flush_temp_workspace(run_ws)
+        assert flush["conflicted"] == []
+        assert storage.files[storage_key] == b"# New\nedited\n"
+    finally:
+        sandbox_run_scope_id.reset(token)
+        await close_run_workspace(run_id)
+
+
+@pytest.mark.asyncio
+async def test_move_file_direct_move_refreshes_run_workspace(monkeypatch, tmp_path):
+    agent_id = uuid.uuid4()
+    source_key = f"{agent_id}/workspace/a.txt"
+    storage = MemoryStorageBackend({source_key: b"content"})
+    _patch_storage(monkeypatch, storage)
+    _patch_workspace_db(monkeypatch)
+
+    run_id, run_ws = await _materialize_run_workspace(agent_id, ["workspace"])
+    token = sandbox_run_scope_id.set(run_id)
+    try:
+        result = await agent_tools._execute_workspace_mutation(
+            "move_file",
+            {"source_path": "workspace/a.txt", "destination_path": "workspace/b.txt"},
+            agent_id=agent_id,
+            base_dir=tmp_path / str(agent_id),
+            session_id=None,
+        )
+        assert "✅" in result
+
+        # Destination materialized, source removed from temp and manifest.
+        assert (run_ws.root / "workspace" / "b.txt").read_bytes() == b"content"
+        assert "workspace/b.txt" in run_ws.manifest
+        assert not (run_ws.root / "workspace" / "a.txt").exists()
+        assert "workspace/a.txt" not in run_ws.manifest
+    finally:
+        sandbox_run_scope_id.reset(token)
+        await close_run_workspace(run_id)
+
+
+@pytest.mark.asyncio
+async def test_refresh_run_workspace_path_noop_without_run_workspace():
+    # No registered run workspace: a no-op, not an error.
+    result = await refresh_run_workspace_path(
+        str(uuid.uuid4()),
+        str(uuid.uuid4()),
+        "workspace/notes.txt",
+        data=b"new",
+        version_token="9",
+        size=3,
+    )
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_refresh_run_workspace_path_skips_own_workspace(monkeypatch):
+    agent_id = uuid.uuid4()
+    storage = MemoryStorageBackend({f"{agent_id}/workspace/notes.txt": b"first"})
+    monkeypatch.setattr(agent_tools, "get_storage_backend", lambda: storage)
+
+    run_id, run_ws = await _materialize_run_workspace(agent_id, ["workspace"])
+    try:
+        # The run workspace flushing itself must not re-enter its own lock.
+        await refresh_run_workspace_path(
+            run_id,
+            str(agent_id),
+            "workspace/notes.txt",
+            data=b"same",
+            version_token="9",
+            size=4,
+            skip_workspace=run_ws,
+        )
+        assert (run_ws.root / "workspace" / "notes.txt").read_bytes() == b"first"
+        assert run_ws.manifest["workspace/notes.txt"].base_version_token == "1"
+    finally:
+        await close_run_workspace(run_id)
+
+
+@pytest.mark.asyncio
+async def test_refresh_run_workspace_path_delete_removes_temp_and_manifest(monkeypatch):
+    agent_id = uuid.uuid4()
+    storage = MemoryStorageBackend({
+        f"{agent_id}/workspace/notes.txt": b"first",
+        f"{agent_id}/workspace/sub/child.txt": b"child",
+    })
+    monkeypatch.setattr(agent_tools, "get_storage_backend", lambda: storage)
+
+    run_id, run_ws = await _materialize_run_workspace(agent_id, ["workspace"])
+    try:
+        await refresh_run_workspace_path(
+            run_id,
+            str(agent_id),
+            "workspace/sub",
+            data=None,
+        )
+        assert not (run_ws.root / "workspace" / "sub").exists()
+        assert "workspace/sub/child.txt" not in run_ws.manifest
+        # Sibling paths untouched.
+        assert (run_ws.root / "workspace" / "notes.txt").exists()
+        assert "workspace/notes.txt" in run_ws.manifest
+    finally:
+        await close_run_workspace(run_id)
+
+
+@pytest.mark.asyncio
+async def test_flush_of_run_workspace_itself_does_not_deadlock(monkeypatch):
+    """execute_code flushes while the run workspace lock is held; the refresh
+    hook must recognize its own workspace and not re-enter that lock."""
+    agent_id = uuid.uuid4()
+    storage = MemoryStorageBackend({f"{agent_id}/workspace/notes.txt": b"first"})
+    _patch_storage(monkeypatch, storage)
+
+    run_id = str(uuid.uuid4())
+    token = sandbox_run_scope_id.set(run_id)
+    identity = RunWorkspaceIdentity(
+        agent_id=str(agent_id),
+        tenant_id=None,
+        session_id=None,
+        workspace_mode="direct",
+        materialized_paths=("workspace",),
+        publish_paths=("workspace",),
+    )
+    try:
+        async with use_run_workspace(
+            run_id=run_id,
+            identity=identity,
+            factory=lambda: agent_tools._prepare_temp_workspace(agent_id, paths=["workspace"]),
+        ) as run_ws:
+            run_ws = cast(agent_tools.TempWorkspace, run_ws)
+            (run_ws.root / "workspace" / "notes.txt").write_bytes(b"second")
+            flush = await asyncio.wait_for(
+                agent_tools.flush_temp_workspace(run_ws),
+                timeout=5,
+            )
+        assert flush["updated"] == ["workspace/notes.txt"]
+        assert storage.files[f"{agent_id}/workspace/notes.txt"] == b"second"
+    finally:
+        sandbox_run_scope_id.reset(token)
+        await close_run_workspace(run_id)

@@ -70,10 +70,36 @@ SQLAlchemy 池中客户端与服务器端事务状态分裂的连接：服务器
 缓存的服务器端事务状态，零网络往返），为真即 raise `DisconnectionError` 让池丢弃该连接并给调用者换
 健康连接。对脏连接的检测与自愈与污染成因无关。
 
+## Workspace Publication
+
+Agent 工作区发布的一致性与冲突保护词汇（机制见 ADR 0011 与 workspace-reconciliation 模块）。
+
+**Run Workspace（run 工作区）**:
+后端进程内按 run 只物化一次的临时工作区（`use_run_workspace` / `_run_workspace_tasks`）：storage 中
+workspace/memory/skills 等路径的文件副本 + manifest（每文件 base_version_token/base_hash 快照）。
+execute_code 在副本中执行，flush 时按 manifest token 做 CAS 回写；写过的路径刷新 token，未写路径
+token 停留在物化时刻。
+
+**Direct Storage Write（直写）**:
+绕过 Run Workspace 直接写 storage 的工具路径——Mutation 工具族（write_file/edit_file/delete_file/
+move_file，经 `_execute_workspace_mutation`）与 per-call 物化 + sync_back 工具族（convert_*、
+generate_image_*、publish_page 等）。直写会 bump storage 版本而使 Run Workspace 的 manifest 陈旧；
+ADR 0011 起直写成功后同步刷新 Run Workspace（刷新钩子只在「本 run 自己的工具执行」上下文触发，
+人类编辑与跨 run 写入不触发、仍受冲突保护）。
+
+**Publication Conflict（发布冲突，workspace_sync_conflict）**:
+flush 的 CAS 因 storage 版本 ≠ manifest 基版本而失败、且 `_stable_identical_storage_version` 收敛
+（第三方内容 == 候选内容）不成立时的终态：第三方内容既非基版本亦非候选版本。恢复路径
+（recover_publication → apply_candidate(require_base_match=True)）保留当前 workspace 并返回失败。
+冲突后 manifest 不刷新，同路径在本 run 剩余生命期内每次 flush 必冲突——只有进程重启（重新物化）
+自愈；直写刷新（ADR 0011）从源头消除同 run 虚假冲突。
+
 _Avoid_: retry（defer 与 attempt 重试是两种机制，勿混用）、recovery、fencing；
 Memory Consolidation Gate 勿与 Thread Compact（历史压缩）混用——门禁是收尾注入，压缩是水位触发的历史替换。
 Dirty Connection 勿与断连（disconnect）混用——断连是物理连接失效，脏连接是逻辑状态分裂且物理上完全
 健康；`pool_pre_ping` 只测断连，对脏连接无效，勿当防护手段。
+Publication Conflict 勿与 Workspace Lock（Redis 短锁）混用——锁串行化写时点，CAS 串行化版本演进；
+直写刷新只覆盖「本 run 自己」的写，人类编辑/跨 run 写仍走冲突保护（宁可失败不覆盖）。
 
 ## Deployment Coordination
 

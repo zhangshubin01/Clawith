@@ -100,6 +100,8 @@ from app.services.workspace_reconciliation import (
 from app.services.sandbox.execution_lease import SandboxExecutionLeaseStore
 from app.services.sandbox.local.run_workspace import (
     RunWorkspaceIdentity,
+    TempWorkspaceManifestEntry,
+    refresh_run_workspace_path,
     use_run_workspace,
 )
 from app.services.sandbox.run_scope import sandbox_run_scope_id
@@ -1749,15 +1751,6 @@ async def initialize_agent_workspace(agent_id: uuid.UUID) -> None:
         )
 
 
-@dataclass
-class TempWorkspaceManifestEntry:
-    rel_path: str
-    storage_key: str
-    base_version_token: str
-    base_hash: str
-    size: int
-
-
 class SkillSnapshotIncompleteError(RuntimeError):
     """The Run sandbox cannot safely execute a partially materialized Skill tree."""
 
@@ -2126,7 +2119,94 @@ async def flush_temp_workspace(
             manifest.pop(rel_path, None)
             deleted.append(rel_path)
 
+    # ADR 0011: a separate per-call temp workspace published successfully; keep
+    # the run-scoped workspace's temp files and manifest in sync with storage.
+    if run_id and not conflicted and (updated or deleted):
+        for rel_path in updated:
+            await _refresh_run_workspace_after_direct_write(
+                temp_workspace.agent_id,
+                rel_path,
+                skip_workspace=temp_workspace,
+            )
+        for rel_path in deleted:
+            await _refresh_run_workspace_after_direct_write(
+                temp_workspace.agent_id,
+                rel_path,
+                deleted=True,
+                skip_workspace=temp_workspace,
+            )
+
     return {"updated": updated, "deleted": deleted, "conflicted": conflicted, "skipped": skipped}
+
+
+async def _refresh_run_workspace_after_direct_write(
+    agent_id: uuid.UUID,
+    rel_path: str,
+    *,
+    deleted: bool = False,
+    skip_workspace=None,
+) -> None:
+    """Refresh the run-scoped workspace after a direct storage write (ADR 0011).
+
+    No-op without an active Run scope (e.g. approval post-processing) or
+    before the run workspace materializes. Best-effort: failures are logged
+    and the previous conflict protection remains the safety net.
+    """
+    run_id = sandbox_run_scope_id.get().strip() or None
+    if not run_id:
+        return
+    storage = get_storage_backend()
+    storage_key = normalize_storage_key(f"{agent_id}/{rel_path}")
+    try:
+        version = await storage.get_version(storage_key)
+        if version.exists:
+            if version.is_dir:
+                logger.info(
+                    "[RunWorkspaceRefreshSkipped] run_id={} path={} reason=is_dir",
+                    run_id,
+                    rel_path,
+                )
+                return
+            if version.size > TOOL_MATERIALIZE_MAX_FILE_BYTES:
+                logger.warning(
+                    "[RunWorkspaceRefreshSkipped] run_id={} path={} size={} "
+                    "limit={} reason=per_file_limit",
+                    run_id,
+                    rel_path,
+                    version.size,
+                    TOOL_MATERIALIZE_MAX_FILE_BYTES,
+                )
+                return
+            data = await storage.read_bytes(storage_key)
+        elif not deleted:
+            return
+        else:
+            data = None
+    except Exception as exc:
+        logger.warning(
+            "[RunWorkspaceRefreshReadFailed] run_id={} path={} error_type={}",
+            run_id,
+            rel_path,
+            type(exc).__name__,
+        )
+        return
+    try:
+        await refresh_run_workspace_path(
+            run_id,
+            str(agent_id),
+            rel_path,
+            data=data,
+            version_token=version.token,
+            size=version.size,
+            skip_workspace=skip_workspace,
+        )
+    except Exception as exc:
+        logger.warning(
+            "[RunWorkspaceRefreshFailed] run_id={} path={} error_type={}",
+            run_id,
+            rel_path,
+            type(exc).__name__,
+        )
 
 
 async def _stable_identical_storage_version(
@@ -2978,6 +3058,8 @@ async def _execute_workspace_mutation(
                 append=mode == "append",
             )
             await _wdb.commit()
+        if write_result.ok:
+            await _refresh_run_workspace_after_direct_write(agent_id, write_result.path)
         return f"✅ {write_result.message}" if write_result.ok else f"❌ {write_result.message}"
 
     if tool_name == "move_file":
@@ -3007,6 +3089,13 @@ async def _execute_workspace_mutation(
                 overwrite=bool(arguments.get("overwrite", False)),
             )
             await _wdb.commit()
+        if move_result.ok:
+            await _refresh_run_workspace_after_direct_write(agent_id, move_result.path)
+            await _refresh_run_workspace_after_direct_write(
+                agent_id,
+                normalize_workspace_path(source_path),
+                deleted=True,
+            )
         return f"✅ {move_result.message}" if move_result.ok else f"❌ {move_result.message}"
 
     if tool_name == "delete_file":
@@ -3027,6 +3116,12 @@ async def _execute_workspace_mutation(
                 enforce_human_lock=True,
             )
             await _wdb.commit()
+        if delete_result.ok:
+            await _refresh_run_workspace_after_direct_write(
+                agent_id,
+                delete_result.path,
+                deleted=True,
+            )
         return f"✅ Deleted {delete_result.path}" if delete_result.ok else f"❌ {delete_result.message}"
 
     if tool_name == "edit_file":
@@ -3072,6 +3167,8 @@ async def _execute_workspace_mutation(
                 enforce_human_lock=True,
             )
             await _wdb.commit()
+        if write_result.ok:
+            await _refresh_run_workspace_after_direct_write(agent_id, write_result.path)
         replaced = count if replace_all else 1
         return (
             f"✅ Replaced {replaced} occurrence(s) in {write_result.path}"
