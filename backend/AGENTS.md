@@ -74,6 +74,12 @@ architecture document, not this file.
 - 会话生命周期：Run 结束由 `agent_runtime/command_worker.py` 调
   `close_subprocess_sandbox_run` + `close_docker_sandbox_run`（各为 no-op）；
   超时语义 = kill 容器/进程 + 会话重置，exit 124。
+- **`local/orphan_sweep.py`**：启动期孤儿清扫（worker 角色，runtime worker 上下文
+  进入前）。会话注册表 `_run_sessions` 是进程内内存，backend 重启会孤儿化所有存活
+  容器与 staging 目录（`sleep infinity` + `auto_remove` 不生效）。清扫按
+  `clawith.sandbox=execute-code` 标签列出容器，以 `agent_runs.updated_at` 5 分钟窗口
+  （与 `scripts/check-inflight-runs.sh` 同口径）判定活跃，非活跃 run 的容器/ staging
+  被移除；活跃 run 与本进程注册表内的会话一律保留。
 - 沙箱镜像 `clawith-code-sandbox` 由 `backend/Dockerfile.sandbox` 构建（compose
   `code-sandbox` 服务），**必须与后端镜像同源 base**（python:3.12-slim），否则
   per-agent venv symlink/glibc 兼容性破坏。

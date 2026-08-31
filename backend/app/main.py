@@ -404,6 +404,20 @@ async def lifespan(app: FastAPI):
         traceback.print_exc()
 
     if _role_enabled("all", "worker"):
+        try:
+            from app.services.sandbox.local.orphan_sweep import sweep_orphan_sandboxes
+
+            swept = await sweep_orphan_sandboxes()
+            if swept["removed_containers"] or swept["removed_staging"]:
+                logger.warning(
+                    "[startup] orphan sandbox sweep removed "
+                    f"containers={swept['removed_containers']} staging={swept['removed_staging']}"
+                )
+            if swept["kept_containers"]:
+                logger.info(f"[startup] orphan sandbox sweep kept containers={swept['kept_containers']}")
+        except Exception:
+            logger.exception("[startup] orphan sandbox sweep failed; continuing startup")
+
         from app.services.agent_runtime.worker_service import running_runtime_worker_context
 
         await runtime_stack.enter_async_context(running_runtime_worker_context(settings=settings))
