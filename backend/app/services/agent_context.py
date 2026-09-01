@@ -186,90 +186,6 @@ async def _load_skills_index(agent_id: uuid.UUID) -> str:
     return "\n".join(lines)
 
 
-async def _load_reflections_injection_enabled(db, agent_id: uuid.UUID) -> bool:
-    """Return True when the per-agent reflections injection switch is on.
-
-    The switch is a system_settings row keyed ``context_inject_reflections_<agent
-    id>`` whose JSONB value carries ``{"enabled": true}``. Absent or malformed
-    rows mean off (safe default: no behavior change).
-    """
-    from sqlalchemy import select
-
-    from app.models.system_settings import SystemSetting
-
-    try:
-        setting = (
-            await db.execute(
-                select(SystemSetting).where(
-                    SystemSetting.key == f"context_inject_reflections_{agent_id}"
-                )
-            )
-        ).scalar_one_or_none()
-    except Exception:
-        return False
-    return bool(
-        setting
-        and isinstance(setting.value, dict)
-        and setting.value.get("enabled") is True
-    )
-
-
-async def _load_focus_injection_enabled(db, agent_id: uuid.UUID) -> bool:
-    """Return True when the per-agent focus injection switch is on.
-
-    The switch is a system_settings row keyed ``context_inject_focus_<agent
-    id>`` whose JSONB value carries ``{"enabled": true}``. Absent or malformed
-    rows mean off (safe default: no behavior change).
-    """
-    from sqlalchemy import select
-
-    from app.models.system_settings import SystemSetting
-
-    try:
-        setting = (
-            await db.execute(
-                select(SystemSetting).where(
-                    SystemSetting.key == f"context_inject_focus_{agent_id}"
-                )
-            )
-        ).scalar_one_or_none()
-    except Exception:
-        return False
-    return bool(
-        setting
-        and isinstance(setting.value, dict)
-        and setting.value.get("enabled") is True
-    )
-
-
-async def _load_experience_hint_injection_enabled(db, agent_id: uuid.UUID) -> bool:
-    """Return True when the per-agent experience-hint injection switch is on.
-
-    The switch is a system_settings row keyed ``context_inject_experience_<agent
-    id>`` whose JSONB value carries ``{"enabled": true}``. Absent or malformed
-    rows mean off (safe default: no behavior change).
-    """
-    from sqlalchemy import select
-
-    from app.models.system_settings import SystemSetting
-
-    try:
-        setting = (
-            await db.execute(
-                select(SystemSetting).where(
-                    SystemSetting.key == f"context_inject_experience_{agent_id}"
-                )
-            )
-        ).scalar_one_or_none()
-    except Exception:
-        return False
-    return bool(
-        setting
-        and isinstance(setting.value, dict)
-        and setting.value.get("enabled") is True
-    )
-
-
 async def _load_relationships_from_db(db, agent_id: uuid.UUID) -> str:
     """Load bounded human collaboration notes as data, never as contact routes."""
     from sqlalchemy import select
@@ -646,63 +562,48 @@ async def build_agent_context(
 
     relationships = ""
     company_information = ""
-    inject_reflections = False
-    inject_focus = False
-    inject_experience_hint = False
     try:
         from app.database import async_session
 
         async with async_session() as db:
             relationships = await _load_relationships_from_db(db, agent_id)
             company_information = await _load_company_information(db, agent_id)
-            inject_reflections = await _load_reflections_injection_enabled(
-                db, agent_id
-            )
-            inject_focus = await _load_focus_injection_enabled(db, agent_id)
-            inject_experience_hint = (
-                await _load_experience_hint_injection_enabled(db, agent_id)
-            )
     except Exception:
-        # Prompt assembly must remain usable when optional organization context is
+        # Prompt assembly must remain usable when organization context is
         # temporarily unavailable.
         relationships = ""
         company_information = ""
-        inject_reflections = False
-        inject_focus = False
-        inject_experience_hint = False
 
     reflections_snapshot = ""
     user_profile = ""
-    if inject_reflections:
-        raw_reflections = await _read_file_safe(
-            normalize_storage_key(f"{agent_id}/memory/reflections.md"),
-            20000,
-        )
-        reflections_snapshot = _extract_reflections_injection(raw_reflections)
-        # user_profile is injected in full up to the hard cap: it is
-        # user-authored collaboration preferences, not a growing log.
-        user_profile = await _read_file_safe(
-            normalize_storage_key(f"{agent_id}/memory/user_profile.md"),
-            2000,
-        )
+    raw_reflections = await _read_file_safe(
+        normalize_storage_key(f"{agent_id}/memory/reflections.md"),
+        20000,
+    )
+    reflections_snapshot = _extract_reflections_injection(raw_reflections)
+    # user_profile is injected in full up to the hard cap: it is
+    # user-authored collaboration preferences, not a growing log.
+    user_profile = await _read_file_safe(
+        normalize_storage_key(f"{agent_id}/memory/user_profile.md"),
+        2000,
+    )
 
     focus_snapshot = ""
-    if inject_focus:
-        try:
-            focus_snapshot = await render_focus_context(
-                agent_id,
-                include_system=False,
-                include_completed=False,
-                limit_active=5,
-                max_chars=1500,
-            )
-        except Exception:
-            # Focus injection is optional state context; it must never break
-            # prompt assembly.
-            focus_snapshot = ""
+    try:
+        focus_snapshot = await render_focus_context(
+            agent_id,
+            include_system=False,
+            include_completed=False,
+            limit_active=5,
+            max_chars=1500,
+        )
+    except Exception:
+        # Focus context is default, best-effort state data; it must never
+        # break prompt assembly.
+        focus_snapshot = ""
 
     experience_hint = ""
-    if inject_experience_hint and "search_experience" in allowed:
+    if "search_experience" in allowed:
         try:
             # build_experience_hint already swallows its own errors and returns
             # "" on empty libraries; this outer guard is belt-and-braces so a

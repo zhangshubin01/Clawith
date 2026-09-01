@@ -13,9 +13,6 @@ def _context_patches(
     skills: str = "",
     reflections: str = "",
     user_profile: str = "",
-    inject_reflections: bool | None = None,
-    inject_focus: bool | None = None,
-    inject_experience_hint: bool | None = None,
     experience_hint: str = "",
 ):
     agent_id_holder: dict[str, uuid.UUID] = {}
@@ -31,46 +28,6 @@ def _context_patches(
         if key == f"{agent_id}/memory/user_profile.md":
             return user_profile
         return ""
-
-    inject_patch = (
-        patch(
-            "app.services.agent_context._load_reflections_injection_enabled",
-            new_callable=AsyncMock,
-            return_value=bool(inject_reflections),
-        )
-        if inject_reflections is not None
-        else None
-    )
-
-    focus_inject_patch = (
-        patch(
-            "app.services.agent_context._load_focus_injection_enabled",
-            new_callable=AsyncMock,
-            return_value=bool(inject_focus),
-        )
-        if inject_focus is not None
-        else None
-    )
-
-    experience_inject_patch = (
-        patch(
-            "app.services.agent_context._load_experience_hint_injection_enabled",
-            new_callable=AsyncMock,
-            return_value=bool(inject_experience_hint),
-        )
-        if inject_experience_hint is not None
-        else None
-    )
-
-    experience_hint_patch = (
-        patch(
-            "app.services.agent_context.build_experience_hint",
-            new_callable=AsyncMock,
-            return_value=experience_hint,
-        )
-        if inject_experience_hint is not None
-        else None
-    )
 
     return agent_id_holder, (
         patch("app.services.agent_context._read_file_safe", side_effect=fake_read_file),
@@ -89,10 +46,18 @@ def _context_patches(
             new_callable=AsyncMock,
             return_value="UTC",
         ),
-        inject_patch,
-        focus_inject_patch,
-        experience_inject_patch,
-        experience_hint_patch,
+        # 去开关后 focus/hint 路径无条件执行：默认 patch 保证各测试密闭，
+        # 需要内容的测试用自己的 render_patch/hint patch 覆盖（嵌套 override）。
+        patch(
+            "app.services.agent_context.render_focus_context",
+            new_callable=AsyncMock,
+            return_value="",
+        ),
+        patch(
+            "app.services.agent_context.build_experience_hint",
+            new_callable=AsyncMock,
+            return_value=experience_hint,
+        ),
     )
 
 
@@ -104,7 +69,7 @@ async def test_memory_maintenance_policy_follows_read_write_capabilities():
     holder, patches = _context_patches()
     holder["agent_id"] = agent_id
 
-    with patches[0], patches[1], patches[2], patches[3]:
+    with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
         without_write, _stable, _unstable = await build_agent_context(
             agent_id,
             "TestAgent",
@@ -145,7 +110,7 @@ async def test_base_prompt_starts_with_name_and_soul_and_never_injects_self_role
     )
     holder["agent_id"] = agent_id
 
-    with patches[0], patches[1], patches[2], patches[3]:
+    with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
         static, stable_dynamic, _unstable_dynamic = await build_agent_context(
             agent_id,
             "TestAgent",
@@ -173,7 +138,7 @@ async def test_focus_mechanism_is_constant_but_tool_policy_follows_effective_too
     holder, patches = _context_patches()
     holder["agent_id"] = agent_id
 
-    with patches[0], patches[1], patches[2], patches[3]:
+    with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
         without_tools, _stable, _unstable = await build_agent_context(
             agent_id,
             "TestAgent",
@@ -207,7 +172,7 @@ async def test_skill_catalog_requires_read_file_and_prompt_has_no_hardcoded_chan
     )
     holder["agent_id"] = agent_id
 
-    with patches[0], patches[1], patches[2], patches[3]:
+    with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
         without_loader, _stable, _unstable = await build_agent_context(
             agent_id,
             "TestAgent",
@@ -273,7 +238,7 @@ async def test_directory_and_human_send_policies_only_name_enabled_tools():
     holder, patches = _context_patches()
     holder["agent_id"] = agent_id
 
-    with patches[0], patches[1], patches[2], patches[3]:
+    with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
         static, stable_dynamic, _unstable_dynamic = await build_agent_context(
             agent_id,
             "TestAgent",
@@ -300,7 +265,7 @@ async def test_experience_policy_is_short_and_only_names_enabled_operations():
     holder, patches = _context_patches()
     holder["agent_id"] = agent_id
 
-    with patches[0], patches[1], patches[2], patches[3]:
+    with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
         read_only, _stable, _unstable = await build_agent_context(
             agent_id,
             "TestAgent",
@@ -336,7 +301,7 @@ async def test_memory_maintenance_routes_this_run_lessons_to_reflections():
     holder, patches = _context_patches()
     holder["agent_id"] = agent_id
 
-    with patches[0], patches[1], patches[2], patches[3]:
+    with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
         with_write, _stable, _unstable = await build_agent_context(
             agent_id,
             "TestAgent",
@@ -417,78 +382,6 @@ def test_extract_reflections_injection_truncates_at_cap():
 
 
 @pytest.mark.asyncio
-async def test_load_reflections_injection_enabled_switch_semantics():
-    from app.services.agent_context import _load_reflections_injection_enabled
-
-    agent_id = uuid.uuid4()
-
-    class _Setting:
-        def __init__(self, value):
-            self.value = value
-
-    class _Result:
-        def __init__(self, rows):
-            self._rows = rows
-
-        def scalar_one_or_none(self):
-            return self._rows[0] if self._rows else None
-
-    class _Db:
-        def __init__(self, rows):
-            self._rows = rows
-            self.statements = []
-
-        async def execute(self, statement):
-            self.statements.append(statement)
-            return _Result(self._rows)
-
-    # enabled: true → True，且查询键名正确。
-    db_on = _Db([_Setting({"enabled": True})])
-    assert await _load_reflections_injection_enabled(db_on, agent_id) is True
-    compiled = db_on.statements[0].compile()
-    assert list(compiled.params.values())[0] == (
-        f"context_inject_reflections_{agent_id}"
-    )
-
-    # 无行 → False（缺省关闭）。
-    db_empty = _Db([])
-    assert await _load_reflections_injection_enabled(db_empty, agent_id) is False
-
-    # 非 dict value → False（畸形行安全降级）。
-    db_bad = _Db([_Setting("not-a-dict")])
-    assert await _load_reflections_injection_enabled(db_bad, agent_id) is False
-
-    # enabled: false → False。
-    db_off = _Db([_Setting({"enabled": False})])
-    assert await _load_reflections_injection_enabled(db_off, agent_id) is False
-
-
-@pytest.mark.asyncio
-async def test_reflections_injection_off_switch_injects_nothing():
-    from app.services.agent_context import build_agent_context
-
-    agent_id = uuid.uuid4()
-    holder, patches = _context_patches(
-        reflections="## Insights & Discoveries\n- 不应出现\n",
-        user_profile="用户档案内容\n",
-        inject_reflections=False,
-    )
-    holder["agent_id"] = agent_id
-
-    with patches[0], patches[1], patches[2], patches[3], patches[4]:
-        _static, stable_dynamic, _unstable = await build_agent_context(
-            agent_id,
-            "TestAgent",
-            allowed_tool_names={"wait", "read_file", "write_file"},
-        )
-
-    assert "Reflections Snapshot" not in stable_dynamic
-    assert "User Profile" not in stable_dynamic
-    assert "不应出现" not in stable_dynamic
-    assert "用户档案内容" not in stable_dynamic
-
-
-@pytest.mark.asyncio
 async def test_reflections_injection_on_injects_filtered_sections_and_profile():
     from app.services.agent_context import build_agent_context
 
@@ -506,11 +399,10 @@ async def test_reflections_injection_on_injects_filtered_sections_and_profile():
             ]
         ),
         user_profile="用户档案内容\n",
-        inject_reflections=True,
     )
     holder["agent_id"] = agent_id
 
-    with patches[0], patches[1], patches[2], patches[3], patches[4]:
+    with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
         _static, stable_dynamic, _unstable = await build_agent_context(
             agent_id,
             "TestAgent",
@@ -534,7 +426,7 @@ async def test_focus_snapshot_injected_as_state_not_instruction():
     from app.services.agent_context import build_agent_context
 
     agent_id = uuid.uuid4()
-    holder, patches = _context_patches(inject_reflections=True, inject_focus=True)
+    holder, patches = _context_patches()
     holder["agent_id"] = agent_id
     render_patch = patch(
         "app.services.agent_context.render_focus_context",
@@ -567,29 +459,11 @@ async def test_focus_snapshot_injected_as_state_not_instruction():
 
 
 @pytest.mark.asyncio
-async def test_focus_snapshot_absent_when_switch_defaults_off():
-    from app.services.agent_context import build_agent_context
-
-    agent_id = uuid.uuid4()
-    holder, patches = _context_patches(inject_reflections=True)
-    holder["agent_id"] = agent_id
-
-    with patches[0], patches[1], patches[2], patches[3], patches[4]:
-        _static, stable_dynamic, _unstable = await build_agent_context(
-            agent_id,
-            "TestAgent",
-            allowed_tool_names={"wait", "read_file", "write_file"},
-        )
-
-    assert "## Focus Snapshot" not in stable_dynamic
-
-
-@pytest.mark.asyncio
 async def test_focus_snapshot_absent_when_render_returns_empty():
     from app.services.agent_context import build_agent_context
 
     agent_id = uuid.uuid4()
-    holder, patches = _context_patches(inject_focus=True)
+    holder, patches = _context_patches()
     holder["agent_id"] = agent_id
     render_patch = patch(
         "app.services.agent_context.render_focus_context",
@@ -602,6 +476,7 @@ async def test_focus_snapshot_absent_when_render_returns_empty():
         patches[1],
         patches[2],
         patches[3],
+        patches[4],
         patches[5],
         render_patch,
     ):
@@ -625,16 +500,14 @@ _HINT_SAMPLE = (
 
 
 @pytest.mark.asyncio
-async def test_experience_hint_injected_when_switch_on_and_tool_allowed():
+async def test_experience_hint_injected_when_tool_allowed():
     from app.services.agent_context import build_agent_context
 
     agent_id = uuid.uuid4()
-    holder, patches = _context_patches(
-        inject_experience_hint=True, experience_hint=_HINT_SAMPLE
-    )
+    holder, patches = _context_patches(experience_hint=_HINT_SAMPLE)
     holder["agent_id"] = agent_id
 
-    with patches[0], patches[1], patches[2], patches[3], patches[6], patches[7]:
+    with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
         _static, stable_dynamic, _unstable = await build_agent_context(
             agent_id,
             "TestAgent",
@@ -648,35 +521,14 @@ async def test_experience_hint_injected_when_switch_on_and_tool_allowed():
 
 
 @pytest.mark.asyncio
-async def test_experience_hint_absent_when_switch_defaults_off():
-    from app.services.agent_context import build_agent_context
-
-    agent_id = uuid.uuid4()
-    holder, patches = _context_patches()
-    holder["agent_id"] = agent_id
-
-    with patches[0], patches[1], patches[2], patches[3]:
-        _static, stable_dynamic, _unstable = await build_agent_context(
-            agent_id,
-            "TestAgent",
-            allowed_tool_names={"wait", "read_file", "search_experience"},
-        )
-
-    assert "<experience_context>" not in stable_dynamic
-    assert "## Team Experience Library" not in stable_dynamic
-
-
-@pytest.mark.asyncio
 async def test_experience_hint_absent_when_library_empty():
     from app.services.agent_context import build_agent_context
 
     agent_id = uuid.uuid4()
-    holder, patches = _context_patches(
-        inject_experience_hint=True, experience_hint=""
-    )
+    holder, patches = _context_patches(experience_hint="")
     holder["agent_id"] = agent_id
 
-    with patches[0], patches[1], patches[2], patches[3], patches[6], patches[7]:
+    with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
         _static, stable_dynamic, _unstable = await build_agent_context(
             agent_id,
             "TestAgent",
@@ -691,12 +543,10 @@ async def test_experience_hint_absent_when_tool_not_allowed():
     from app.services.agent_context import build_agent_context
 
     agent_id = uuid.uuid4()
-    holder, patches = _context_patches(
-        inject_experience_hint=True, experience_hint=_HINT_SAMPLE
-    )
+    holder, patches = _context_patches(experience_hint=_HINT_SAMPLE)
     holder["agent_id"] = agent_id
 
-    with patches[0], patches[1], patches[2], patches[3], patches[6], patches[7]:
+    with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
         _static, stable_dynamic, _unstable = await build_agent_context(
             agent_id,
             "TestAgent",
@@ -711,7 +561,7 @@ async def test_experience_hint_failure_never_breaks_assembly():
     from app.services.agent_context import build_agent_context
 
     agent_id = uuid.uuid4()
-    holder, patches = _context_patches(inject_experience_hint=True)
+    holder, patches = _context_patches()
     holder["agent_id"] = agent_id
     hint_patch = patch(
         "app.services.agent_context.build_experience_hint",
@@ -724,7 +574,8 @@ async def test_experience_hint_failure_never_breaks_assembly():
         patches[1],
         patches[2],
         patches[3],
-        patches[6],
+        patches[4],
+        patches[5],
         hint_patch,
     ):
         static, stable_dynamic, unstable = await build_agent_context(
@@ -737,50 +588,3 @@ async def test_experience_hint_failure_never_breaks_assembly():
     assert "# Dynamic Context Data" in stable_dynamic
     assert "## Current Time" in unstable
     assert "<experience_context>" not in stable_dynamic
-
-
-@pytest.mark.asyncio
-async def test_load_experience_hint_injection_enabled_switch_semantics():
-    from app.services.agent_context import _load_experience_hint_injection_enabled
-
-    agent_id = uuid.uuid4()
-
-    class _Setting:
-        def __init__(self, value):
-            self.value = value
-
-    class _Result:
-        def __init__(self, rows):
-            self._rows = rows
-
-        def scalar_one_or_none(self):
-            return self._rows[0] if self._rows else None
-
-    class _Db:
-        def __init__(self, rows):
-            self._rows = rows
-            self.statements = []
-
-        async def execute(self, statement):
-            self.statements.append(statement)
-            return _Result(self._rows)
-
-    # enabled: true → True，且查询键名正确。
-    db_on = _Db([_Setting({"enabled": True})])
-    assert await _load_experience_hint_injection_enabled(db_on, agent_id) is True
-    compiled = db_on.statements[0].compile()
-    assert list(compiled.params.values())[0] == (
-        f"context_inject_experience_{agent_id}"
-    )
-
-    # 无行 → False（缺省关闭）。
-    db_empty = _Db([])
-    assert await _load_experience_hint_injection_enabled(db_empty, agent_id) is False
-
-    # 非 dict value → False（畸形行安全降级）。
-    db_bad = _Db([_Setting("not-a-dict")])
-    assert await _load_experience_hint_injection_enabled(db_bad, agent_id) is False
-
-    # enabled: false → False。
-    db_off = _Db([_Setting({"enabled": False})])
-    assert await _load_experience_hint_injection_enabled(db_off, agent_id) is False

@@ -25,15 +25,13 @@ from app.models.agent import Agent
 from app.models.experience import ExperienceEntry
 from app.models.experience_reference import ExperienceReference
 from app.models.org import OrgMember
-from app.models.system_settings import SystemSetting
 from app.services.agent_runtime.tool_execution import ToolExecutionOutcome
 from app.services.llm.model_resolution import resolve_active_agent_model
 
 # Agents echo this marker in their final answer to cite an entry they actually used.
 CITATION_RE = re.compile(r"\[\[exp:([0-9a-fA-F-]{36})\]\]")
 
-# ── Query expansion (① synonym expansion; toggle via system setting) ──
-_QUERY_EXPANSION_SETTING = "experience_query_expansion"  # value {"enabled": bool}, default on
+# ── Query expansion (① synonym expansion, always on) ──
 _EXPANSION_CACHE: dict[str, list[str]] = {}
 _EXPANSION_CACHE_CAP = 512
 _EXPANSION_SYS_PROMPT = (
@@ -191,17 +189,6 @@ async def build_experience_hint(agent_id: uuid.UUID) -> str:
         return ""
 
 
-async def _query_expansion_enabled(db) -> bool:
-    """Read the on/off toggle (default enabled if the setting is absent)."""
-    try:
-        row = (await db.execute(select(SystemSetting).where(SystemSetting.key == _QUERY_EXPANSION_SETTING))).scalar_one_or_none()
-        if row and isinstance(row.value, dict) and "enabled" in row.value:
-            return bool(row.value["enabled"])
-    except Exception:
-        pass
-    return True
-
-
 async def _expand_query(db, agent, keyword: str) -> list[str]:
     """Return 5-8 strict synonyms/near-expressions for the keyword (cached, best-effort).
 
@@ -274,12 +261,11 @@ async def search_experience_outcome(
             dept_ids = await _agent_department_ids(db, agent)
 
             # ① Query expansion: fold in strict synonyms so differently-phrased entries still match.
-            if await _query_expansion_enabled(db):
-                for term in await _expand_query(db, agent, keyword):
-                    tl = term.lower().strip()
-                    if tl and tl not in tokens:
-                        tokens.append(tl)
-                tokens = tokens[:24]
+            for term in await _expand_query(db, agent, keyword):
+                tl = term.lower().strip()
+                if tl and tl not in tokens:
+                    tokens.append(tl)
+            tokens = tokens[:24]
 
             # Candidate pool: entries visible to this agent (published, non-legacy).
             # Tokenized scoring across title + body + applicability + JSON tags is done in
