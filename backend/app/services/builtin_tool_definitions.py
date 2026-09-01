@@ -1202,7 +1202,7 @@ _BUILTIN_TOOL_SOURCE = [
                 },
                 "task": {
                     "type": "string",
-                    "description": "Gradle 构建任务",
+                    "description": "Gradle 构建任务；多个任务用空格分隔（例如 \"testDebugUnitTest assembleDebug\"）",
                     "default": "assembleDebug",
                 },
                 "java_version": {

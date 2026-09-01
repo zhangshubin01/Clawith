@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import asyncio
+import shlex
 import time
 from pathlib import Path
 
@@ -25,6 +26,7 @@ from app.services.sandbox.config import SandboxConfig
 from app.services.sandbox.local.android_build_backend import (
     AndroidBuildBackend,
     _detect_host_agent_data_root,
+    _quote_gradle_tasks,
 )
 from app.services.sandbox.docker_client import get_docker_client
 
@@ -918,3 +920,69 @@ class TestTimeoutPathNoLateOutputCallbacks:
         assert received == [], (
             f"超时返回后不应再有 on_output 回调，实际收到: {received!r}"
         )
+
+
+# ─────────────────────────────────────────────────────────
+# Gradle 多任务参数拆分（2026-09-01 android-multi-task-args 修复）
+# ─────────────────────────────────────────────────────────
+
+
+class TestGradleTaskSplitting:
+    """验证 gradle_task 按 shell 规则拆成独立 argv token，而非整串引用。
+
+    背景：旧实现 shlex.quote 整串引用，多任务 "testDebugUnitTest
+    assembleDebug" 被 Gradle 当作一个字面任务名查表 → "Task not found"，
+    模型连试 3 次同参数（2026-09-01 步数膨胀分析最差案例）。Gradle 官方
+    支持一行传多个任务（空格分隔）。
+    详见 docs/technical-plans/20260901-android-multi-task-args.md。
+    """
+
+    def test_single_task_unchanged(self):
+        assert _quote_gradle_tasks("assembleDebug") == "assembleDebug"
+
+    def test_two_tasks_split_into_two_tokens(self):
+        assert _quote_gradle_tasks("testDebugUnitTest assembleDebug") == (
+            "testDebugUnitTest assembleDebug"
+        )
+
+    def test_three_tasks_with_option(self):
+        assert _quote_gradle_tasks("clean build --info") == "clean build --info"
+
+    def test_quoted_task_name_kept_as_single_token(self):
+        # 带空格的引号任务名在拆分后仍是单 token
+        assert _quote_gradle_tasks("'my custom task' assembleDebug") == (
+            "'my custom task' assembleDebug"
+        )
+
+    def test_empty_string_fail_closed(self):
+        # fail-closed：工具层已拦截空 task；此处不得静默回退默认任务
+        assert _quote_gradle_tasks("") == ""
+
+    def test_whitespace_only_fail_closed(self):
+        assert _quote_gradle_tasks("   ") == ""
+
+    def test_unclosed_quote_falls_back_to_whole_quote(self):
+        # 畸形输入（未闭合引号）：shlex.split 抛 ValueError → 退化整体 quote
+        # （旧行为），由 Gradle 报 "Task not found" 呈现，避免 backend 抛异常
+        malformed = 'assembleDebug "unclosed'
+        assert _quote_gradle_tasks(malformed) == shlex.quote(malformed)
+
+    def test_command_contains_separate_task_tokens(self, backend, mock_docker_client):
+        """集成：多任务经 execute() 构造命令时必须是两个独立 token。"""
+        result = asyncio.run(backend.execute(
+            code="", language="java",
+            timeout=30, work_dir="/workspace",
+            project_path="/workspace/app",
+            gradle_task="testDebugUnitTest assembleDebug",
+        ))
+        assert result.success is True, f"mock 构建应成功: {result.error}"
+        last_kwargs = mock_docker_client.containers.last_run_kwargs
+        assert last_kwargs is not None, "containers.run 应该已被调用"
+        command = last_kwargs["command"]
+        assert command[0] == "bash" and command[1] == "-c" and isinstance(command[2], str)
+        script = command[2]
+        # 修复后：两个独立 token 直接出现在 gradlew 命令行
+        assert "testDebugUnitTest assembleDebug" in script
+        # 旧行为（整串单引号引用）不得出现——否则 Gradle 会查一个字面
+        # 任务名 "testDebugUnitTest assembleDebug"
+        assert "'testDebugUnitTest assembleDebug'" not in script

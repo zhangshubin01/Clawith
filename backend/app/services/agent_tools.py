@@ -4955,6 +4955,12 @@ async def _android_compile_outcome(
     if not project_path or not isinstance(project_path, str):
         return _typed_failure("project_path required", "invalid_tool_arguments")
 
+    # task 是模型 JSON 边界输入：显式传空串/非字符串属于无效输入，fail-fast
+    # 而不静默回退默认任务（Misconfiguration fails at the earliest point）。
+    if not isinstance(task, str) or not task.strip():
+        return _typed_failure("task must be a non-empty string", "invalid_tool_arguments")
+    task = task.strip()
+
     # 路径边界检查：防止目录穿越
     from app.services.workspace_paths import resolve_path_within_root, WorkspacePathError
 

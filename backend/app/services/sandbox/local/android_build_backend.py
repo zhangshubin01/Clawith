@@ -56,6 +56,30 @@ def _detect_host_agent_data_root() -> str:
     return ""
 
 
+def _quote_gradle_tasks(gradle_task: str) -> str:
+    """Split a task string into Gradle task tokens and re-quote each.
+
+    Gradle accepts several tasks on one command line ("testDebugUnitTest
+    assembleDebug"). Quoting the whole string as a single argv made Gradle
+    look up one task literally named "testDebugUnitTest assembleDebug" and
+    fail with "Task '...' not found". Split on shell rules (so quoted task
+    names survive) and quote every token separately.
+    See docs/technical-plans/20260901-android-multi-task-args.md.
+    """
+    try:
+        tasks = shlex.split(gradle_task)
+    except ValueError:
+        # 未闭合引号等畸形输入：退化到整体 quote（旧行为），由 Gradle 报
+        # "Task not found" 呈现，避免 backend 抛异常被工具层兜成弱信息
+        # "Android build platform error"。
+        return shlex.quote(gradle_task)
+    if not tasks:
+        # 工具层已校验 task 非空；此处 fail-closed：无任务参数时由 Gradle
+        # 报 "No tasks specified"，不静默回退默认任务（见 technical-plans）。
+        return ""
+    return " ".join(shlex.quote(t) for t in tasks)
+
+
 class AndroidBuildBackend(BaseSandboxBackend):
     """Android 项目编译沙箱后端。
 
@@ -446,7 +470,7 @@ gradle.beforeProject { project ->
                         # 而 Gradle 的 Kotlin `e:` 错误与 FAILURE 段全部走 stderr，
                         # 不合并会得到「compileDebugKotlin FAILED 但零错误」的盲修循环。
                         # 详见 docs/technical-plans/20260821-android-stderr-loss-analysis.md
-                        f"./gradlew --no-daemon --console=plain -I /tmp/gradle-progress.gradle {shlex.quote(str(gradle_task))} 2>&1 ",
+                        f"./gradlew --no-daemon --console=plain -I /tmp/gradle-progress.gradle {_quote_gradle_tasks(str(gradle_task))} 2>&1 ",
                     ],
                     detach=True,
                     volumes=volumes,

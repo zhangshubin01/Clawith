@@ -323,6 +323,59 @@ async def test_invalid_project_path_type_returns_early_error(
 
 
 @pytest.mark.asyncio
+async def test_empty_task_string_returns_early_error(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """task 显式传空串 → fail-fast，不静默回退默认任务。
+
+    校验位于 project_path 校验之后、workspace 路径解析之前，
+    因此无需创建目录或安装 mock backend。
+    """
+    agent_id = uuid.uuid4()
+    outcome = await agent_tools._android_compile_outcome(
+        agent_id, {"project_path": "app", "task": ""}
+    )
+
+    assert outcome.status == "failed"
+    assert outcome.error_code == "invalid_tool_arguments"
+    assert outcome.result_summary is not None
+    assert "task must be a non-empty string" in outcome.result_summary
+
+
+@pytest.mark.asyncio
+async def test_whitespace_only_task_returns_early_error(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """task 为纯空白 → strip 后为空，同样 fail-fast。"""
+    agent_id = uuid.uuid4()
+    outcome = await agent_tools._android_compile_outcome(
+        agent_id, {"project_path": "app", "task": "   "}
+    )
+
+    assert outcome.status == "failed"
+    assert outcome.error_code == "invalid_tool_arguments"
+    assert "task must be a non-empty string" in outcome.result_summary
+
+
+@pytest.mark.asyncio
+async def test_non_string_task_returns_early_error(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """task 非字符串（如数字 123）→ fail-fast。"""
+    agent_id = uuid.uuid4()
+    outcome = await agent_tools._android_compile_outcome(
+        agent_id, {"project_path": "app", "task": 123}
+    )
+
+    assert outcome.status == "failed"
+    assert outcome.error_code == "invalid_tool_arguments"
+    assert "task must be a non-empty string" in outcome.result_summary
+
+
+@pytest.mark.asyncio
 async def test_missing_wrapper_auto_provisioned(
     monkeypatch,
     tmp_path: Path,
