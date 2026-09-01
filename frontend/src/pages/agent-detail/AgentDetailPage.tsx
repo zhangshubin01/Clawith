@@ -1281,6 +1281,7 @@ function AnalysisCard({
                             const isLast = idx === items.length - 1;
                             if (item.type === 'tool' && (item as any).name === 'propose_experience_draft') return null;
                             if (item.type === 'thinking') {
+                                const itemPreview = item.content.length > 360 ? item.content.slice(0, 360).trimEnd() + '...' : item.content;
                                 return (
                                     <div key={idx} className="analysis-trace-row">
                                         <div className="analysis-trace-node-wrap">
@@ -1291,8 +1292,18 @@ function AnalysisCard({
                                         </div>
                                         <div className="analysis-trace-row-content" style={{ paddingBottom: isLast ? 0 : '18px' }}>
                                             <div style={{ fontSize: '13px', lineHeight: 1.5, color: 'var(--text-secondary)', whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
-                                                {item.content}
+                                                {itemPreview}
                                             </div>
+                                            {item.content.length > 360 && (
+                                                <details style={{ marginTop: '8px' }}>
+                                                    <summary style={{ cursor: 'pointer', color: 'var(--text-tertiary)', fontSize: '12px', listStyle: 'none' }}>
+                                                        {t('agent.chat.showMore')}
+                                                    </summary>
+                                                    <div style={{ marginTop: '8px', color: 'var(--text-secondary)', fontSize: '13px', lineHeight: 1.5, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
+                                                        {item.content}
+                                                    </div>
+                                                </details>
+                                            )}
                                         </div>
                                     </div>
                                 );
@@ -1526,6 +1537,8 @@ function ThoughtDisclosure({
                         lineHeight: 1.5,
                         whiteSpace: 'pre-wrap',
                         wordBreak: 'break-word',
+                        maxHeight: '260px',
+                        overflow: 'auto',
                         minWidth: 0,
                     }}>
                         {text}

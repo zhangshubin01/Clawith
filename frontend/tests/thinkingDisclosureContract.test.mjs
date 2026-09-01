@@ -7,28 +7,27 @@ const agentDetail = readFileSync(
   'utf8',
 );
 
-test('analysis thinking items render the full reasoning text', () => {
-  // Regression guard: thinking items used a 360-char preview plus a
-  // collapsible "show more"; long reasoning stages (up to tens of KB per
-  // model step) therefore always looked truncated in the analysis trace.
-  // The full content must render inline, with no preview slicing.
-  assert.doesNotMatch(agentDetail, /itemPreview/);
-  assert.doesNotMatch(agentDetail, /item\.content\.slice\(0, 360\)/);
-  assert.doesNotMatch(agentDetail, /item\.content\.length > 360/);
-  assert.doesNotMatch(agentDetail, /agent\.chat\.showMore/);
+test('analysis thinking items render a 360-char preview with a collapsible show-more', () => {
+  // Regression guard: long reasoning stages render as a 360-char preview
+  // plus a collapsible "show more" so the analysis trace stays compact,
+  // and the full content is always reachable through the details block.
+  assert.match(agentDetail, /itemPreview/);
+  assert.match(agentDetail, /item\.content\.slice\(0, 360\)/);
+  assert.match(agentDetail, /item\.content\.length > 360/);
+  assert.match(agentDetail, /agent\.chat\.showMore/);
   const thinkingRow = agentDetail.match(
     /if \(item\.type === 'thinking'\) \{[\s\S]*?\{item\.content\}/,
   );
-  assert.ok(thinkingRow, 'thinking items must render {item.content}');
+  assert.ok(thinkingRow, 'thinking items must render the full {item.content} inside the details block');
 });
 
-test('thought disclosure renders the full reasoning without a scroll clamp', () => {
-  // The thought-trace body must not clamp long reasoning into a 260px
-  // scroll box — the full stage text stays visible.
+test('thought disclosure clamps long reasoning into a 260px scroll box', () => {
+  // Long thought-trace bodies scroll within a 260px clamp instead of
+  // stretching the chat column.
   const thoughtBody = agentDetail.match(
     /className="analysis-trace-body thought-trace-body"[\s\S]*?\{text\}\s*<\/div>/,
   );
   assert.ok(thoughtBody, 'thought-trace body must render {text}');
-  assert.doesNotMatch(thoughtBody[0], /maxHeight:\s*'260px'/);
-  assert.doesNotMatch(thoughtBody[0], /overflow:\s*'auto'/);
+  assert.match(thoughtBody[0], /maxHeight:\s*'260px'/);
+  assert.match(thoughtBody[0], /overflow:\s*'auto'/);
 });
