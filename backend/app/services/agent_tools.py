@@ -2450,20 +2450,119 @@ def _agent_workspace_root(agent_id: uuid.UUID) -> Path:
     return WORKSPACE_ROOT / str(agent_id)
 
 
-def _path_failure_details(agent_id: uuid.UUID, rel_path: str, *, label: str = "path") -> str:
-    """L2: 路径未命中时附加结构化诊断（解析路径/最深祖先/候选建议）。
+async def _path_failure_details(
+    agent_id: uuid.UUID,
+    rel_path: str,
+    *,
+    label: str = "path",
+    tenant_id: str | None = None,
+    include_storage: bool = True,
+) -> str:
+    """L2+L3: 路径未命中时附加结构化诊断（解析路径/最深祖先/候选建议）。
 
     模型此前拿到的是零信息错误（如 "gradlew not found"），只能脑补并空转；
-    这里让一次失败自带答案。任何异常都静默降级为无附加信息。
+    这里让一次失败自带答案。L2 本地 FS 诊断异常静默降级为空；L3 storage 建议由
+    _storage_nearest_candidates 内部逐操作窄化降级，此处兜底不外抛（未知后端异常
+    不影响工具错误消息本身）。
     """
     if not rel_path:
         return ""
+    text = ""
     try:
         from app.services.workspace_paths import describe_path_failure
 
-        return "\n" + describe_path_failure(_agent_workspace_root(agent_id), rel_path, label=label)
+        text = "\n" + describe_path_failure(_agent_workspace_root(agent_id), rel_path, label=label)
     except Exception:
-        return ""
+        text = ""
+    if include_storage:
+        try:
+            candidates = await _storage_nearest_candidates(agent_id, rel_path, tenant_id=tenant_id)
+        except Exception:
+            # 兜底：helper 内已逐操作窄化，此处防未知后端异常外泄
+            candidates = []
+        deduped = [c for c in candidates if f"'{c}'" not in text]
+        if deduped:
+            text += "\nDid you mean (verified in workspace storage): " + "; ".join(f"'{c}'" for c in deduped) + "?"
+    return text
+
+
+async def _storage_nearest_candidates(
+    agent_id: uuid.UUID,
+    rel_path: str,
+    *,
+    tenant_id: str | None,
+    max_depth: int = 6,
+    max_nodes: int = 150,
+    max_suggestions: int = 3,
+) -> list[str]:
+    """L3: 在 StorageBackend 中做有界 basename 定位，返回真实存在的候选相对路径。
+
+    事故 run 6a1c0eab：模型按 Java 包名约定猜 com/example/mydome1（实际 calculator），
+    连败 4 次。这里从「最深存在祖先」向下有界 DFS，找与目标 basename 精确同名的文件
+    或目录，候选以工具入参同形的相对路径呈现（遍历中直接携带相对路径，代码库无
+    key→path 反函数，不造）。只读、只在失败路径运行；异常按 AGENTS.md
+    「narrow and explained」逐操作降级，注释给出弃查理由。
+    """
+    if not rel_path:
+        return []
+    basename = Path(rel_path.replace("\\", "/")).name
+    if not basename:
+        return []
+    storage = get_storage_backend()
+    _, normalized, is_enterprise = _tool_storage_key(agent_id, rel_path, tenant_id)
+    if not normalized:
+        return []
+    # 企业路径：祖先回溯停在 enterprise_info 根内，DFS 也只在 tenant 企业根下进行，
+    # 绝不跨根搜回 agent 工作区（与 _tool_storage_key 的正向规则一致）。
+    min_parts = 1 if is_enterprise else 0
+
+    # 1) 自目标逐级向上找最深存在祖先；每剥一层记录段名，向上回溯时相对路径自然可得。
+    parts = normalized.split("/")
+    while len(parts) > min_parts:
+        ancestor_key, _, _ = _tool_storage_key(agent_id, "/".join(parts), tenant_id)
+        try:
+            if await storage.is_dir(ancestor_key) or await storage.exists(ancestor_key):
+                break
+        except Exception:
+            # 祖先探测瞬时失败（如 S3 HEAD 超时）：停止回溯，退回当前层，放弃更深层建议
+            break
+        parts.pop()
+    ancestor_rel = "/".join(parts)
+    ancestor_key, _, _ = _tool_storage_key(agent_id, ancestor_rel, tenant_id)
+
+    # 2) 自祖先向下有界 DFS：跳过 '.' 开头条目，深度/节点双上限，basename 精确匹配
+    #    （大小写敏感，宁缺毋滥），文件与目录都收。
+    found: list[tuple[int, str]] = []
+    visited = 0
+
+    async def walk(key: str, rel: str, depth: int) -> None:
+        nonlocal visited
+        if depth > max_depth or visited >= max_nodes:
+            return
+        try:
+            entries = await storage.list_dir(key)
+        except Exception:
+            # 该节点 list_dir 瞬时失败 → 弃查该子树（窄化降级，不影响其它兄弟分支）
+            return
+        for entry in entries:
+            visited += 1
+            if visited > max_nodes:
+                return
+            name = entry.name
+            if name.startswith("."):
+                continue
+            child_depth = depth + 1
+            if child_depth > max_depth:
+                continue
+            child_rel = f"{rel}/{name}" if rel else name
+            if name == basename:
+                found.append((child_depth, child_rel))
+            elif entry.is_dir:
+                await walk(entry.key, child_rel, child_depth)
+
+    await walk(ancestor_key, ancestor_rel, 0)
+    found.sort(key=lambda item: (item[0], item[1]))
+    return [rel for _, rel in found[:max_suggestions]]
 
 
 def _glob_static_prefix(pattern: str) -> str:
@@ -3439,7 +3538,7 @@ async def _read_file_outcome(
         storage_key, normalized, _ = _tool_storage_key(agent_id, path, tenant_id)
         if not normalized or not await storage.is_file(storage_key):
             return _typed_failure(
-                f"File not found: {path}" + _path_failure_details(agent_id, path),
+                f"File not found: {path}" + await _path_failure_details(agent_id, path, tenant_id=tenant_id),
                 "workspace_file_not_found",
             )
         content = await storage.read_text(
@@ -3696,7 +3795,8 @@ async def _list_files_outcome(
             )
         if not exists and not is_dir and normalized:
             return _typed_failure(
-                f"Directory not found: {path or '/'}" + _path_failure_details(agent_id, path),
+                f"Directory not found: {path or '/'}"
+                + await _path_failure_details(agent_id, path, tenant_id=tenant_id),
                 "workspace_directory_not_found",
             )
         summary = await _storage_list_dir(agent_id, path, tenant_id=tenant_id)
@@ -3741,7 +3841,7 @@ async def _search_files_outcome(
         base_key, normalized, _ = _tool_storage_key(agent_id, rel_path, tenant_id)
         if normalized and not await storage.is_dir(base_key):
             return _typed_failure(
-                f"Directory not found: {path}" + _path_failure_details(agent_id, path),
+                f"Directory not found: {path}" + await _path_failure_details(agent_id, path, tenant_id=tenant_id),
                 "workspace_directory_not_found",
             )
         summary = await _storage_search_files(
@@ -3780,7 +3880,7 @@ async def _find_files_outcome(
         base_key, normalized, _ = _tool_storage_key(agent_id, rel_path, tenant_id)
         if normalized and not await storage.is_dir(base_key):
             return _typed_failure(
-                f"Directory not found: {path}" + _path_failure_details(agent_id, path),
+                f"Directory not found: {path}" + await _path_failure_details(agent_id, path, tenant_id=tenant_id),
                 "workspace_directory_not_found",
             )
         summary = await _storage_find_files(
@@ -4719,7 +4819,7 @@ async def _android_compile_outcome(
             )
         return _typed_failure(
             f"Android project not found: '{project_path}'"
-            + _path_failure_details(agent_id, project_path, label="project_path"),
+            + await _path_failure_details(agent_id, project_path, label="project_path"),
             "android_project_not_found",
         )
 
@@ -9081,7 +9181,7 @@ async def _storage_search_files(
         msg = f"No matches found for pattern '{pattern}' in {files_searched} file(s)"
         prefix = _glob_static_prefix(pattern)
         if prefix and not (_agent_workspace_root(agent_id) / prefix).exists():
-            msg += _path_failure_details(agent_id, prefix, label="pattern base")
+            msg += await _path_failure_details(agent_id, prefix, label="pattern base", include_storage=False)
         return msg
     truncated = total_matches > len(results)
     truncation_note = f" (showing first {len(results)} of {total_matches}+ — refine pattern or path for more)" if truncated else ""
@@ -9109,7 +9209,7 @@ async def _storage_find_files(
         msg = f"No files matching pattern: {pattern}"
         prefix = _glob_static_prefix(pattern)
         if prefix and not (_agent_workspace_root(agent_id) / prefix).exists():
-            msg += _path_failure_details(agent_id, prefix, label="pattern base")
+            msg += await _path_failure_details(agent_id, prefix, label="pattern base", include_storage=False)
         return msg
     results = []
     dir_count = 0
