@@ -4,6 +4,9 @@ Clawith 多租户企业 Agent 平台的运行时（Runtime）词汇表：LangGra
 
 ## Language
 
+**Path grounding（路径接地）**:
+模型在未见真实目录结构时，用语言约定（如 Java 包名）脑补文件路径导致工具路径未命中的问题域。三级契约逐层治理：L1 路径契约注入（参数描述声明相对根）、L2 失败诊断（最深祖先/条目/前缀型 Did you mean）、L3 存储侧有界 basename 定位（失败时给出 storage 验证过的真实候选，只建议不代读）。契约与升级判据见 ADR-0013；实证样本：2026-09-01 run 6a1c0eab（mydome1→calculator 包名幻觉）。
+
 **Command**:
 一条可持久化的运行控制消息（start / resume / cancel），由 daemon 认领并驱动一次图推进；认领、尝试次数、应用状态全部落库，进程死亡后可由其他 daemon 恢复处理。
 
