@@ -1029,7 +1029,13 @@ _BUILTIN_TOOL_SOURCE = [
     {
         "name": "execute_code",
         "display_name": "Code Executor",
-        "description": "Execute code (Python, Bash, Node.js) in a local sandboxed subprocess within the agent's workspace. Useful for data processing, calculations, file transformations, and automation.",
+        "description": (
+            "Execute code (Python, Bash, Node.js) in a local sandboxed subprocess within the agent's workspace. "
+            "Useful for data processing, calculations, file transformations, and automation. "
+            "Build products and other derived files (build/, .git/, node_modules/ and similar) are NOT synced "
+            "back to the workspace; APK/AAB build outputs are returned as artifacts. "
+            "Prefer edit_file for changes to source files."
+        ),
         "category": "code",
         "icon": "💻",
         "is_default": True,

@@ -24,8 +24,10 @@ from app.services.agent_runtime.state import (
 )
 from app.services.observability import observe_node, set_run_identity
 from app.services.agent_runtime.tool_repair_budget import (
+    WORKSPACE_SYNC_CONFLICT_FAILURE_MESSAGE,
     ToolRepairBudgetError,
     apply_tool_result,
+    apply_workspace_sync_conflict,
     reset_tool_repair_episodes,
 )
 from app.services.llm.caller import (
@@ -1063,6 +1065,7 @@ class DeterministicRuntimeNodeExecutor:
         repair_pause_tool: str | None = None
         try:
             repair_episodes: object = lifecycle.get("tool_repair_episodes")
+            conflict_budget: object = lifecycle.get("workspace_conflict_budget")
             for message in result.messages:
                 transition = apply_tool_result(
                     repair_episodes,
@@ -1073,7 +1076,17 @@ class DeterministicRuntimeNodeExecutor:
                 if transition.pause_reason is not None:
                     repair_pause_reason = transition.pause_reason
                     repair_pause_tool = transition.paused_tool_name
+                conflict_transition = apply_workspace_sync_conflict(
+                    conflict_budget,
+                    message,
+                    model_step=_counter(state["lifecycle"], "model_step_count"),
+                )
+                conflict_budget = conflict_transition.budget
+                if conflict_transition.terminal:
+                    repair_pause_reason = "workspace_sync_conflict_limit_reached"
+                    repair_pause_tool = tool_name
             lifecycle["tool_repair_episodes"] = cast(JsonObject, repair_episodes)
+            lifecycle["workspace_conflict_budget"] = cast(JsonObject, conflict_budget)
         except ToolRepairBudgetError as exc:
             raise RuntimeNodeTransitionError(
                 "invalid_tool_repair_episodes",
@@ -1142,7 +1155,11 @@ class DeterministicRuntimeNodeExecutor:
                     "waiting_request": None,
                     "error": _error(
                         repair_pause_reason,
-                        f"Tool {repair_pause_tool or 'unknown'} reached its repair safety limit.",
+                        (
+                            WORKSPACE_SYNC_CONFLICT_FAILURE_MESSAGE
+                            if repair_pause_reason == "workspace_sync_conflict_limit_reached"
+                            else f"Tool {repair_pause_tool or 'unknown'} reached its repair safety limit."
+                        ),
                     ),
                 }
             )

@@ -113,6 +113,7 @@ from app.services.sandbox.config import (
 from app.services.sandbox.workspace_policy import (
     SandboxExecutionScope,
     build_workspace_policy,
+    classify_publish_path,
     parse_canonical_uuid,
 )
 from app.services.llm.finish import (
@@ -1887,6 +1888,12 @@ async def _materialize_storage_entry(
     max_file_bytes: int = TOOL_MATERIALIZE_MAX_FILE_BYTES,
 ) -> None:
     if await storage.is_file(storage_key):
+        if classify_publish_path(rel_path) == "derived":
+            # L2 derived history never materializes into the sandbox copy, so
+            # stale build outputs cannot confuse the model nor re-enter the
+            # publish enum.  The ``build/outputs`` artifact subtree is still
+            # materialized (classifier returns "artifact" for it).
+            return
         version = await storage.get_version(storage_key)
         if version.size > max_file_bytes:
             logger.warning(
@@ -1976,12 +1983,16 @@ async def _sync_tasks_to_file(agent_id: uuid.UUID, ws: Path):
 async def flush_temp_workspace(
     temp_workspace: TempWorkspace,
     conflict_mode: Literal["fail", "overwrite"] = "fail",
-) -> dict[str, list[str]]:
+) -> dict[str, list[str] | int]:
     """Flush local changes, optionally replacing Session-isolated output."""
     storage = get_storage_backend()
     selected_paths = [normalize_workspace_path(path) for path in temp_workspace.publish_paths]
     manifest = temp_workspace.manifest
-    local_files = _collect_temp_workspace_files(temp_workspace.root, selected_paths)
+    cas_files, overwrite_files, derived_paths = _collect_temp_workspace_files(
+        temp_workspace.root,
+        selected_paths,
+    )
+    local_files = {**cas_files, **overwrite_files}
     run_id = sandbox_run_scope_id.get().strip() or None
 
     updated: list[str] = []
@@ -1994,9 +2005,28 @@ async def flush_temp_workspace(
         selected_paths,
         tenant_id=temp_workspace.tenant_id,
     ):
-        for rel_path, local_path in local_files.items():
-            if local_path.name.startswith("_exec_tmp") or "__pycache__" in local_path.parts:
+        # L3 artifacts publish last-write-wins; byte-identical sandbox copies
+        # are skipped so an external republish (android_compile) is preserved.
+        for rel_path, local_path in overwrite_files.items():
+            data = local_path.read_bytes()
+            current_hash = content_hash_bytes(data)
+            entry = manifest.get(rel_path)
+            if entry and entry.base_hash == current_hash:
+                skipped.append(rel_path)
                 continue
+            storage_key = entry.storage_key if entry else normalize_storage_key(f"{temp_workspace.agent_id}/{rel_path}")
+            await storage.write_bytes(storage_key, data)
+            version = await storage.get_version(storage_key)
+            manifest[rel_path] = TempWorkspaceManifestEntry(
+                rel_path=rel_path,
+                storage_key=storage_key,
+                base_version_token=version.token,
+                base_hash=current_hash,
+                size=len(data),
+            )
+            updated.append(rel_path)
+
+        for rel_path, local_path in cas_files.items():
             data = local_path.read_bytes()
             current_hash = content_hash_bytes(data)
             entry = manifest.get(rel_path)
@@ -2068,7 +2098,13 @@ async def flush_temp_workspace(
                     skipped,
                 )
                 if conflict_mode == "fail":
-                    return {"updated": updated, "deleted": deleted, "conflicted": conflicted, "skipped": skipped}
+                    return {
+                        "updated": updated,
+                        "deleted": deleted,
+                        "conflicted": conflicted,
+                        "skipped": skipped,
+                        "derived_skipped_count": len(derived_paths),
+                    }
                 continue
             version = result.current_version or await storage.get_version(storage_key)
             manifest[rel_path] = TempWorkspaceManifestEntry(
@@ -2087,6 +2123,23 @@ async def flush_temp_workspace(
             ):
                 continue
             if rel_path in local_files:
+                continue
+            publish_class = classify_publish_path(rel_path)
+            if publish_class == "derived":
+                # Derived history must never be reverse-deleted from storage.
+                logger.info(
+                    "[WorkspaceFlushDerivedSkipped] run_id={} agent_id={} path={} "
+                    "operation=delete",
+                    run_id,
+                    temp_workspace.agent_id,
+                    rel_path,
+                )
+                continue
+            if publish_class == "artifact":
+                # LWW symmetric: a sandbox-deleted artifact is deleted outright.
+                await storage.delete(entry.storage_key)
+                manifest.pop(rel_path, None)
+                deleted.append(rel_path)
                 continue
             if conflict_mode == "overwrite":
                 await storage.delete(entry.storage_key)
@@ -2114,7 +2167,13 @@ async def flush_temp_workspace(
                     skipped,
                 )
                 if conflict_mode == "fail":
-                    return {"updated": updated, "deleted": deleted, "conflicted": conflicted, "skipped": skipped}
+                    return {
+                        "updated": updated,
+                        "deleted": deleted,
+                        "conflicted": conflicted,
+                        "skipped": skipped,
+                        "derived_skipped_count": len(derived_paths),
+                    }
                 continue
             manifest.pop(rel_path, None)
             deleted.append(rel_path)
@@ -2136,7 +2195,13 @@ async def flush_temp_workspace(
                 skip_workspace=temp_workspace,
             )
 
-    return {"updated": updated, "deleted": deleted, "conflicted": conflicted, "skipped": skipped}
+    return {
+        "updated": updated,
+        "deleted": deleted,
+        "conflicted": conflicted,
+        "skipped": skipped,
+        "derived_skipped_count": len(derived_paths),
+    }
 
 
 async def _refresh_run_workspace_after_direct_write(
@@ -2247,12 +2312,14 @@ async def _workspace_candidate_changes(
     """Freeze the publishable Sandbox delta before the temporary copy is released."""
     storage = get_storage_backend()
     selected_paths = [normalize_workspace_path(path) for path in temp_workspace.publish_paths]
-    local_files = _collect_temp_workspace_files(temp_workspace.root, selected_paths)
+    cas_files, overwrite_files, _derived_paths = _collect_temp_workspace_files(
+        temp_workspace.root,
+        selected_paths,
+    )
+    local_files = {**cas_files, **overwrite_files}
     changes: list[CandidateChange] = []
 
-    for rel_path, local_path in local_files.items():
-        if local_path.name.startswith("_exec_tmp") or "__pycache__" in local_path.parts:
-            continue
+    for rel_path, local_path in cas_files.items():
         data = local_path.read_bytes()
         candidate_hash = content_hash_bytes(data)
         entry = temp_workspace.manifest.get(rel_path)
@@ -2285,6 +2352,29 @@ async def _workspace_candidate_changes(
         else:
             changes.append(CandidateChange.create(rel_path, data))
 
+    for rel_path, local_path in overwrite_files.items():
+        data = local_path.read_bytes()
+        candidate_hash = content_hash_bytes(data)
+        entry = temp_workspace.manifest.get(rel_path)
+        if entry is not None and entry.base_hash == candidate_hash:
+            continue
+        storage_key = normalize_storage_key(f"{temp_workspace.agent_id}/{rel_path}")
+        current = await storage.get_version(storage_key)
+        if current.exists:
+            # L3 artifact: LWW semantics — no base credentials claimed, so a
+            # base-unaware apply still writes it (and an unchanged base never
+            # blocks already_applied verification).
+            changes.append(
+                CandidateChange(
+                    path=rel_path,
+                    operation="replace",
+                    base_state="unloaded",
+                    data=data,
+                )
+            )
+        else:
+            changes.append(CandidateChange.create(rel_path, data))
+
     for rel_path, entry in temp_workspace.manifest.items():
         if not any(
             rel_path == selected or rel_path.startswith(selected.rstrip("/") + "/")
@@ -2292,6 +2382,20 @@ async def _workspace_candidate_changes(
         ):
             continue
         if rel_path not in local_files:
+            publish_class = classify_publish_path(rel_path)
+            if publish_class == "derived":
+                # Derived history is never reverse-deleted from storage.
+                continue
+            if publish_class == "artifact":
+                # LWW symmetric: an unconditional delete candidate.
+                changes.append(
+                    CandidateChange(
+                        path=rel_path,
+                        operation="delete",
+                        base_state="unloaded",
+                    )
+                )
+                continue
             changes.append(
                 CandidateChange.delete(
                     rel_path,
@@ -2379,9 +2483,33 @@ async def _recover_workspace_candidate(
     )
 
 
-def _collect_temp_workspace_files(root: Path, selected_paths: list[str]) -> dict[str, Path]:
-    files: dict[str, Path] = {}
+def _collect_temp_workspace_files(
+    root: Path,
+    selected_paths: list[str],
+) -> tuple[dict[str, Path], dict[str, Path], list[str]]:
+    """Collect publishable files split by write semantics.
+
+    Returns ``(cas_files, overwrite_files, derived_paths)``:
+    - ``cas_files``: L1 sources, published with CAS conditions;
+    - ``overwrite_files``: L3 ``build/outputs`` artifacts, published
+      last-write-wins;
+    - ``derived_paths``: L2 derived outputs, excluded from both enumerations
+      (never written and never deleted — storage history stays as-is).
+    """
+    cas_files: dict[str, Path] = {}
+    overwrite_files: dict[str, Path] = {}
+    derived_paths: list[str] = []
     root_resolved = root.resolve()
+
+    def classify_and_put(rel: str, local_path: Path) -> None:
+        publish_class = classify_publish_path(rel)
+        if publish_class == "derived":
+            derived_paths.append(rel)
+        elif publish_class == "artifact":
+            overwrite_files[rel] = local_path
+        else:
+            cas_files[rel] = local_path
+
     for selected in selected_paths:
         if not selected:
             continue
@@ -2391,7 +2519,7 @@ def _collect_temp_workspace_files(root: Path, selected_paths: list[str]) -> dict
         if (root_resolved / selected).is_symlink():
             continue
         if target.is_file():
-            files[normalize_workspace_path(selected)] = target
+            classify_and_put(normalize_workspace_path(selected), target)
             continue
         if not target.exists() or not target.is_dir():
             continue
@@ -2402,8 +2530,8 @@ def _collect_temp_workspace_files(root: Path, selected_paths: list[str]) -> dict
             if not resolved.is_relative_to(target):
                 continue
             rel = resolved.relative_to(root_resolved).as_posix()
-            files[normalize_workspace_path(rel)] = path
-    return files
+            classify_and_put(normalize_workspace_path(rel), path)
+    return cas_files, overwrite_files, derived_paths
 
 
 # ─── Tool Executors ─────────────────────────────────────────────
@@ -2663,10 +2791,10 @@ async def _run_with_temp_workspace_outcome(
                 "workspace_publication_unverifiable",
             )
         if flush_result["conflicted"]:
-            conflict_list = ", ".join(flush_result["conflicted"][:5])
             return _typed_workspace_publication_failure(
-                f"Local execution completed but workspace sync conflicted for: {conflict_list}",
+                _workspace_conflict_summary(flush_result["conflicted"]),
                 "workspace_sync_conflict",
+                safe_remediation=_WORKSPACE_CONFLICT_SAFE_REMEDIATION,
             )
         changed_refs = tuple(
             _workspace_artifact_ref(agent_id, path)
@@ -2676,6 +2804,10 @@ async def _run_with_temp_workspace_outcome(
             outcome,
             artifact_refs=tuple(
                 dict.fromkeys((*outcome.artifact_refs, *changed_refs))
+            ),
+            result_summary=(
+                (outcome.result_summary or "")
+                + _derived_publication_note(flush_result)
             ),
         )
     finally:
@@ -2932,11 +3064,16 @@ async def _execute_code_with_workspace_outcome(
                         require_base_match=True,
                     )
                     if application.status not in {"applied", "already_applied"}:
+                        conflicted_paths = [
+                            item.path
+                            for item in application.changes
+                            if item.status in {"conflict", "unverified"}
+                        ]
                         return _typed_workspace_publication_failure(
-                            "Workspace changed before the Agent result could be published. "
-                            "The current Workspace was preserved.",
+                            _workspace_conflict_summary(conflicted_paths),
                             "workspace_sync_conflict",
                             metadata=await reconciliation_metadata(),
+                            safe_remediation=_WORKSPACE_CONFLICT_SAFE_REMEDIATION,
                         )
                     verification = await verify_candidate()
                 if verification is None or verification.status == "unverified":
@@ -2947,11 +3084,16 @@ async def _execute_code_with_workspace_outcome(
                         metadata=await reconciliation_metadata(),
                     )
                 if verification.status != "applied":
+                    conflicted_paths = [
+                        item.path
+                        for item in verification.changes
+                        if item.status != "applied"
+                    ]
                     return _typed_workspace_publication_failure(
-                        "Workspace changed before the Agent result could be published. "
-                        "The current Workspace was preserved.",
+                        _workspace_conflict_summary(conflicted_paths),
                         "workspace_sync_conflict",
                         metadata=_workspace_verification_metadata(candidate_ref, verification),
+                        safe_remediation=_WORKSPACE_CONFLICT_SAFE_REMEDIATION,
                     )
                 await reconciliation_service.discard_candidate(
                     reconciliation_scope,
@@ -2962,6 +3104,10 @@ async def _execute_code_with_workspace_outcome(
                     status="succeeded",
                     error_code=None,
                     retryable=False,
+                    result_summary=(
+                        (original_outcome.result_summary or "")
+                        + _derived_publication_note(flush_result)
+                    ),
                     metadata={
                         **original_outcome.metadata,
                         "workspace_publication": flush_result,
@@ -3014,6 +3160,7 @@ async def _execute_code_with_workspace_outcome(
                     "deleted": [],
                     "conflicted": [],
                     "skipped": [],
+                    "derived_skipped_count": 0,
                 }
                 changed_refs = tuple(
                     _workspace_artifact_ref(agent_id, path)
@@ -3035,6 +3182,10 @@ async def _execute_code_with_workspace_outcome(
                 return replace(
                     outcome,
                     artifact_refs=tuple(dict.fromkeys((*outcome.artifact_refs, *changed_refs))),
+                    result_summary=(
+                        (outcome.result_summary or "")
+                        + _derived_publication_note(flush_result)
+                    ),
                     metadata={**outcome.metadata, "workspace_publication": flush_result, **candidate_metadata},
                 )
             if lease is not None and not await lease.ensure_publication_window(120):
@@ -3061,7 +3212,7 @@ async def _execute_code_with_workspace_outcome(
                 candidate_metadata = await reconciliation_metadata()
                 recovered = await recover_publication(
                     outcome,
-                    {"updated": [], "deleted": [], "conflicted": [], "skipped": []},
+                    {"updated": [], "deleted": [], "conflicted": [], "skipped": [], "derived_skipped_count": 0},
                 )
                 if recovered is not None:
                     return recovered
@@ -3077,9 +3228,10 @@ async def _execute_code_with_workspace_outcome(
                 if recovered is not None:
                     return recovered
                 return _typed_workspace_publication_failure(
-                    "Local execution completed but workspace sync conflicted.",
+                    _workspace_conflict_summary(flush_result["conflicted"]),
                     "workspace_sync_conflict",
                     metadata=metadata,
+                    safe_remediation=_WORKSPACE_CONFLICT_SAFE_REMEDIATION,
                 )
             changed_refs = tuple(
                 _workspace_artifact_ref(agent_id, path)
@@ -3090,6 +3242,10 @@ async def _execute_code_with_workspace_outcome(
             return replace(
                 outcome,
                 artifact_refs=tuple(dict.fromkeys((*outcome.artifact_refs, *changed_refs))),
+                result_summary=(
+                    (outcome.result_summary or "")
+                    + _derived_publication_note(flush_result)
+                ),
                 metadata=metadata,
             )
     except SkillSnapshotIncompleteError as exc:
@@ -3296,11 +3452,50 @@ def _typed_failure(
     )
 
 
+_WORKSPACE_CONFLICT_SAFE_REMEDIATION = (
+    "Workspace publication conflicted: some path changes were NOT saved. "
+    "For each listed path run read_file to load the current stored content, "
+    "then re-apply the change with edit_file. Do not rerun the code."
+)
+
+
+def _workspace_conflict_summary(conflicted: list[str]) -> str:
+    """Actionable P0.5 conflict text: fact (not saved) + paths + substitute action.
+
+    Never asserts a concurrency cause — the historical incidents were not real
+    concurrent edits, and a hard-coded causal claim misleads the model.
+    """
+    total = len(conflicted)
+    shown = list(conflicted)[:5]
+    lines = "\n".join(f"- {path}" for path in shown)
+    if total > len(shown):
+        lines += f"\n（其余 {total - len(shown)} 条冲突路径未列出）"
+    return (
+        f"Workspace 发布冲突：本次代码已执行，但以下路径的改动未能保存"
+        f"（共 {total} 条，最多列出 {len(shown)} 条）：\n{lines}\n"
+        "请对每个列出的路径执行 read_file 读取工作区当前最新内容，"
+        "再基于最新内容用 edit_file 修改；不要重复运行刚才的代码。"
+        "其余未列出的改动已保存。"
+    )
+
+
+def _derived_publication_note(flush_result: dict[str, list[str] | int] | None) -> str:
+    """Success receipt note when derived outputs were skipped (P0.5 §4.2.2)."""
+    count = (flush_result or {}).get("derived_skipped_count") or 0
+    if not isinstance(count, int) or count <= 0:
+        return ""
+    return (
+        "\n构建产物等派生文件（build/、.git/ 等）按平台约定未同步回工作区；"
+        "apk/aab 产物已作为 artifact 返回。"
+    )
+
+
 def _typed_workspace_publication_failure(
     summary: str,
     error_code: str,
     *,
     metadata: dict | None = None,
+    safe_remediation: str | None = None,
 ) -> ToolExecutionOutcome:
     """Fail publication without replaying code or pausing the Run for a user verdict."""
     return ToolExecutionOutcome(
@@ -3312,7 +3507,8 @@ def _typed_workspace_publication_failure(
         model_action="continue",
         side_effect_state="unknown",
         safe_remediation=(
-            "Explain that Workspace persistence could not be confirmed, identify the affected "
+            safe_remediation
+            or "Explain that Workspace persistence could not be confirmed, identify the affected "
             "path when available, and finish the reply without retrying the code."
         ),
         metadata=metadata or {},
@@ -4881,6 +5077,21 @@ async def _android_compile_outcome(
                     pass
 
         if apk_files:
+            if agent_id is not None:
+                # Two-writer coordination (ADR 0011 + P0 L3): the docker build
+                # republished the artifacts outside execute_code's manifest, so
+                # refresh the run-scoped workspace entries to match storage.
+                # Best-effort by design; L3 LWW semantics remain the safety net.
+                try:
+                    project_rel = resolved_path.resolve().relative_to(ws.resolve())
+                except ValueError:
+                    project_rel = None
+                if project_rel is not None:
+                    for rel in apk_files:
+                        await _refresh_run_workspace_after_direct_write(
+                            agent_id,
+                            (project_rel / rel).as_posix(),
+                        )
             artifact_refs = (
                 _android_artifact_refs(agent_id, ws, resolved_path, apk_files)
                 if agent_id is not None

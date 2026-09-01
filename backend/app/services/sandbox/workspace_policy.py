@@ -11,6 +11,35 @@ from app.services.workspace_collaboration import normalize_workspace_path
 WorkspaceMode = Literal["merge", "isolated_output"]
 PublicationOwner = Literal["gateway", "workspace_cas"]
 PublicationConflictMode = Literal["fail", "overwrite"]
+PublishClass = Literal["source", "derived", "artifact"]
+
+# Derived outputs never published (segment-level, case-sensitive blacklist).
+# ``_exec_tmp`` also matches a ``_exec_tmp``-prefixed file basename, keeping the
+# legacy temp-file exclusion semantics.
+DERIVED_SEGMENTS = frozenset({"build", ".git", ".gradle", "node_modules", "target", "dist", "__pycache__", "_exec_tmp"})
+_EXEC_TMP_PREFIX = "_exec_tmp"
+
+
+def classify_publish_path(rel_path: str) -> PublishClass:
+    """Classify one workspace-relative publish path (pure segment blacklist).
+
+    Segment-level, case-sensitive matching:
+    - any segment in ``DERIVED_SEGMENTS`` (or an ``_exec_tmp``-prefixed
+      basename) marks the path derived;
+    - a ``build`` segment immediately followed by an ``outputs`` segment marks
+      the ``**/build/outputs/**`` artifact exception, which wins over derived.
+    Everything else is a CAS-protected source path.
+    """
+    parts = [part for part in str(rel_path).replace("\\", "/").split("/") if part not in {"", "."}]
+    for index, part in enumerate(parts):
+        if part == "build" and index + 1 < len(parts) and parts[index + 1] == "outputs":
+            return "artifact"
+    for part in parts:
+        if part in DERIVED_SEGMENTS:
+            return "derived"
+    if parts and parts[-1].startswith(_EXEC_TMP_PREFIX):
+        return "derived"
+    return "source"
 
 
 @dataclass(frozen=True, slots=True)

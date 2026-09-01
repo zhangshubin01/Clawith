@@ -557,6 +557,7 @@ async def test_flush_temp_workspace_accepts_stable_identical_concurrent_write(
         "deleted": [],
         "conflicted": [],
         "skipped": ["workspace/output/session-id/result.md"],
+        "derived_skipped_count": 0,
     }
     assert storage.files[storage_key] == b"# Identical result\n"
     manifest = temp_ws.manifest["workspace/output/session-id/result.md"]
