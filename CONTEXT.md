@@ -19,6 +19,9 @@ Tool Execution 处于 started 时的排他执行窗口；持有者定期续期�
 **Waiting（等待边界）**:
 LangGraph interrupt 造成的合法长驻态：Run 停在 waiting_started 事件处等待外部输入（用户回复/审批），收到 resume 命令后继续。驻留期间命令已 applied、无 claim、无工具 lease，也不产生新事件——事件流的 idle-timeout 不得将其误判为死亡；重连附着时若客户端 cursor 已在边界之后，附着直接在边界处以 waiting_user 收尾，不再重放。
 
+**Stream Admission Gate（入流门禁）**:
+Direct Chat 消息泵在起流前的车道感知裁决（ADR 0012）。调度车道（scheduling lane）按 thread 串行化执行：持有者最多一个、只有它能执行或停驻 waiting，且只在终态（completed/failed/cancelled）释放——waiting 不算终态，是有意设计（parked run 的 checkpoint 挂在共享 thread 上，放行他 run 会污染 resume 点）。裁决规则：本 Run 持车道 → 立即流；车道被他人持有 → 挂起；车道空且本 Run 是 lane 内最早未终态 run → 立即流（防跨 socket 空等流复挂）；否则挂起。挂起项进独立 deferred 队列，消息优先、2s 超时 peek 重探，defer 落地补发 queued 包。保证泵只流「此刻可能产生活动」的 Run，根治排队 Run 流悬挂（其 start 命令无法认领时流会永久占泵）。
+
 **Fence（收据栅栏）**:
 safe read execution 处于 started 且 lease 未到期时，对同 call_id 的后续尝试形成的排他阻挡；撞上 fence 的 Command 走 defer 而不是执行。
 

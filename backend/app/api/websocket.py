@@ -37,6 +37,11 @@ from app.services.agent_runtime.chat_stream import (
     stream_web_chat_run,
 )
 from app.services.agent_runtime.contracts import CancelRunCommand, RunHandle, RuntimeEventCursor
+from app.services.agent_runtime.event_stream import (
+    current_lane_admission,
+    current_start_command_status,
+    run_is_terminal,
+)
 from app.services.agent_runtime.run_state_reader import RunStateReadError, open_run_state_reader
 from app.services.chat_session_service import ensure_primary_platform_session
 from app.services.llm.utils import convert_chat_messages_to_llm_format
@@ -56,6 +61,9 @@ from app.services.quota_guard import (
 from app.services.realtime import realtime_router
 
 router = APIRouter(tags=["websocket"])
+
+_DEFERRED_PROBE_TIMEOUT_SECONDS = 2.0
+_MAX_STREAM_REQUEUE_ATTEMPTS = 2
 
 @dataclass(frozen=True, slots=True)
 class WebChatRuntimeIntake:
@@ -533,55 +541,218 @@ class WebSocketChatHandler:
             await self.websocket.send_json({"type": "done", "role": "assistant", "content": self.welcome_message})
 
         pending_runs: deque[AcceptedWebChatMessage] = deque()
+        deferred: deque[AcceptedWebChatMessage] = deque()
+        requeue_attempts: dict[uuid.UUID, int] = {}
         while True:
-            if pending_runs:
-                accepted = pending_runs.popleft()
-            else:
-                data = await self.websocket.receive_json()
-                if data.get("type") == "abort":
-                    if self.agent_type == "openclaw":
-                        continue
-                    await self._handle_cancel_packet(data)
-                    continue
-                if data.get("type") == "attach_run":
-                    attached = await self._attach_runtime_run(data)
-                    if attached is None:
-                        continue
-                    outcome, queued_messages = await self._run_runtime_and_stream(
-                        attached,
-                        user_content="",
+            accepted, announced, bypass_gate = await self._pick_next_intake(
+                pending_runs,
+                deferred,
+            )
+            if accepted is None:
+                continue
+            if not bypass_gate:
+                decision = await self._lane_admission(accepted.runtime.run)
+                if decision[0] == "defer":
+                    logger.info(
+                        f"[WS] stream_gate decision=defer run_id={accepted.runtime.run.handle.run_id} lane_holder={decision[1]}"
                     )
-                    pending_runs.extend(queued_messages)
-                    if outcome is not None:
-                        self.conversation.append(
-                            {"role": "assistant", "content": outcome.content}
-                        )
+                    deferred.append(accepted)
+                    if not announced:
+                        await self._announce_queued(accepted.runtime.run.handle.run_id)
                     continue
-                accepted = await self._accept_client_message(data)
-                if accepted is None:
-                    continue
-
+            run_id = accepted.runtime.run.handle.run_id
             outcome, queued_messages = await self._run_runtime_and_stream(
                 accepted.runtime.run,
                 user_content=accepted.user_content,
             )
             pending_runs.extend(queued_messages)
-            if outcome is not None:
-                if not accepted.is_onboarding_trigger:
-                    self.conversation.append(
-                        {"role": "user", "content": accepted.user_content}
+            if outcome is None:
+                attempts = requeue_attempts.get(run_id, 0) + 1
+                if attempts > _MAX_STREAM_REQUEUE_ATTEMPTS:
+                    logger.warning(
+                        f"[WS] stream_gate giving up on run_id={run_id} after repeated stream failures"
                     )
+                    requeue_attempts.pop(run_id, None)
+                elif await self._run_is_terminal(accepted.runtime.run):
+                    # A terminal Run will not produce new events; retrying would
+                    # only replay what the attach path can already recover.
+                    logger.info(
+                        f"[WS] stream_gate dropping terminal run_id={run_id} after stream failure"
+                    )
+                    requeue_attempts.pop(run_id, None)
+                else:
+                    requeue_attempts[run_id] = attempts
+                    deferred.appendleft(accepted)
+                    if not announced:
+                        await self._announce_queued(run_id)
+                continue
+            requeue_attempts.pop(run_id, None)
+            if not accepted.is_onboarding_trigger:
                 self.conversation.append(
-                    {"role": "assistant", "content": outcome.content}
+                    {"role": "user", "content": accepted.user_content}
                 )
-                if (
-                    outcome.status == "completed"
-                    and accepted.runtime.onboarding_target_phase is not None
-                ):
-                    await self._mark_onboarding_runtime_phase(
-                        accepted.runtime.onboarding_target_phase
-                    )
+            self.conversation.append(
+                {"role": "assistant", "content": outcome.content}
+            )
+            if (
+                outcome.status == "completed"
+                and accepted.runtime.onboarding_target_phase is not None
+            ):
+                await self._mark_onboarding_runtime_phase(
+                    accepted.runtime.onboarding_target_phase
+                )
             continue
+
+    async def _pick_next_intake(
+        self,
+        pending_runs: deque[AcceptedWebChatMessage],
+        deferred: deque[AcceptedWebChatMessage],
+    ) -> tuple[AcceptedWebChatMessage | None, bool, bool]:
+        """Choose the next intake to run: (item, already_announced, bypass_gate).
+
+        A parked intake is re-probed at every loop entry — so a released lane
+        is picked up immediately when the previous stream ends — and again on a
+        ``_DEFERRED_PROBE_TIMEOUT_SECONDS`` idle cadence while no client
+        message arrives. Fresh traffic, above all a resume, always wins over a
+        parked intake.
+        """
+        if pending_runs:
+            return pending_runs.popleft(), True, False
+        data: dict
+        if deferred:
+            head = deferred[0]
+            decision = await self._lane_admission(head.runtime.run)
+            if decision[0] == "stream":
+                # The probe above is the admission decision: do not re-gate.
+                return deferred.popleft(), True, True
+            try:
+                data = await asyncio.wait_for(
+                    self.websocket.receive_json(),
+                    timeout=_DEFERRED_PROBE_TIMEOUT_SECONDS,
+                )
+            except asyncio.TimeoutError:
+                return None, False, False
+        else:
+            data = await self.websocket.receive_json()
+        return await self._dispatch_client_packet(data, deferred)
+
+    async def _dispatch_client_packet(
+        self,
+        data: dict,
+        deferred: deque[AcceptedWebChatMessage],
+    ) -> tuple[AcceptedWebChatMessage | None, bool, bool]:
+        if data.get("type") == "abort":
+            if self.agent_type == "openclaw":
+                return None, False, False
+            await self._handle_cancel_packet(data)
+            revived = self._take_deferred_abort_target(data, deferred)
+            if revived is None:
+                return None, False, False
+            status = await self._start_command_status(
+                revived.runtime.run.handle.run_id
+            )
+            if status in ("claimed", "applied"):
+                logger.info(
+                    f"[WS] stream_gate abort revived deferred run_id={revived.runtime.run.handle.run_id} status={status}"
+                )
+                return revived, True, True
+            logger.info(
+                f"[WS] stream_gate abort dropped deferred run_id={revived.runtime.run.handle.run_id} status={status}"
+            )
+            return None, False, False
+        if data.get("type") == "attach_run":
+            attached = await self._attach_runtime_run(data)
+            if attached is None:
+                return None, False, False
+            # An attach has no user message to record in the conversation.
+            return (
+                AcceptedWebChatMessage(
+                    runtime=WebChatRuntimeIntake(run=attached),
+                    user_content="",
+                    is_onboarding_trigger=True,
+                ),
+                False,
+                False,
+            )
+        accepted = await self._accept_client_message(data)
+        if accepted is None:
+            return None, False, False
+        return accepted, False, False
+
+    async def _lane_admission(
+        self,
+        intake: ChatRuntimeIntake,
+    ) -> tuple[str, str | None]:
+        """Gate a fresh intake behind its scheduling lane; fail open on any error."""
+        try:
+            return await current_lane_admission(
+                session_factory=async_session,
+                handle=intake.handle,
+            )
+        except Exception as exc:
+            logger.opt(exception=True).warning(
+                f"[WS] stream_gate admission probe failed for run_id={intake.handle.run_id}; failing open ({exc})"
+            )
+            return ("stream", None)
+
+    async def _run_is_terminal(self, intake: ChatRuntimeIntake) -> bool:
+        """True when the Run already reached a terminal lifecycle event."""
+        try:
+            return await run_is_terminal(
+                session_factory=async_session,
+                handle=intake.handle,
+            )
+        except Exception as exc:
+            logger.opt(exception=True).warning(
+                f"[WS] stream_gate terminality probe failed for run_id={intake.handle.run_id}; assuming non-terminal ({exc})"
+            )
+            return False
+
+    async def _announce_queued(self, run_id: uuid.UUID) -> None:
+        await self.websocket.send_json(
+            {
+                "type": "runtime_status",
+                "run_id": str(run_id),
+                "event": "queued",
+                "status": "queued",
+            }
+        )
+
+    def _take_deferred_abort_target(
+        self,
+        data: dict,
+        deferred: deque[AcceptedWebChatMessage],
+    ) -> AcceptedWebChatMessage | None:
+        """Remove and return the deferred intake an abort packet targets."""
+        try:
+            run_id = self._optional_client_uuid(data.get("run_id"), field="run_id")
+        except ChatRuntimeIntakeError:
+            return None
+        if run_id is None:
+            return None
+        for item in deferred:
+            if item.runtime.run.handle.run_id == run_id:
+                deferred.remove(item)
+                return item
+        return None
+
+    async def _start_command_status(self, run_id: uuid.UUID) -> str | None:
+        """Newest start-command status of a deferred Run, or None.
+
+        A failed probe defaults to "claimed": the abort was already accepted,
+        and streaming a misclassified Run is safe (its terminal events replay),
+        while dropping one could strand a live execution without delivery.
+        """
+        try:
+            return await current_start_command_status(
+                session_factory=async_session,
+                run_id=run_id,
+            )
+        except Exception as exc:
+            logger.opt(exception=True).warning(
+                f"[WS] stream_gate abort start-status probe failed for run_id={run_id} ({exc})"
+            )
+            return "claimed"
 
     @staticmethod
     def _event_cursor(value: object) -> RuntimeEventCursor | None:

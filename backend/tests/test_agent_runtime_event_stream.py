@@ -12,6 +12,7 @@ import uuid
 
 import pytest
 from sqlalchemy.dialects import postgresql
+from sqlalchemy.exc import OperationalError
 
 from app.models.agent_run import AgentRun
 from app.models.agent_run_event import AgentRunEvent
@@ -19,6 +20,9 @@ from app.services.agent_runtime.contracts import RunHandle, RuntimeEventCursor
 from app.services.agent_runtime.event_stream import (
     DatabaseRuntimeEventStream,
     RuntimeEventStreamError,
+    current_lane_admission,
+    current_start_command_status,
+    run_is_terminal,
 )
 
 
@@ -664,3 +668,211 @@ async def test_current_waiting_boundary_declines_when_not_parked_first_wait(
         session_factory=lambda: session,  # type: ignore[arg-type]
     )
     assert await stream.current_waiting_boundary(handle) is None
+
+
+class _LaneProbeSession:
+    """FIFO fake session for the lane admission probe.
+
+    Each ``execute`` pops one queued result, mirroring the probe's fixed
+    query order (run row, then lane holder, then earlier lane start).
+    """
+
+    def __init__(self, *results: _Result) -> None:
+        self.results = deque(results)
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, traceback):
+        return False
+
+    async def execute(self, statement):
+        return self.results.popleft()
+
+
+class _FailingProbeSession:
+    """Session whose every query raises a connectivity OperationalError."""
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, traceback):
+        return False
+
+    async def execute(self, statement):
+        raise OperationalError("SELECT lane probe", {}, RuntimeError("connection refused"))
+
+
+class _FlakyProbeFactory:
+    """Session factory that fails ``failures`` calls, then serves results."""
+
+    def __init__(self, failures: int, *results: _Result) -> None:
+        self.failures = failures
+        self.results = deque(results)
+        self.calls = 0
+
+    def __call__(self):
+        self.calls += 1
+        if self.failures > 0:
+            self.failures -= 1
+            return _FailingProbeSession()
+        return _LaneProbeSession(*self.results)
+
+
+@pytest.mark.asyncio
+async def test_lane_admission_streams_when_run_holds_lane() -> None:
+    run, handle = _run()
+    run.scheduling_lane_key = "direct:lane"
+    run.lane_held = True
+    session = _LaneProbeSession(_Result(scalar=run))
+    assert await current_lane_admission(
+        session_factory=lambda: session, handle=handle  # type: ignore[arg-type]
+    ) == ("stream", None)
+
+
+@pytest.mark.asyncio
+async def test_lane_admission_streams_when_run_has_no_lane() -> None:
+    run, handle = _run()
+    run.scheduling_lane_key = None
+    session = _LaneProbeSession(_Result(scalar=run))
+    assert await current_lane_admission(
+        session_factory=lambda: session, handle=handle  # type: ignore[arg-type]
+    ) == ("stream", None)
+
+
+@pytest.mark.asyncio
+async def test_lane_admission_defers_to_another_lane_holder() -> None:
+    run, handle = _run()
+    run.scheduling_lane_key = "direct:lane"
+    holder_id = str(uuid.uuid4())
+    session = _LaneProbeSession(
+        _Result(scalar=run),
+        _Result(one=None),
+        _Result(scalar=holder_id),
+    )
+    assert await current_lane_admission(
+        session_factory=lambda: session, handle=handle  # type: ignore[arg-type]
+    ) == ("defer", holder_id)
+
+
+@pytest.mark.asyncio
+async def test_lane_admission_defers_to_earlier_pending_start() -> None:
+    run, handle = _run()
+    run.scheduling_lane_key = "direct:lane"
+    earlier_id = str(uuid.uuid4())
+    session = _LaneProbeSession(
+        _Result(scalar=run),
+        _Result(one=None),
+        _Result(scalar=None),
+        _Result(scalar=earlier_id),
+    )
+    assert await current_lane_admission(
+        session_factory=lambda: session, handle=handle  # type: ignore[arg-type]
+    ) == ("defer", earlier_id)
+
+
+@pytest.mark.asyncio
+async def test_lane_admission_streams_when_lane_is_clear() -> None:
+    run, handle = _run()
+    run.scheduling_lane_key = "direct:lane"
+    session = _LaneProbeSession(
+        _Result(scalar=run),
+        _Result(one=None),
+        _Result(scalar=None),
+        _Result(scalar=None),
+    )
+    assert await current_lane_admission(
+        session_factory=lambda: session, handle=handle  # type: ignore[arg-type]
+    ) == ("stream", None)
+
+
+@pytest.mark.asyncio
+async def test_lane_admission_streams_when_run_is_terminal() -> None:
+    """A terminal Run needs no lane: its replay must not park behind a busy neighbour."""
+    run, handle = _run()
+    run.scheduling_lane_key = "direct:lane"
+    holder_id = str(uuid.uuid4())
+    session = _LaneProbeSession(
+        _Result(scalar=run),
+        _Result(one=SimpleNamespace(event_type="run_completed")),
+        # Even a live holder must not defer a terminal replay.
+        _Result(scalar=holder_id),
+    )
+    assert await current_lane_admission(
+        session_factory=lambda: session, handle=handle  # type: ignore[arg-type]
+    ) == ("stream", None)
+
+
+@pytest.mark.asyncio
+async def test_lane_admission_fails_open_when_run_row_is_missing() -> None:
+    _, handle = _run()
+    session = _LaneProbeSession(_Result(scalar=None))
+    assert await current_lane_admission(
+        session_factory=lambda: session, handle=handle  # type: ignore[arg-type]
+    ) == ("stream", None)
+
+
+@pytest.mark.asyncio
+async def test_lane_admission_fails_open_when_thread_mismatches() -> None:
+    run, handle = _run()
+    run.runtime_thread_id = "some-other-thread"
+    run.scheduling_lane_key = "direct:lane"
+    session = _LaneProbeSession(_Result(scalar=run))
+    assert await current_lane_admission(
+        session_factory=lambda: session, handle=handle  # type: ignore[arg-type]
+    ) == ("stream", None)
+
+
+@pytest.mark.asyncio
+async def test_lane_admission_fails_open_after_retries_exhausted() -> None:
+    """Three retries (four attempts total) all failing leaves admission open."""
+    _, handle = _run()
+    factory = _FlakyProbeFactory(4)
+    assert await current_lane_admission(
+        session_factory=factory, handle=handle  # type: ignore[arg-type]
+    ) == ("stream", None)
+    assert factory.calls == 4
+
+
+@pytest.mark.asyncio
+async def test_lane_admission_retries_after_transient_failure() -> None:
+    run, handle = _run()
+    run.lane_held = True
+    factory = _FlakyProbeFactory(1, _Result(scalar=run))
+    assert await current_lane_admission(
+        session_factory=factory, handle=handle  # type: ignore[arg-type]
+    ) == ("stream", None)
+    assert factory.calls == 2
+
+
+@pytest.mark.asyncio
+async def test_run_is_terminal_matches_newest_lifecycle_event() -> None:
+    _, handle = _run()
+    terminal_session = _LaneProbeSession(
+        _Result(one=SimpleNamespace(event_type="run_failed"))
+    )
+    assert await run_is_terminal(
+        session_factory=lambda: terminal_session, handle=handle  # type: ignore[arg-type]
+    )
+    open_session = _LaneProbeSession(
+        _Result(one=SimpleNamespace(event_type="waiting_started"))
+    )
+    assert not await run_is_terminal(
+        session_factory=lambda: open_session, handle=handle  # type: ignore[arg-type]
+    )
+    empty_session = _LaneProbeSession(_Result(one=None))
+    assert not await run_is_terminal(
+        session_factory=lambda: empty_session, handle=handle  # type: ignore[arg-type]
+    )
+
+
+@pytest.mark.asyncio
+async def test_current_start_command_status_returns_newest_status() -> None:
+    session = _LaneProbeSession(_Result(scalar="claimed"))
+    assert (
+        await current_start_command_status(
+            session_factory=lambda: session,  # type: ignore[arg-type]
+            run_id=uuid.uuid4(),
+        )
+        == "claimed"
+    )

@@ -8,10 +8,12 @@ from copy import deepcopy
 from datetime import UTC, datetime
 import math
 import time as time_module
-from typing import cast
+from typing import Literal, cast
+import uuid
 
 from loguru import logger
-from sqlalchemy import and_, exists, or_, select
+from sqlalchemy import and_, exists, or_, select, tuple_
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.agent_run import AgentRun
@@ -31,6 +33,7 @@ from app.services.agent_runtime.state import JsonObject, JsonValue
 _TERMINAL_EVENT_TYPES = frozenset({"run_completed", "run_failed", "run_cancelled"})
 _DELIVERY_EVENT_TYPES = frozenset({"delivery_succeeded", "delivery_failed"})
 _SETTLED_DELIVERY_STATUSES = frozenset({"not_required", "delivered", "failed"})
+_LANE_PROBE_RETRY_DELAYS = (0.5, 0.5, 0.5)
 _EVENT_TYPES = frozenset(
     {
         "run_created",
@@ -161,6 +164,175 @@ async def _latest_lifecycle_row(
             .limit(1)
         )
     ).one_or_none()
+
+
+async def _lane_admission_once(
+    *,
+    session_factory: RuntimeSessionFactory,
+    handle: RunHandle,
+) -> tuple[Literal["stream", "defer"], str | None]:
+    """One scheduling-lane read; see ``current_lane_admission``.
+
+    The worker's claim-eligibility query (persistence.py) stays the single
+    authority on when a start command may claim the lane; this probe reads the
+    same durable facts — the lane holder, the lane queue order — to decide
+    whether an attached stream would sit silently behind an unclaimable start.
+    It deliberately does not inspect the Run's own command rows: admission is
+    a best-effort delivery filter, not an execution decision.
+    """
+    async with session_factory() as db:
+        run_result = await db.execute(
+            select(AgentRun).where(
+                AgentRun.tenant_id == handle.tenant_id,
+                AgentRun.id == handle.run_id,
+            )
+        )
+        run = run_result.scalar_one_or_none()
+        if (
+            run is None
+            or run.runtime_thread_id != handle.thread_id
+            or run.lane_held
+            or run.scheduling_lane_key is None
+        ):
+            # Unidentifiable, already the holder, or lane-free: never gate.
+            return ("stream", None)
+        lifecycle_row = await _latest_lifecycle_row(
+            db, handle, AgentRunEvent.event_type
+        )
+        if (
+            lifecycle_row is not None
+            and lifecycle_row.event_type in _TERMINAL_EVENT_TYPES
+        ):
+            # A terminal Run needs no lane: stream its replay now instead of
+            # parking it behind a neighbour that may itself be parked forever.
+            return ("stream", None)
+        holder_result = await db.execute(
+            select(AgentRun.id)
+            .where(
+                AgentRun.scheduling_lane_key == run.scheduling_lane_key,
+                AgentRun.id != run.id,
+                AgentRun.lane_held.is_(True),
+            )
+            .limit(1)
+        )
+        holder_id = holder_result.scalar_one_or_none()
+        if holder_id is not None:
+            return ("defer", str(holder_id))
+        earlier_result = await db.execute(
+            select(AgentRun.id)
+            .join(AgentRunCommand, AgentRunCommand.run_id == AgentRun.id)
+            .where(
+                AgentRun.scheduling_lane_key == run.scheduling_lane_key,
+                AgentRun.id != run.id,
+                AgentRun.lane_held.is_(False),
+                AgentRunCommand.command_type == "start",
+                AgentRunCommand.status.in_(("pending", "claimed")),
+                tuple_(
+                    AgentRun.scheduling_position_created_at,
+                    AgentRun.scheduling_position_id,
+                    AgentRun.created_at,
+                    AgentRun.id,
+                )
+                < tuple_(
+                    run.scheduling_position_created_at,  # type: ignore[arg-type]
+                    run.scheduling_position_id,  # type: ignore[arg-type]
+                    run.created_at,  # type: ignore[arg-type]
+                    run.id,  # type: ignore[arg-type]
+                ),
+            )
+            .order_by(
+                AgentRun.scheduling_position_created_at,
+                AgentRun.scheduling_position_id,
+                AgentRun.created_at,
+                AgentRun.id,
+            )
+            .limit(1)
+        )
+        earlier_id = earlier_result.scalar_one_or_none()
+        if earlier_id is not None:
+            return ("defer", str(earlier_id))
+        return ("stream", None)
+
+
+async def current_lane_admission(
+    *,
+    session_factory: RuntimeSessionFactory,
+    handle: RunHandle,
+) -> tuple[Literal["stream", "defer"], str | None]:
+    """Decide whether a fresh intake may stream now, or must wait for its lane.
+
+    Runs queued behind a shared scheduling lane cannot start while another Run
+    holds the lane — and a holder parked at a user waiting boundary never
+    releases on its own, so a stream started for a queued intake would sit
+    silently behind its unclaimable start command. Probing the lane before
+    pumping lets the WebSocket layer park the intake as "queued" (and re-probe
+    later) instead of hanging the socket.
+
+    Returns ``("stream", None)`` when the Run is safe to stream now,
+    including every case the probe cannot read confidently: a missing or
+    thread-mismatched Run row, and transient connectivity errors that exhaust
+    the retry budget. Admission is best-effort and fails open. Returns
+    ``("defer", blocking_run_id)`` when another Run holds the lane, or an
+    earlier-positioned neighbour still owns a pending/claimed start command:
+    the caller should park the intake and re-probe.
+
+    Only ``OperationalError`` is retried — three times with a short fixed
+    backoff, absorbing transient blips — before failing open; any other
+    exception propagates to the caller, whose outer fail-open wrapper decides.
+    """
+    last_error: OperationalError | None = None
+    for delay in (*_LANE_PROBE_RETRY_DELAYS, None):
+        try:
+            return await _lane_admission_once(
+                session_factory=session_factory,
+                handle=handle,
+            )
+        except OperationalError as exc:
+            last_error = exc
+            if delay is None:
+                break
+            await asyncio.sleep(delay)
+    logger.warning(
+        "stream_gate: lane admission probe failed after {} attempts for run "
+        "{}; failing open (last error: {!r})",
+        1 + len(_LANE_PROBE_RETRY_DELAYS),
+        handle.run_id,
+        last_error,
+    )
+    return ("stream", None)
+
+
+async def run_is_terminal(
+    *,
+    session_factory: RuntimeSessionFactory,
+    handle: RunHandle,
+) -> bool:
+    """True when the Run's newest non-delivery lifecycle event is terminal."""
+    async with session_factory() as db:
+        row = await _latest_lifecycle_row(db, handle, AgentRunEvent.event_type)
+    return row is not None and row.event_type in _TERMINAL_EVENT_TYPES
+
+
+async def current_start_command_status(
+    *,
+    session_factory: RuntimeSessionFactory,
+    run_id: uuid.UUID,
+) -> str | None:
+    """Newest start-command status for a Run, or None without a start command."""
+    async with session_factory() as db:
+        result = await db.execute(
+            select(AgentRunCommand.status)
+            .where(
+                AgentRunCommand.run_id == run_id,
+                AgentRunCommand.command_type == "start",
+            )
+            .order_by(
+                AgentRunCommand.created_at.desc(),
+                AgentRunCommand.id.desc(),
+            )
+            .limit(1)
+        )
+        return result.scalar_one_or_none()
 
 
 class DatabaseRuntimeEventStream:

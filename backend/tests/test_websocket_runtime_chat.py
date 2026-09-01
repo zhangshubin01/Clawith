@@ -1189,3 +1189,490 @@ async def test_attach_logs_the_client_cursor_for_forensics() -> None:
     ]
     assert attach_logs
     assert any(cursor in str(call_args) for call_args in attach_logs)
+
+
+def _outcome() -> ChatRuntimeStreamOutcome:
+    return ChatRuntimeStreamOutcome(
+        status="completed",
+        content="Done",
+        cursor=RuntimeEventCursor(
+            datetime(2026, 7, 14, 10, 0, tzinfo=UTC),
+            uuid.uuid4(),
+        ),
+    )
+
+
+def _accepted(
+    tenant_id: uuid.UUID,
+    content: str,
+    *,
+    resumed: bool = False,
+) -> AcceptedWebChatMessage:
+    return AcceptedWebChatMessage(
+        runtime=WebChatRuntimeIntake(
+            run=ChatRuntimeIntake(
+                handle=_handle(tenant_id),
+                message_id=uuid.uuid4(),
+                resumed=resumed,
+            )
+        ),
+        user_content=content,
+    )
+
+
+class _ProbeWebSocket(_WebSocket):
+    """The first ``blocks`` empty receive_json calls stall past the probe timeout."""
+
+    def __init__(self, *incoming: dict, blocks: int = 1) -> None:
+        super().__init__(*incoming)
+        self.blocks = blocks
+
+    async def receive_json(self):
+        if self.incoming:
+            return self.incoming.pop(0)
+        if self.blocks > 0:
+            self.blocks -= 1
+            await asyncio.sleep(10)
+            raise AssertionError("unreachable: probe should have timed out")
+        raise WebSocketDisconnect()
+
+
+@pytest.mark.asyncio
+async def test_message_loop_defers_lane_busy_intake_and_announces_queued() -> None:
+    websocket = _WebSocket({"content": "First"})
+    handler = _handler(websocket)
+    first = _accepted(handler.user.tenant_id, "First")
+    holder_id = str(uuid.uuid4())
+
+    with (
+        patch.object(handler, "_accept_client_message", new=AsyncMock(return_value=first)),
+        patch.object(
+            handler,
+            "_lane_admission",
+            new=AsyncMock(return_value=("defer", holder_id)),
+        ),
+        patch.object(handler, "_run_runtime_and_stream", new=AsyncMock()) as run_runtime,
+        patch("app.api.websocket.logger", new=MagicMock()) as mock_logger,
+    ):
+        with pytest.raises(WebSocketDisconnect):
+            await handler.message_loop()
+
+    run_runtime.assert_not_awaited()
+    assert any(
+        packet.get("event") == "queued"
+        and packet.get("run_id") == str(first.runtime.run.handle.run_id)
+        for packet in websocket.sent
+    )
+    defer_logs = [
+        call
+        for call in mock_logger.info.call_args_list
+        if "decision=defer" in str(call)
+    ]
+    assert defer_logs
+    assert str(first.runtime.run.handle.run_id) in str(defer_logs[0])
+    assert holder_id in str(defer_logs[0])
+
+
+@pytest.mark.asyncio
+async def test_message_loop_defers_followup_without_duplicate_announcement() -> None:
+    websocket = _WebSocket({"content": "First"})
+    handler = _handler(websocket)
+    first = _accepted(handler.user.tenant_id, "First")
+    followup = _accepted(handler.user.tenant_id, "Second")
+
+    with (
+        patch.object(handler, "_accept_client_message", new=AsyncMock(return_value=first)),
+        patch.object(
+            handler,
+            "_lane_admission",
+            new=AsyncMock(
+                side_effect=[
+                    ("stream", None),
+                    ("defer", str(uuid.uuid4())),
+                    ("defer", str(uuid.uuid4())),
+                ]
+            ),
+        ),
+        patch.object(
+            handler,
+            "_run_runtime_and_stream",
+            new=AsyncMock(return_value=(_outcome(), [followup])),
+        ) as run_runtime,
+    ):
+        with pytest.raises(WebSocketDisconnect):
+            await handler.message_loop()
+
+    assert run_runtime.await_count == 1
+    assert not any(packet.get("event") == "queued" for packet in websocket.sent)
+
+
+@pytest.mark.asyncio
+async def test_message_loop_resume_intake_streams_immediately_behind_deferred() -> None:
+    websocket = _WebSocket(
+        {"content": "Queue this"},
+        {"content": "Submit", "run_id": str(uuid.uuid4()), "correlation_id": "c-1"},
+    )
+    handler = _handler(websocket)
+    queued = _accepted(handler.user.tenant_id, "Queue this")
+    resume = _accepted(handler.user.tenant_id, "Submit", resumed=True)
+
+    with (
+        patch.object(
+            handler,
+            "_accept_client_message",
+            new=AsyncMock(side_effect=[queued, resume]),
+        ),
+        patch.object(
+            handler,
+            "_lane_admission",
+            new=AsyncMock(
+                side_effect=[
+                    ("defer", str(uuid.uuid4())),
+                    ("defer", str(uuid.uuid4())),
+                    ("stream", None),
+                    ("defer", str(uuid.uuid4())),
+                ]
+            ),
+        ),
+        patch.object(
+            handler,
+            "_run_runtime_and_stream",
+            new=AsyncMock(return_value=(_outcome(), [])),
+        ) as run_runtime,
+    ):
+        with pytest.raises(WebSocketDisconnect):
+            await handler.message_loop()
+
+    run_runtime.assert_awaited_once_with(
+        resume.runtime.run,
+        user_content="Submit",
+    )
+
+
+@pytest.mark.asyncio
+async def test_message_loop_reprobes_deferred_head_and_streams_when_lane_releases() -> None:
+    websocket = _WebSocket({"content": "First"})
+    handler = _handler(websocket)
+    first = _accepted(handler.user.tenant_id, "First")
+
+    with (
+        patch.object(handler, "_accept_client_message", new=AsyncMock(return_value=first)),
+        patch.object(
+            handler,
+            "_lane_admission",
+            new=AsyncMock(
+                side_effect=[("defer", str(uuid.uuid4())), ("stream", None)]
+            ),
+        ),
+        patch.object(
+            handler,
+            "_run_runtime_and_stream",
+            new=AsyncMock(return_value=(_outcome(), [])),
+        ) as run_runtime,
+    ):
+        with pytest.raises(WebSocketDisconnect):
+            await handler.message_loop()
+
+    run_runtime.assert_awaited_once_with(first.runtime.run, user_content="First")
+    assert any(packet.get("event") == "queued" for packet in websocket.sent)
+
+
+@pytest.mark.asyncio
+async def test_message_loop_deferred_probe_does_not_busy_loop() -> None:
+    websocket = _ProbeWebSocket({"content": "First"})
+    handler = _handler(websocket)
+    first = _accepted(handler.user.tenant_id, "First")
+
+    with (
+        patch("app.api.websocket._DEFERRED_PROBE_TIMEOUT_SECONDS", 0.05),
+        patch.object(handler, "_accept_client_message", new=AsyncMock(return_value=first)),
+        patch.object(
+            handler,
+            "_lane_admission",
+            new=AsyncMock(return_value=("defer", str(uuid.uuid4()))),
+        ) as gate,
+        patch.object(handler, "_run_runtime_and_stream", new=AsyncMock()) as run_runtime,
+    ):
+        with pytest.raises(WebSocketDisconnect):
+            await handler.message_loop()
+
+    assert gate.await_count == 3
+    run_runtime.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["claimed", "applied"])
+async def test_message_loop_abort_revives_deferred_run_with_claimed_start(
+    status: str,
+) -> None:
+    intake = ChatRuntimeIntake(
+        handle=_handle(uuid.uuid4()),
+        message_id=uuid.uuid4(),
+        resumed=False,
+    )
+    first = AcceptedWebChatMessage(
+        runtime=WebChatRuntimeIntake(run=intake),
+        user_content="First",
+    )
+    websocket = _WebSocket(
+        {"content": "First"},
+        {"type": "abort", "run_id": str(intake.handle.run_id)},
+    )
+    handler = _handler(websocket)
+
+    with (
+        patch.object(handler, "_accept_client_message", new=AsyncMock(return_value=first)),
+        patch.object(
+            handler,
+            "_lane_admission",
+            new=AsyncMock(return_value=("defer", str(uuid.uuid4()))),
+        ),
+        patch.object(handler, "_handle_cancel_packet", new=AsyncMock()) as cancel,
+        patch.object(
+            handler,
+            "_start_command_status",
+            new=AsyncMock(return_value=status),
+        ),
+        patch.object(
+            handler,
+            "_run_runtime_and_stream",
+            new=AsyncMock(return_value=(_outcome(), [])),
+        ) as run_runtime,
+    ):
+        with pytest.raises(WebSocketDisconnect):
+            await handler.message_loop()
+
+    cancel.assert_awaited_once()
+    run_runtime.assert_awaited_once_with(intake, user_content="First")
+
+
+@pytest.mark.asyncio
+async def test_message_loop_abort_drops_deferred_run_with_pending_start() -> None:
+    intake = ChatRuntimeIntake(
+        handle=_handle(uuid.uuid4()),
+        message_id=uuid.uuid4(),
+        resumed=False,
+    )
+    first = AcceptedWebChatMessage(
+        runtime=WebChatRuntimeIntake(run=intake),
+        user_content="First",
+    )
+    websocket = _WebSocket(
+        {"content": "First"},
+        {"type": "abort", "run_id": str(intake.handle.run_id)},
+    )
+    handler = _handler(websocket)
+
+    with (
+        patch.object(handler, "_accept_client_message", new=AsyncMock(return_value=first)),
+        patch.object(
+            handler,
+            "_lane_admission",
+            new=AsyncMock(return_value=("defer", str(uuid.uuid4()))),
+        ),
+        patch.object(handler, "_handle_cancel_packet", new=AsyncMock()) as cancel,
+        patch.object(
+            handler,
+            "_start_command_status",
+            new=AsyncMock(return_value="pending"),
+        ),
+        patch.object(handler, "_run_runtime_and_stream", new=AsyncMock()) as run_runtime,
+    ):
+        with pytest.raises(WebSocketDisconnect):
+            await handler.message_loop()
+
+    cancel.assert_awaited_once()
+    run_runtime.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_message_loop_requeues_stream_failure_twice_then_gives_up() -> None:
+    websocket = _WebSocket({"content": "First"})
+    handler = _handler(websocket)
+    first = _accepted(handler.user.tenant_id, "First")
+
+    with (
+        patch.object(handler, "_accept_client_message", new=AsyncMock(return_value=first)),
+        patch.object(
+            handler,
+            "_lane_admission",
+            new=AsyncMock(return_value=("stream", None)),
+        ),
+        patch.object(
+            handler,
+            "_run_runtime_and_stream",
+            new=AsyncMock(return_value=(None, [])),
+        ) as run_runtime,
+        patch.object(handler, "_run_is_terminal", new=AsyncMock(return_value=False)),
+        patch("app.api.websocket.logger", new=MagicMock()) as mock_logger,
+    ):
+        with pytest.raises(WebSocketDisconnect):
+            await handler.message_loop()
+
+    assert run_runtime.await_count == 3
+    assert any("giving up" in str(call) for call in mock_logger.warning.call_args_list)
+
+
+@pytest.mark.asyncio
+async def test_message_loop_drops_stream_failure_for_terminal_run() -> None:
+    """F8: only a still-running Run is requeued after a stream failure."""
+    websocket = _WebSocket({"content": "First"})
+    handler = _handler(websocket)
+    first = _accepted(handler.user.tenant_id, "First")
+
+    with (
+        patch.object(handler, "_accept_client_message", new=AsyncMock(return_value=first)),
+        patch.object(
+            handler,
+            "_lane_admission",
+            new=AsyncMock(return_value=("stream", None)),
+        ),
+        patch.object(
+            handler,
+            "_run_runtime_and_stream",
+            new=AsyncMock(return_value=(None, [])),
+        ) as run_runtime,
+        patch.object(handler, "_run_is_terminal", new=AsyncMock(return_value=True)),
+        patch("app.api.websocket.logger", new=MagicMock()) as mock_logger,
+    ):
+        with pytest.raises(WebSocketDisconnect):
+            await handler.message_loop()
+
+    assert run_runtime.await_count == 1
+    assert not any("giving up" in str(call) for call in mock_logger.warning.call_args_list)
+
+
+@pytest.mark.asyncio
+async def test_message_loop_reprobes_deferred_head_immediately_after_stream_ends() -> None:
+    """The flow-end loop is the primary re-probe point: a released lane streams
+    the parked intake right after the current stream ends, without waiting 2s."""
+    websocket = _WebSocket(
+        {"content": "First"},
+        {"content": "Second"},
+    )
+    handler = _handler(websocket)
+    first = _accepted(handler.user.tenant_id, "First")
+    second = _accepted(handler.user.tenant_id, "Second")
+
+    with (
+        patch.object(
+            handler,
+            "_accept_client_message",
+            new=AsyncMock(side_effect=[first, second]),
+        ),
+        patch.object(
+            handler,
+            "_lane_admission",
+            new=AsyncMock(
+                side_effect=[
+                    ("defer", str(uuid.uuid4())),
+                    ("defer", str(uuid.uuid4())),
+                    ("stream", None),
+                    ("stream", None),
+                ]
+            ),
+        ),
+        patch.object(
+            handler,
+            "_run_runtime_and_stream",
+            new=AsyncMock(return_value=(_outcome(), [])),
+        ) as run_runtime,
+    ):
+        with pytest.raises(WebSocketDisconnect):
+            await handler.message_loop()
+
+    assert run_runtime.await_count == 2
+    assert run_runtime.await_args_list[0].args[0] == second.runtime.run
+    assert run_runtime.await_args_list[1].args[0] == first.runtime.run
+
+
+@pytest.mark.asyncio
+async def test_message_loop_onboarding_intake_deferred_then_streamed_without_user_message() -> None:
+    websocket = _WebSocket({"content": "Onboarding trigger"})
+    handler = _handler(websocket)
+    first = _accepted(handler.user.tenant_id, "Onboarding trigger")
+    first = AcceptedWebChatMessage(
+        runtime=first.runtime,
+        user_content=first.user_content,
+        is_onboarding_trigger=True,
+    )
+
+    with (
+        patch.object(handler, "_accept_client_message", new=AsyncMock(return_value=first)),
+        patch.object(
+            handler,
+            "_lane_admission",
+            new=AsyncMock(
+                side_effect=[("defer", str(uuid.uuid4())), ("stream", None)]
+            ),
+        ),
+        patch.object(
+            handler,
+            "_run_runtime_and_stream",
+            new=AsyncMock(return_value=(_outcome(), [])),
+        ),
+    ):
+        with pytest.raises(WebSocketDisconnect):
+            await handler.message_loop()
+
+    assert handler.conversation == [{"role": "assistant", "content": "Done"}]
+
+
+@pytest.mark.asyncio
+async def test_message_loop_fails_open_when_gate_probe_raises() -> None:
+    websocket = _WebSocket({"content": "First"})
+    handler = _handler(websocket)
+    first = _accepted(handler.user.tenant_id, "First")
+
+    with (
+        patch.object(handler, "_accept_client_message", new=AsyncMock(return_value=first)),
+        patch(
+            "app.api.websocket.current_lane_admission",
+            new=AsyncMock(side_effect=RuntimeError("boom")),
+        ),
+        patch.object(
+            handler,
+            "_run_runtime_and_stream",
+            new=AsyncMock(return_value=(_outcome(), [])),
+        ) as run_runtime,
+    ):
+        with pytest.raises(WebSocketDisconnect):
+            await handler.message_loop()
+
+    run_runtime.assert_awaited_once_with(first.runtime.run, user_content="First")
+
+
+@pytest.mark.asyncio
+async def test_message_loop_defers_attach_intake_behind_lane() -> None:
+    attached = ChatRuntimeIntake(
+        handle=_handle(uuid.uuid4()),
+        message_id=uuid.uuid4(),
+        resumed=False,
+    )
+    websocket = _WebSocket(
+        {"type": "attach_run", "run_id": str(attached.handle.run_id)}
+    )
+    handler = _handler(websocket)
+
+    with (
+        patch.object(
+            handler,
+            "_attach_runtime_run",
+            new=AsyncMock(return_value=attached),
+        ),
+        patch.object(
+            handler,
+            "_lane_admission",
+            new=AsyncMock(return_value=("defer", str(uuid.uuid4()))),
+        ),
+        patch.object(handler, "_run_runtime_and_stream", new=AsyncMock()) as run_runtime,
+    ):
+        with pytest.raises(WebSocketDisconnect):
+            await handler.message_loop()
+
+    run_runtime.assert_not_awaited()
+    assert any(
+        packet.get("event") == "queued"
+        and packet.get("run_id") == str(attached.handle.run_id)
+        for packet in websocket.sent
+    )
