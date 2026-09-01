@@ -76,7 +76,7 @@ if candidates:
     text += "\nDid you mean (verified in workspace storage): " + "; ".join(f"'{c}'" for c in candidates) + "?"
 ```
 
-4. 7 处调用点全改 `await`：read_file（约 3442）、list_files（3699）、search 目录（3744）、find_files 目录（3783）、android_compile project_path（4722）传 `tenant_id`（所在函数均有该变量，已核实）；pattern base 两处（9117/9145）传 `include_storage=False`。
+4. 7 处调用点全改 `await`：read_file（约 3442）、list_files（3699）、search 目录（3744）、find_files 目录（3783）传各自函数已有的 `tenant_id`；android_compile project_path（4722）所在函数 `_android_compile_outcome` 无 tenant_id 参数，走默认 `None`（企业路径下 `_storage_nearest_candidates` 以 unscoped key 探测必空，天然无跨根风险）；pattern base 两处（9117/9145）传 `include_storage=False`。
 
 ### 边界（防误伤）
 
@@ -97,7 +97,7 @@ if candidates:
 
 ## 测试（随改动一/二落地）
 
-`backend/tests/test_workspace_paths_diagnostics.py` 扩展：
+`backend/tests/test_agent_tools_path_grounding_l3.py`（新增，实现后所有 storage 场景测试集中于此，而非拆分进既有两个文件）：
 1. **事故回归**：目录树含 `…/com/example/calculator/Calculator.kt`，guess `…/com/example/mydome1/Calculator.kt` → 建议含真实路径，missing_below 渲染正确。
 2. 无 basename 命中 → 无「verified」行。
 3. 多命中 → 上限 3、最近优先。
@@ -105,9 +105,9 @@ if candidates:
 5. 目录型 miss（list_files 猜错目录名）→ 目录名匹配建议。
 6. rel_path='' → 无建议、无异常。
 7. 企业路径：enterprise 根内命中 → `enterprise_info/...` 前缀建议；agent 根内搜索不越界。
-8. 本地 FS 漂移：Local 后端下 describe 本地条目与 storage 建议共存。
+8. 本地 FS 漂移：monkeypatch 工作区根后 describe 本地条目与 storage 建议共存。
 
-`backend/tests/test_agent_tools_storage_workspace.py`：`_read_file_outcome` 端到端——error_code 仍为 `workspace_file_not_found`、消息含 verified 建议、路径正确。
+`_read_file_outcome` 端到端（同文件）：error_code 仍为 `workspace_file_not_found`、消息含 verified 建议、路径正确。
 
 `backend/tests/` 新增 `PATH_CONVENTION_TEXT` 断言（**全仓现无此断言**，本次随改动二补上：注入函数对 read_file.path 参数注入、android_compile.project_path 不重复注入）。
 

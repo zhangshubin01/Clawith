@@ -291,6 +291,35 @@ async def test_storage_exceptions_degrade_without_raising(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_local_fs_diagnosis_and_storage_suggestion_coexist(monkeypatch, tmp_path):
+    """L2 本地 FS 诊断与 L3 storage 建议并存（方案测试清单 #8）。"""
+    agent_id = uuid.uuid4()
+    workspace_root = tmp_path / str(agent_id)
+    # FS 上存在 workspace/com/example/mydome1/Calculator.kt → L2 前缀修正建议真实
+    fs_target = workspace_root / "workspace" / "com" / "example" / "mydome1" / "Calculator.kt"
+    fs_target.parent.mkdir(parents=True)
+    fs_target.write_text("")
+    monkeypatch.setattr(agent_tools, "_agent_workspace_root", lambda _aid: workspace_root)
+    _install(
+        monkeypatch,
+        {
+            f"{agent_id}/workspace/com/example/calculator/Calculator.kt": b"",
+        },
+    )
+
+    # guess 相对 root 缺 workspace/ 前缀 → L2 建议补前缀，L3 建议真实包路径，二者共存
+    text = await agent_tools._path_failure_details(
+        agent_id,
+        "com/example/mydome1/Calculator.kt",
+        tenant_id=None,
+    )
+
+    assert "Did you mean: 'workspace/com/example/mydome1/Calculator.kt'" in text  # L2
+    assert "verified in workspace storage" in text  # L3
+    assert "'workspace/com/example/calculator/Calculator.kt'" in text
+
+
+@pytest.mark.asyncio
 async def test_read_file_outcome_carries_verified_suggestion(monkeypatch):
     """端到端：错误码不变（workspace_file_not_found），消息含 verified 建议。"""
     agent_id = uuid.uuid4()
