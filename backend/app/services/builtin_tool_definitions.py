@@ -721,14 +721,14 @@ _BUILTIN_TOOL_SOURCE = [
     {
         "name": "jina_read",
         "display_name": "Jina Read",
-        "description": "Read and extract full content from a URL using Jina AI Reader (r.jina.ai). Returns clean markdown. Requires Jina AI API key for higher rate limits.",
+        "description": "Read and extract full content from a public URL using Jina AI Reader (r.jina.ai). Returns clean markdown. Only public internet URLs work — private, local, or internal network addresses are blocked. Requires Jina AI API key for higher rate limits.",
         "category": "search",
         "icon": "📖",
         "is_default": False,
         "parameters_schema": {
             "type": "object",
             "properties": {
-                "url": {"type": "string", "description": "Full URL to read"},
+                "url": {"type": "string", "description": "Full public URL to read (public internet only; private/internal URLs are blocked)"},
                 "max_chars": {"type": "integer", "description": "Max characters to return (default 8000)"},
             },
             "required": ["url"],

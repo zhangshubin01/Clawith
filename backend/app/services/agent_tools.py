@@ -6076,6 +6076,23 @@ def _read_http_status_retryable(status_code: int) -> bool:
     return status_code in {408, 429} or status_code >= 500
 
 
+def _is_ssl_verification_error(exc: Exception) -> bool:
+    """True when the exception chain contains a TLS certificate verification failure.
+
+    Certificate mismatches are deterministic (poisoned DNS, MITM, expired certs):
+    retrying the same request cannot succeed, so runtime auto-retries would only
+    burn the attempt budget and stall the run.
+    """
+    import ssl
+
+    current: BaseException | None = exc
+    while current is not None:
+        if isinstance(current, ssl.SSLCertVerificationError):
+            return True
+        current = current.__cause__ or current.__context__
+    return False
+
+
 async def _web_search_outcome(
     arguments: dict,
     agent_id: uuid.UUID | None = None,
@@ -6236,10 +6253,14 @@ async def _jina_search_outcome(
             retryable=True,
         )
     except httpx.TransportError as exc:
+        verification_failure = _is_ssl_verification_error(exc)
+        summary = f"Jina Search transport failed: {type(exc).__name__}."
+        if verification_failure:
+            summary += " TLS certificate verification failed; this is not retryable."
         return _typed_failure(
-            f"Jina Search transport failed: {type(exc).__name__}.",
+            summary,
             "jina_search_transport_failed",
-            retryable=True,
+            retryable=not verification_failure,
         )
     except Exception as exc:
         return _typed_failure(
@@ -6326,6 +6347,14 @@ async def _jina_read_outcome(
             "jina_read url must be a valid HTTP(S) URL.",
             "invalid_tool_arguments",
         )
+    url, validation_error = await _validate_public_http_url(url)
+    if validation_error:
+        return _typed_failure(
+            f"Jina Reader runs in the cloud and cannot reach private or internal "
+            f"networks. {validation_error} Use a tool that connects directly from "
+            "the runtime instead.",
+            "jina_read_private_url_blocked",
+        )
     try:
         max_chars = int(arguments.get("max_chars", 8000))
     except (TypeError, ValueError):
@@ -6369,10 +6398,14 @@ async def _jina_read_outcome(
             retryable=True,
         )
     except httpx.TransportError as exc:
+        verification_failure = _is_ssl_verification_error(exc)
+        summary = f"Jina Reader transport failed: {type(exc).__name__}."
+        if verification_failure:
+            summary += " TLS certificate verification failed; this is not retryable."
         return _typed_failure(
-            f"Jina Reader transport failed: {type(exc).__name__}.",
+            summary,
             "jina_read_transport_failed",
-            retryable=True,
+            retryable=not verification_failure,
         )
     except Exception as exc:
         return _typed_failure(

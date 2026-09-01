@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+import ssl
 import uuid
 
 import httpx
@@ -142,6 +143,114 @@ async def test_search_resolver_uses_only_local_configuration(monkeypatch) -> Non
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://192.168.5.254/zhangshubin/mydome1/-/merge_requests/1",
+        "http://10.0.0.1/",
+        "http://127.0.0.1:8080/admin",
+        "http://localhost/",
+        "http://169.254.169.254/latest/meta-data/",
+    ],
+)
+async def test_jina_read_blocks_private_urls_before_any_network_io(
+    monkeypatch,
+    url: str,
+) -> None:
+    class NetworkMustNotBeUsed:
+        def __init__(self, *args, **kwargs):
+            del args, kwargs
+            raise AssertionError("jina_read must reject private URLs without HTTP")
+
+    monkeypatch.setattr(httpx, "AsyncClient", NetworkMustNotBeUsed)
+
+    outcome = await agent_tools._jina_read_outcome({"url": url}, uuid.uuid4())
+
+    assert outcome.status == "failed"
+    assert outcome.error_code == "jina_read_private_url_blocked"
+    assert outcome.retryable is False
+    assert "private" in outcome.result_summary.lower() or "blocked" in outcome.result_summary.lower()
+
+
+@pytest.mark.asyncio
+async def test_jina_read_ssl_certificate_failure_is_not_retryable(monkeypatch) -> None:
+    async def config(_agent_id, name):
+        return {}
+
+    async def no_jina_key():
+        return ""
+
+    async def public_url(url):
+        return url, None
+
+    monkeypatch.setattr(agent_tools, "_get_tool_config", config)
+    monkeypatch.setattr(agent_tools, "_get_jina_api_key", no_jina_key)
+    monkeypatch.setattr(agent_tools, "_validate_public_http_url", public_url)
+
+    error = httpx.ConnectError("TLS certificate verify failed")
+    error.__context__ = ssl.SSLCertVerificationError("certificate verify failed")
+
+    install_http_client(monkeypatch, error=error)
+    outcome = await agent_tools._jina_read_outcome(
+        {"url": "https://example.test/page"},
+        uuid.uuid4(),
+    )
+    assert outcome.status == "failed"
+    assert outcome.error_code == "jina_read_transport_failed"
+    assert outcome.retryable is False
+    assert "not retryable" in outcome.result_summary
+
+
+@pytest.mark.asyncio
+async def test_jina_search_ssl_certificate_failure_is_not_retryable(monkeypatch) -> None:
+    async def config(_agent_id, name):
+        return {}
+
+    async def no_jina_key():
+        return ""
+
+    monkeypatch.setattr(agent_tools, "_get_tool_config", config)
+    monkeypatch.setattr(agent_tools, "_get_jina_api_key", no_jina_key)
+
+    error = httpx.ConnectError("TLS certificate verify failed")
+    error.__context__ = ssl.SSLCertVerificationError("certificate verify failed")
+
+    install_http_client(monkeypatch, error=error)
+    outcome = await agent_tools._jina_search_outcome(
+        {"query": "certificate failure"},
+        uuid.uuid4(),
+    )
+    assert outcome.status == "failed"
+    assert outcome.error_code == "jina_search_transport_failed"
+    assert outcome.retryable is False
+
+
+@pytest.mark.asyncio
+async def test_jina_read_plain_connect_error_stays_retryable(monkeypatch) -> None:
+    async def config(_agent_id, name):
+        return {}
+
+    async def no_jina_key():
+        return ""
+
+    async def public_url(url):
+        return url, None
+
+    monkeypatch.setattr(agent_tools, "_get_tool_config", config)
+    monkeypatch.setattr(agent_tools, "_get_jina_api_key", no_jina_key)
+    monkeypatch.setattr(agent_tools, "_validate_public_http_url", public_url)
+
+    install_http_client(monkeypatch, error=httpx.ConnectError("connection refused"))
+    outcome = await agent_tools._jina_read_outcome(
+        {"url": "https://example.test/page"},
+        uuid.uuid4(),
+    )
+    assert outcome.status == "failed"
+    assert outcome.error_code == "jina_read_transport_failed"
+    assert outcome.retryable is True
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("tool_name", sorted(TYPED_SEARCH_TOOLS))
 async def test_search_tools_return_native_typed_validation_failures(
     tool_name: str,
@@ -257,8 +366,12 @@ async def test_search_tools_use_structured_success_facts(
     async def no_jina_key():
         return ""
 
+    async def public_url(url):
+        return url, None
+
     monkeypatch.setattr(agent_tools, "_get_tool_config", config)
     monkeypatch.setattr(agent_tools, "_get_jina_api_key", no_jina_key)
+    monkeypatch.setattr(agent_tools, "_validate_public_http_url", public_url)
     install_http_client(
         monkeypatch,
         response=FakeResponse(payload=payload, text=text),
