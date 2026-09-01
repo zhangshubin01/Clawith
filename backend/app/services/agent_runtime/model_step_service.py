@@ -46,6 +46,9 @@ from app.services.agent_runtime.group_runtime_tools import (
     GROUP_WRITE_TOOL_NAMES,
     with_group_runtime_tools,
 )
+from app.services.agent_runtime.list_persistence import (
+    LIST_NUMBERING_CONTRACT,
+)
 from app.services.agent_runtime.model_capabilities import (
     ModelCapabilityError,
     ModelCapabilityResolver,
@@ -1343,7 +1346,7 @@ def _prompt_messages(
     messages = [
         LLMMessage(
             role="system",
-            content=static_prompt + _MESSAGE_LAYOUT_NOTE,
+            content=static_prompt + _MESSAGE_LAYOUT_NOTE + LIST_NUMBERING_CONTRACT,
         ),
     ]
     initial_message_id = build.initial_input.get("message_id")

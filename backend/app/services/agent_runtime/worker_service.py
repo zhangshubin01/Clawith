@@ -45,6 +45,9 @@ from app.services.agent_runtime.command_worker import (
     RuntimeSessionFactory,
 )
 from app.services.agent_runtime.context_builder import ContextBuilder
+from app.services.agent_runtime.cross_session_retrieval import (
+    CrossSessionListRetriever,
+)
 from app.services.agent_runtime.graph import (
     AgentRuntimeGraph,
     RuntimeGraphIdentity,
@@ -58,6 +61,9 @@ from app.services.agent_runtime.langgraph_driver import (
     LangGraphRuntimeDriver,
     RuntimeGraphRegistry,
     RuntimeInputSnapshotFactory,
+)
+from app.services.agent_runtime.list_persistence import (
+    ListPersistenceCompletionHandler,
 )
 from app.services.agent_runtime.model_step_service import RuntimeModelStepService
 from app.services.agent_runtime.node_executor import DeterministicRuntimeNodeExecutor
@@ -223,10 +229,17 @@ def build_runtime_worker_components(
         session_factory=session_factory,
         settings=runtime_settings,
     )
+    tool_result_store = ToolResultStore(session_factory=session_factory)
+    cross_session_retriever = CrossSessionListRetriever(
+        session_factory=session_factory,
+        context_service=session_context_service,
+    )
     context_builder = ContextBuilder(
         session_context_service,
         settings=runtime_settings,
         session_context_compactor=session_context_compactor,
+        tool_result_store=tool_result_store,
+        cross_session_retriever=cross_session_retriever,
     )
     cancel_source = DatabaseRuntimeCancelSource(session_factory=session_factory)
     model_service = RuntimeModelStepService(
@@ -234,7 +247,6 @@ def build_runtime_worker_components(
         context_builder=context_builder,
         answer_stream_enabled=runtime_settings.AGENT_RUNTIME_WEB_STREAMING_ENABLED,
     )
-    tool_result_store = ToolResultStore(session_factory=session_factory)
     tool_result_reconciler = ToolResultReconciler(
         session_factory=session_factory,
         result_store=tool_result_store,
@@ -318,6 +330,10 @@ def build_runtime_worker_components(
         ),
         terminal_handlers=(
             SessionContextCompletionHandler(
+                session_factory=session_factory,
+                context_service=session_context_service,
+            ),
+            ListPersistenceCompletionHandler(
                 session_factory=session_factory,
                 context_service=session_context_service,
             ),

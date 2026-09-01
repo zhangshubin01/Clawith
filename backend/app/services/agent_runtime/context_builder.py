@@ -7,10 +7,11 @@ projection as execution state.
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from copy import deepcopy
 from dataclasses import asdict, dataclass
 from datetime import datetime
+import logging
 import math
 from typing import TYPE_CHECKING, Any
 import uuid
@@ -20,6 +21,12 @@ from sqlalchemy import select
 
 from app.config import Settings, get_settings
 from app.models.chat_session import ChatSession
+from app.services.agent_runtime.cross_session_retrieval import (
+    CrossSessionListRetriever,
+    detect_list_reference,
+    render_retrieval_note,
+)
+from app.services.agent_runtime.list_persistence import extract_workspace_project
 from app.services.agent_runtime.session_context_service import (
     MessagePosition,
     SessionContextPack,
@@ -44,6 +51,7 @@ from app.services.agent_runtime.tool_exchange import (
     ToolExchangeCompactionSummary,
     build_recent_tool_safe_window,
 )
+from app.services.agent_runtime.tool_result_store import ToolResultStore
 from app.services.agent_runtime.thread_visibility import (
     bound_current_run_window,
     summary_is_stale_for_run,
@@ -51,6 +59,18 @@ from app.services.agent_runtime.thread_visibility import (
 
 if TYPE_CHECKING:
     from app.services.agent_runtime.group_context_builder import GroupContextBuilder
+
+logger = logging.getLogger(__name__)
+
+
+def _optional_uuid(value: str | None) -> uuid.UUID | None:
+    """Parse a UUID string, tolerating ``None`` and malformed input."""
+    if not value:
+        return None
+    try:
+        return uuid.UUID(value)
+    except (TypeError, ValueError):
+        return None
 
 
 class ContextBuildError(RuntimeError):
@@ -287,6 +307,26 @@ def _validate_session_messages(messages: Sequence[Mapping[str, Any]]) -> None:
             )
 
 
+def _tool_result_content_resolver(
+    store: ToolResultStore,
+    *,
+    tenant_id: uuid.UUID,
+) -> Callable[[str], Awaitable[str | None]]:
+    """Build the prior-Run summary bridge resolver bound to one tenant scope.
+
+    ``ToolResultStore.resolve`` proves tenant ownership and a settled success
+    before returning the envelope; ``None`` means "nothing to inline", which
+    ``_prior_run_summary`` turns into the legacy raw-ref fallback.
+    """
+
+    async def resolve(result_ref: str) -> str | None:
+        envelope = await store.resolve(result_ref, tenant_id=tenant_id)
+        content = envelope.content
+        return content if isinstance(content, str) and content else None
+
+    return resolve
+
+
 class ContextBuilder:
     """Capture new-Run snapshots and select a tool-safe active message window."""
 
@@ -297,6 +337,8 @@ class ContextBuilder:
         settings: Settings | None = None,
         group_context_builder: GroupContextBuilder | None = None,
         session_context_compactor: SessionContextCompactor | None = None,
+        tool_result_store: ToolResultStore | None = None,
+        cross_session_retriever: CrossSessionListRetriever | None = None,
     ) -> None:
         runtime_settings = settings or get_settings()
         if group_context_builder is None:
@@ -308,6 +350,54 @@ class ContextBuilder:
         self.session_context_service = session_context_service
         self.group_context_builder = group_context_builder
         self.session_context_compactor = session_context_compactor
+        self._tool_result_store = tool_result_store
+        self._cross_session_retriever = cross_session_retriever
+
+    async def _retrieve_list_context(
+        self,
+        context: RuntimeContext,
+        thread_messages: Sequence[JsonObject],
+    ) -> JsonObject | None:
+        """R3: auto-retrieve a referenced prior list and render its injection note.
+
+        Returns ``None`` (a strict no-op) unless the current goal carries a
+        list-reference signal AND a matching list is found. Retrieval is
+        best-effort: any unavailable scope or read failure degrades to
+        ``None`` rather than blocking the Run or entering a waiting decision.
+        """
+        if self._cross_session_retriever is None:
+            return None
+        signal = detect_list_reference(context.goal)
+        if signal is None:
+            return None
+        agent_id = _optional_uuid(context.agent_id)
+        if agent_id is None:
+            return None
+        tenant_id = _optional_uuid(context.tenant_id)
+        if tenant_id is None:
+            return None
+        session_id = _optional_uuid(context.session_id)
+        user_id = _optional_uuid(context.actor_user_id)
+        project = extract_workspace_project(thread_messages)
+        try:
+            result = await self._cross_session_retriever.retrieve(
+                tenant_id=tenant_id,
+                agent_id=agent_id,
+                user_id=user_id,
+                session_id=session_id,
+                project=project,
+                signal=signal,
+            )
+        except (OSError, ValueError):
+            # Retrieval is auxiliary: storage/parse failures degrade to no-op.
+            logger.exception(
+                "Cross-session list retrieval failed for run %s",
+                context.run_id,
+            )
+            return None
+        if result is None:
+            return None
+        return render_retrieval_note(result, current_run_id=context.run_id)
 
     async def _rebuild_group_context_pack(
         self,
@@ -543,15 +633,30 @@ class ContextBuilder:
                 "invalid_thread_messages",
                 "checkpoint messages must use the LangGraph messages channel",
             ) from exc
-        prior_run_summary, current_run_messages = bound_current_run_window(
+        resolve_tool_result = (
+            _tool_result_content_resolver(
+                self._tool_result_store,
+                tenant_id=uuid.UUID(context.tenant_id),
+            )
+            if self._tool_result_store is not None
+            else None
+        )
+        prior_run_summary, current_run_messages = await bound_current_run_window(
             thread_messages,
             current_run_id=context.run_id,
+            resolve_tool_result=resolve_tool_result,
         )
         window_messages = (
             (prior_run_summary, *current_run_messages)
             if prior_run_summary is not None
             else current_run_messages
         )
+        retrieval_note = await self._retrieve_list_context(
+            context,
+            thread_messages,
+        )
+        if retrieval_note is not None:
+            window_messages = (retrieval_note, *window_messages)
         selection = build_recent_tool_safe_window(
             window_messages,
             tool_execution_ledger,

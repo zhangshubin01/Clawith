@@ -302,6 +302,39 @@ def _state_statement(tenant_id: uuid.UUID, session_id: uuid.UUID):
     )
 
 
+def _recent_sessions_open_items_statement(
+    tenant_id: uuid.UUID,
+    agent_id: uuid.UUID,
+    user_id: uuid.UUID,
+    *,
+    exclude_session_id: uuid.UUID | None,
+    limit: int,
+):
+    """Recent direct sessions' Session Context rows for one (agent, user)."""
+    statement = (
+        select(SessionContextState.session_id, SessionContextState.open_items)
+        .join(
+            ChatSession,
+            and_(
+                ChatSession.tenant_id == SessionContextState.tenant_id,
+                ChatSession.id == SessionContextState.session_id,
+            ),
+        )
+        .where(
+            SessionContextState.tenant_id == tenant_id,
+            SessionContextState.agent_id == agent_id,
+            ChatSession.user_id == user_id,
+            ChatSession.session_type == "direct",
+            ChatSession.deleted_at.is_(None),
+        )
+    )
+    if exclude_session_id is not None:
+        statement = statement.where(
+            SessionContextState.session_id != exclude_session_id
+        )
+    return statement.order_by(SessionContextState.updated_at.desc()).limit(limit)
+
+
 def _message_scope(tenant_id: uuid.UUID, session_id: uuid.UUID):
     return (
         ChatSession.tenant_id == tenant_id,
@@ -695,6 +728,44 @@ class SessionContextService:
             tenant_id=tenant_id,
             session=session,
             limit=selected_limit,
+        )
+
+    async def load_recent_sessions_open_items(
+        self,
+        db: AsyncSession,
+        *,
+        tenant_id: uuid.UUID,
+        agent_id: uuid.UUID,
+        user_id: uuid.UUID,
+        exclude_session_id: uuid.UUID | None = None,
+        limit: int = 5,
+    ) -> tuple[tuple[uuid.UUID, tuple[JsonValue, ...]], ...]:
+        """Recent direct sessions' open_items for one (agent, user), newest first.
+
+        Cross-session projection used by R3 list retrieval: same tenant, same
+        agent, same user, direct sessions only, soft-deleted excluded, ordered
+        by the Session Context row's ``updated_at`` descending and capped at
+        ``limit``. Returns ``(session_id, open_items)`` pairs; pointer/domain
+        interpretation belongs to the caller. ``exclude_session_id`` drops the
+        caller's own session so its current state is not double-counted.
+        """
+        if limit <= 0:
+            raise ValueError("limit must be greater than zero")
+        result = await db.execute(
+            _recent_sessions_open_items_statement(
+                tenant_id,
+                agent_id,
+                user_id,
+                exclude_session_id=exclude_session_id,
+                limit=limit,
+            )
+        )
+        return tuple(
+            (
+                row.session_id,
+                tuple(_copy_json_sequence(row.open_items, "open_items")),
+            )
+            for row in result.all()
         )
 
     async def load_context_pack(

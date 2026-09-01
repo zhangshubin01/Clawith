@@ -1,9 +1,19 @@
 """Model-visible boundaries for one shared LangGraph Thread."""
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 
 from app.services.agent_runtime.state import JsonObject
 from app.services.llm.finish import FINISH_PROTOCOL_REMINDER
+
+# Deterministic head/marker/tail pruning for inlined prior tool results
+# (deepseek-harness pruner style). The Run-inheritance plan spec allows up to
+# head 4096 / tail 1024 code points; these budgets are conservatively smaller
+# per the project's token-cost discipline. Python string slicing indexes code
+# points, so the budget is encoding-independent.
+_EXCERPT_HEAD_CODE_POINTS = 2048
+_EXCERPT_TAIL_CODE_POINTS = 512
+_EXCERPT_GAP_MARKER = "\n[…中间内容省略…]\n"
+_TOOL_RESULT_REF_PREFIX = "tool-result://"
 
 
 def _current_run_start(
@@ -21,17 +31,35 @@ def _current_run_start(
     return None
 
 
-def _prior_run_summary(
+def _truncate_tool_result_content(content: str) -> str:
+    """Prune one resolved tool result to a bounded head/marker/tail excerpt."""
+    if len(content) <= _EXCERPT_HEAD_CODE_POINTS + _EXCERPT_TAIL_CODE_POINTS:
+        return content
+    return (
+        content[:_EXCERPT_HEAD_CODE_POINTS]
+        + _EXCERPT_GAP_MARKER
+        + content[-_EXCERPT_TAIL_CODE_POINTS:]
+    )
+
+
+async def _prior_run_summary(
     prior_messages: Sequence[Mapping[str, object]],
     *,
     current_run_id: str,
+    resolve_tool_result: Callable[[str], Awaitable[str | None]] | None = None,
 ) -> JsonObject | None:
-    """Collapse the prior Run into one deterministic, single-line context note.
+    """Collapse the prior Run into one deterministic, bounded context note.
 
     The prior Run's own closing assistant reply is the most toxic pollution
     source (a stale ``✅ done`` summary replayed verbatim), so it is never
-    copied. Only the prior goal and its produced artifact references survive,
-    as a compact template note — zero model cost, deterministic.
+    copied. Only the prior goal and its produced artifacts survive, as a
+    compact template note.
+
+    With ``resolve_tool_result`` supplied, opaque ``tool-result://`` refs are
+    resolved to their stored content and inlined as bounded head/marker/tail
+    excerpts, replacing URIs the model cannot parse. Resolution is strictly
+    best-effort: any failure falls back to the legacy raw ref so a Run's
+    startup is never blocked by a missing or unreadable tool result.
 
     The wording is deliberately past-tense and marked "非当前任务": a
     user-role summary that read "目标：重新编译项目" was itself mistaken for a
@@ -67,7 +95,27 @@ def _prior_run_summary(
     if goal:
         parts.append(f"任务「{goal}」")
     if unique:
-        parts.append("产出 " + "、".join(unique))
+        if resolve_tool_result is not None:
+            excerpts: list[str] = []
+            for ref in unique:
+                excerpt: str | None = None
+                if ref.startswith(_TOOL_RESULT_REF_PREFIX):
+                    try:
+                        resolved = await resolve_tool_result(ref)
+                    except Exception:
+                        # Fail-open bridge: the summary is best-effort
+                        # context, and one unavailable tool result (storage
+                        # outage, unsettled ledger, unexpected resolver error)
+                        # must never block a Run from starting. Fall back to
+                        # the legacy raw ref.
+                        resolved = None
+                    if resolved:
+                        excerpt = _truncate_tool_result_content(resolved)
+                excerpts.append(excerpt if excerpt is not None else ref)
+            body = "\n\n".join(f"[{i}] {item}" for i, item in enumerate(excerpts, 1))
+            parts.append(f"产出摘录：\n{body}")
+        else:
+            parts.append("产出 " + "、".join(unique))
     content = "，".join(parts) + "。"
     return {
         "id": f"prior-run-summary:{current_run_id}",
@@ -77,10 +125,11 @@ def _prior_run_summary(
     }
 
 
-def bound_current_run_window(
+async def bound_current_run_window(
     messages: Sequence[Mapping[str, object]],
     *,
     current_run_id: str,
+    resolve_tool_result: Callable[[str], Awaitable[str | None]] | None = None,
 ) -> tuple[JsonObject | None, tuple[JsonObject, ...]]:
     """Bound the model window at the current Run's start marker.
 
@@ -88,6 +137,8 @@ def bound_current_run_window(
     carries a prior Run's messages, they are collapsed into a single
     deterministic summary message instead of leaking verbatim into the window;
     ``current_run_messages`` starts exactly at the current Run's marker.
+    ``resolve_tool_result`` optionally inlines resolved ``tool-result://``
+    content into that summary as bounded excerpts (see ``_prior_run_summary``).
 
     Without a current marker (legacy single-Run threads, or non-direct Runs
     whose Thread holds only their own messages) the whole Thread is returned
@@ -99,7 +150,11 @@ def bound_current_run_window(
         return None, copied
     prior = copied[:current_start]
     current = copied[current_start:]
-    summary = _prior_run_summary(prior, current_run_id=current_run_id)
+    summary = await _prior_run_summary(
+        prior,
+        current_run_id=current_run_id,
+        resolve_tool_result=resolve_tool_result,
+    )
     return summary, current
 
 
