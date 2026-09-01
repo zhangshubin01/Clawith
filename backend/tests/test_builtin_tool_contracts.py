@@ -252,6 +252,27 @@ def test_all_agent_path_arguments_publish_the_relative_path_contract() -> None:
             assert "never start" in description
 
 
+def test_path_convention_injects_search_first_discipline_into_path_params() -> None:
+    read_path = builtin_model_definition("read_file")["function"]["parameters"]["properties"]["path"]["description"]
+    assert "discover it with list_files or find_files" in read_path
+    assert "do not guess conventional paths" in read_path
+    find_pattern = builtin_model_definition("find_files")["function"]["parameters"]["properties"]["pattern"][
+        "description"
+    ]
+    assert "discover it with list_files or find_files" in find_pattern
+
+
+def test_android_compile_project_path_keeps_single_contract_description() -> None:
+    from app.services.workspace_paths import PATH_CONVENTION_TEXT
+
+    description = builtin_model_definition("android_compile")["function"]["parameters"]["properties"]["project_path"][
+        "description"
+    ]
+    # 不在 _PATH_CONVENTION_PARAMS 注入表内：描述已在工具定义处单独修正，不重复注入
+    assert "do not guess conventional paths" not in description
+    assert PATH_CONVENTION_TEXT not in description
+
+
 @pytest.mark.parametrize(
     "name",
     ["at", "finish", "wait", "group_query_members", "group_future_tool"],

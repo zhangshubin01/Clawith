@@ -24,7 +24,8 @@ def enterprise_info_root(workspace_root: Path, tenant_id: str | None = None) -> 
 PATH_CONVENTION_TEXT = (
     "Path is resolved relative to the agent workspace root directory — the same base "
     "shown in read_file/list_files results (e.g. 'workspace/my-app'). Absolute paths "
-    "are rejected."
+    "are rejected. Before using an unverified path, discover it with list_files or "
+    "find_files; do not guess conventional paths (e.g. Java package directories)."
 )
 
 
