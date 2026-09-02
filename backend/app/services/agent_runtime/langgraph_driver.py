@@ -48,6 +48,28 @@ _WAITING_RESUME_TYPES = {
 }
 
 
+def _parent_trace_context(command: RuntimeCommandRecord) -> dict[str, str] | None:
+    """Resolve the Langfuse trace_context for a nested run, or None.
+
+    Delegated runs (A2A etc.) carry the parent run's trace id and root
+    observation id in their command payload; the child trace is then rendered
+    under the parent run's tree in Langfuse. Independent runs have no parent.
+    """
+    payload = command.payload
+    if not isinstance(payload, dict):
+        return None
+    trace_id = payload.get("parent_trace_id")
+    observation_id = payload.get("parent_observation_id")
+    if (
+        isinstance(trace_id, str)
+        and trace_id
+        and isinstance(observation_id, str)
+        and observation_id
+    ):
+        return {"trace_id": trace_id, "parent_span_id": observation_id}
+    return None
+
+
 class RuntimeGraphRegistry:
     """Resolve the currently deployed graph for each stable Runtime topology."""
 
@@ -458,6 +480,8 @@ class LangGraphRuntimeDriver:
             agent_id=run.agent_id,
             session_id=run.session_id,
             actor_user_id=command.actor_user_id,
+            input=run.goal,
+            parent_trace_context=_parent_trace_context(command),
             goal=run.goal,
             run_kind=run.run_kind,
             source_type=run.source_type,

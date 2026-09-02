@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from datetime import datetime, timezone
 import sys
 from types import SimpleNamespace
 from typing import Any, Iterator
@@ -16,6 +17,8 @@ from app.services.token_tracker import TokenUsage
 class _FakeSpan:
     def __init__(self) -> None:
         self.updates: list[dict[str, Any]] = []
+        self.id = "span-1"
+        self.trace_id = "trace-1"
 
     def update(self, **kwargs: Any) -> None:
         self.updates.append(kwargs)
@@ -552,6 +555,107 @@ def test_observe_generation_output_dict_redacts_secrets_in_reasoning(
     assert "abc.def.ghi" not in output["reasoning_content"]
     assert "[REDACTED]" in output["reasoning_content"]
     assert output["content"] == "the answer"
+
+
+def test_observe_generation_records_completion_start(monkeypatch: pytest.MonkeyPatch) -> None:
+    span = _FakeSpan()
+    monkeypatch.setattr(tracing, "_get_client", lambda _tenant_id=None, _span=span: _FakeClient(span=_span))
+
+    first_token = datetime(2026, 9, 3, 12, 0, 0, tzinfo=timezone.utc)
+    with tracing.observe_generation(name="llm") as gen:
+        assert gen is not None
+        gen.set_output({"content": "hi", "reasoning_content": None})
+        gen.set_completion_start(first_token)
+
+    update = span.updates[-1]
+    assert update["completion_start_time"] == first_token
+
+
+def test_observe_generation_omits_completion_start_when_never_set(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    span = _FakeSpan()
+    monkeypatch.setattr(tracing, "_get_client", lambda _tenant_id=None, _span=span: _FakeClient(span=_span))
+
+    with tracing.observe_generation(name="llm") as gen:
+        assert gen is not None
+        gen.set_output({"content": "hi", "reasoning_content": None})
+
+    assert "completion_start_time" not in span.updates[-1]
+
+
+def test_observe_run_records_input(monkeypatch: pytest.MonkeyPatch) -> None:
+    span = _FakeSpan()
+    started: dict[str, Any] = {}
+
+    class _CapturingClient(_FakeClient):
+        def start_as_current_observation(self, **kwargs: Any) -> Any:
+            started.update(kwargs)
+            return _fake_start_cm(self.span)
+
+    monkeypatch.setattr(tracing, "_get_client", lambda _tenant_id=None: _CapturingClient(span=span))
+
+    with tracing.observe_run(run_id="r-1", command_id="c-1", tenant_id="t-1", input="user goal text"):
+        pass
+
+    assert started["input"] == "user goal text"
+
+
+def test_observe_run_passes_parent_trace_context(monkeypatch: pytest.MonkeyPatch) -> None:
+    span = _FakeSpan()
+    started: dict[str, Any] = {}
+
+    class _CapturingClient(_FakeClient):
+        def start_as_current_observation(self, **kwargs: Any) -> Any:
+            started.update(kwargs)
+            return _fake_start_cm(self.span)
+
+    monkeypatch.setattr(tracing, "_get_client", lambda _tenant_id=None: _CapturingClient(span=span))
+
+    parent = {"trace_id": "parent-trace", "parent_span_id": "parent-span"}
+    with tracing.observe_run(
+        run_id="r-1",
+        command_id="c-1",
+        tenant_id="t-1",
+        parent_trace_context=parent,
+    ):
+        pass
+
+    assert started["trace_context"] == parent
+
+
+def test_observe_run_omits_trace_context_when_no_parent(monkeypatch: pytest.MonkeyPatch) -> None:
+    span = _FakeSpan()
+    started: dict[str, Any] = {}
+
+    class _CapturingClient(_FakeClient):
+        def start_as_current_observation(self, **kwargs: Any) -> Any:
+            started.update(kwargs)
+            return _fake_start_cm(self.span)
+
+    monkeypatch.setattr(tracing, "_get_client", lambda _tenant_id=None: _CapturingClient(span=span))
+
+    with tracing.observe_run(run_id="r-1", command_id="c-1", tenant_id="t-1"):
+        pass
+
+    assert "trace_context" not in started
+
+
+def test_current_observation_id_set_during_run_and_restored(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    span = _FakeSpan()
+    monkeypatch.setattr(tracing, "_get_client", lambda _tenant_id=None, _span=span: _FakeClient(span=_span))
+
+    token = tracing._run_observation_id.set("pre-existing")
+    try:
+        with tracing.observe_run(run_id="r-1", command_id="c-1", tenant_id="t-1"):
+            assert tracing.current_observation_id() == "span-1"
+        # restored after the run context exits
+        assert tracing.current_observation_id() == "pre-existing"
+    finally:
+        tracing._run_observation_id.reset(token)
+        assert tracing.current_observation_id() is None
 
 
 def test_observe_generation_records_error_and_reraises(monkeypatch: pytest.MonkeyPatch) -> None:

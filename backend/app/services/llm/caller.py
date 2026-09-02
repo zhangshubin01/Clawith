@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -663,10 +664,15 @@ async def call_llm(
 
         try:
             # Use streaming API for real-time responses
+            first_token_at: datetime | None = None
+
             async def _buffer_chunk(_text: str) -> None:
                 # Tool-round drafts and truncated output are not user-visible.
                 # The completed final response is emitted after stop validation.
-                return None
+                # First visible token marks TTFT (Langfuse completionStartTime).
+                nonlocal first_token_at
+                if first_token_at is None:
+                    first_token_at = datetime.now(timezone.utc)
 
             with observe_generation(
                 name="llm",
@@ -698,6 +704,7 @@ async def call_llm(
                             "reasoning_content": merged_reasoning,
                         }
                     )
+                    gen.set_completion_start(first_token_at)
                     gen.set_usage(response.usage)
                     gen.add_metadata(
                         tool_round=round_i,

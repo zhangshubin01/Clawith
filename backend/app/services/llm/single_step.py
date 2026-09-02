@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 import uuid
 
@@ -170,6 +171,21 @@ async def complete_llm_once(
         if on_visible_delta and not isinstance(client, OpenAIResponsesClient)
         else None
     )
+    first_token_at: datetime | None = None
+
+    async def _first_token_marker(_text: str) -> None:
+        # First visible token marks TTFT (Langfuse completionStartTime).
+        nonlocal first_token_at
+        if first_token_at is None:
+            first_token_at = datetime.now(timezone.utc)
+
+    async def _delta_with_marker(text: str) -> bool | None:
+        # The gate's bool return decides whether the delta was published and
+        # must propagate unchanged to the streaming client.
+        assert delta_gate is not None  # this callback is only wired when the gate exists
+        await _first_token_marker(text)
+        return await delta_gate.push(text)
+
     try:
         with observe_generation(
             name="llm",
@@ -184,7 +200,7 @@ async def complete_llm_once(
                     tools=tools or None,
                     temperature=request_temperature,
                     max_tokens=max_tokens,
-                    on_chunk=delta_gate.push,
+                    on_chunk=_delta_with_marker,
                     on_thinking=on_thinking,
                     **provider_toggle,
                 )
@@ -194,6 +210,7 @@ async def complete_llm_once(
                     tools=tools or None,
                     temperature=request_temperature,
                     max_tokens=max_tokens,
+                    on_chunk=_first_token_marker,
                     on_thinking=on_thinking,
                     **provider_toggle,
                 )
@@ -220,6 +237,7 @@ async def complete_llm_once(
                         "reasoning_content": merged_reasoning,
                     }
                 )
+                gen.set_completion_start(first_token_at)
                 gen.set_usage(response.usage)
     finally:
         await client.close()

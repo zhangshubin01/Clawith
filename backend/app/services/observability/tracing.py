@@ -11,7 +11,10 @@ Generation contract (2026-09-03): every ``llm`` generation records the full
 prompt as input and a ``{"content", "reasoning_content"}`` dict as output;
 strings are bound at ``_GENERATION_MAX_STRING_CHARS`` (64k) for generations and
 ``_MAX_STRING_CHARS`` (4k) elsewhere. Secrets redaction always precedes
-truncation. See docs/technical-plans/20260903-langfuse-reasoning-input-completeness.md.
+truncation. Run contract (2026-09-03): the run root span records the run goal as
+input and its first-visible-token time as completionStartTime; nested runs can
+attach under the parent run's trace via ``parent_trace_context`` (see
+``current_observation_id``). See docs/technical-plans/20260903-langfuse-reasoning-input-completeness.md.
 """
 
 from __future__ import annotations
@@ -22,6 +25,7 @@ import json
 import re
 import time
 from contextlib import ExitStack, contextmanager
+from datetime import datetime
 from typing import Any, Iterator
 
 from loguru import logger
@@ -32,6 +36,7 @@ from app.services.token_tracker import TokenUsage, extract_token_usage
 __all__ = [
     "GenerationHandle",
     "RunHandle",
+    "current_observation_id",
     "current_trace_id",
     "flush",
     "is_enabled",
@@ -110,6 +115,14 @@ _run_trace_id: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "clawith_observability_run_trace_id", default=None
 )
 
+# Langfuse observation id (root span id) of the run observation active in this
+# async context — the counterpart of _run_trace_id. A nested run created while
+# this run executes reads both values to attach its own trace under this run's
+# tree (cross-trace parenting via Langfuse trace_context).
+_run_observation_id: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "clawith_observability_run_observation_id", default=None
+)
+
 
 def current_trace_id() -> str | None:
     """Langfuse trace id of the active run observation in this async context.
@@ -117,6 +130,14 @@ def current_trace_id() -> str | None:
     ``None`` when observability is disabled or no run observation is active.
     """
     return _run_trace_id.get()
+
+
+def current_observation_id() -> str | None:
+    """Langfuse observation id of the active run's root span in this async context.
+
+    ``None`` when observability is disabled or no run observation is active.
+    """
+    return _run_observation_id.get()
 
 
 def is_enabled() -> bool:
@@ -312,7 +333,18 @@ def _map_usage(
 class GenerationHandle:
     """Write-side of an in-flight generation observation. All writes are safe."""
 
-    __slots__ = ("_span", "_mask", "_output", "_usage", "_metadata", "_level", "_status", "_provider", "_max_string_chars")
+    __slots__ = (
+        "_span",
+        "_mask",
+        "_output",
+        "_usage",
+        "_metadata",
+        "_level",
+        "_status",
+        "_provider",
+        "_max_string_chars",
+        "_completion_start",
+    )
 
     def __init__(
         self,
@@ -326,6 +358,7 @@ class GenerationHandle:
         self._mask = mask
         self._provider = provider
         self._max_string_chars = max_string_chars
+        self._completion_start: datetime | None = None
         self._output: Any = _UNSET
         self._usage: dict[str, int] = {}
         self._metadata: dict[str, Any] = {}
@@ -334,6 +367,10 @@ class GenerationHandle:
 
     def set_output(self, output: Any) -> None:
         self._output = output
+
+    def set_completion_start(self, when: datetime | None) -> None:
+        """Record the first-visible-token wall time (Langfuse completionStartTime)."""
+        self._completion_start = when
 
     def set_usage(self, usage: TokenUsage | dict[str, int] | None) -> None:
         self._usage = _map_usage(usage, provider=self._provider)
@@ -363,6 +400,8 @@ class GenerationHandle:
             )
         if self._usage:
             update["usage_details"] = self._usage
+        if self._completion_start is not None:
+            update["completion_start_time"] = self._completion_start
         if self._level is not None:
             update["level"] = self._level
             update["status_message"] = self._status
@@ -625,15 +664,19 @@ def observe_run(
     agent_id: Any = None,
     session_id: Any = None,
     actor_user_id: Any = None,
+    input: Any = None,
+    parent_trace_context: dict[str, str] | None = None,
     **identity: Any,
 ) -> Iterator[RunHandle | None]:
     """Open the root trace for one Runtime command execution (no-op when disabled).
 
     The root span becomes the Langfuse trace; user/session/trace-name attributes
     are propagated to every nested observation so a Run renders as one trace
-    grouped by session/user. Exceptions inside the block are recorded as
-    ``level=ERROR`` and re-raised to the caller; observability-internal failures
-    are swallowed.
+    grouped by session/user. ``input`` (the run goal/user text) is recorded on
+    the root span; ``parent_trace_context`` (``{"trace_id", "parent_span_id"}``
+    of a parent run) attaches this trace under the parent run's tree. Exceptions
+    inside the block are recorded as ``level=ERROR`` and re-raised to the caller;
+    observability-internal failures are swallowed.
     """
     client = _get_client(str(tenant_id) if tenant_id is not None else None)
     if client is None:
@@ -675,7 +718,9 @@ def observe_run(
             start_cm = client.start_as_current_observation(
                 as_type="span",
                 name="run",
+                input=mask_text(input) if input is not None else None,
                 metadata=meta,
+                **({"trace_context": parent_trace_context} if parent_trace_context else {}),
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning("[Observability] failed to start run span: {}", exc)
@@ -686,6 +731,7 @@ def observe_run(
             handle.add_metadata(**meta)
             started = time.perf_counter()
             trace_token = _run_trace_id.set(getattr(span, "trace_id", None))
+            observation_token = _run_observation_id.set(getattr(span, "id", None))
             _deferred_retry: BaseException | None = None
             try:
                 yield handle
@@ -699,6 +745,7 @@ def observe_run(
             finally:
                 handle.finalize(started)
                 _run_trace_id.reset(trace_token)
+                _run_observation_id.reset(observation_token)
         if _deferred_retry is not None:
             raise _deferred_retry
 

@@ -1,6 +1,6 @@
 # 20260903 Langfuse 埋点完整性修复：reasoning 记录 + input 行为统一
 
-状态：已实施（2026-09-03，未部署）
+状态：已实施（2026-09-03，未部署）。同日追加「监控盲区三件套」：TTFT、run 根 input、跨 run parent 关联（见 §8）。
 
 ## 1. 结论
 
@@ -99,3 +99,33 @@ Langfuse 的 `llm` generation 观测只记录 `response.content`，思考内容�
 - JSON output 对历史数据无影响（只作用于新写入）；对 UI 的「output」列显示为
   JSON 文本，可读性略降，换来完整思考内容。
 - 脱敏有效性不变（正则先行）；64k 只是字符上限而非跳过脱敏。
+
+## 8. 追加：监控盲区三件套（2026-09-03）
+
+评审报告 `docs/analysis/20260903-langfuse-reasoning-fix-review.md` 盘点盲区后，按用户确认补齐前三项：
+
+1. **TTFT**：`GenerationHandle.set_completion_start()` + finalize 写
+   `completion_start_time`（Langfuse 原生字段）。采集点=流式首个可见 content
+   token（`caller.py::_buffer_chunk`、`single_step.py::_first_token_marker`；
+   `_delta_with_marker` 透传 gate 的 bool 发布语义）。非流式 complete 不记录。
+2. **run 根 input**：`observe_run(input=...)` 记录 run goal（`langgraph_driver.execute`
+   传 `run.goal`，facade 内 mask+4000 上限）。
+3. **跨 run parent 关联**：`observe_run` 新增 `_run_observation_id` contextvar +
+   `current_observation_id()`；A2A 创建子 run 时（父 run observe_run 上下文内）把
+   `parent_trace_id/parent_observation_id` 写入 command payload，子 run execute 时
+   解析为 Langfuse `trace_context`（`{trace_id, parent_span_id}`）传入
+   `start_as_current_observation`——子 trace 挂到父 trace 树。无父上下文（独立 run）
+   时自然无 parent，行为不变。
+
+SDK 能力依据（本地 venv langfuse 源码核查）：`span.update(completion_start_time=datetime)`
+（span.py:645）、`span.id`/`span.trace_id`（span.py:131-132）、
+`start_as_current_observation(trace_context=...)` 跨 trace 挂载（client.py 实现 +
+observe.py 同机制用法）。
+
+验证（2026-09-03）：arch-guard P0 干净；affected 测试集 165 passed（observability 54、
+langgraph_driver、a2a×2、single_step、failover）；ruff 全过；pyright 改动区零新错误
+（caller 10 / tracing 17 / single_step 4 均与改动前基线一致，为既有问题）。
+一处回归被测试抓住并修复：`_delta_with_marker` 曾吞掉 `_VisibleDeltaGate.push` 的
+bool 返回（client 层发布语义），已透传。
+
+部署后验证：生产 trace 抽查 TTFT 非空、run 根有 input、A2A 子 trace 挂在父树。

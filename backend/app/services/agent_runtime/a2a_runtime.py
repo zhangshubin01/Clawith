@@ -38,6 +38,7 @@ from app.services.agent_runtime.tool_execution import (
     mark_tool_execution_failed,
     mark_tool_execution_succeeded,
 )
+from app.services.observability import current_observation_id, current_trace_id
 from app.services.participant_identity import get_or_create_agent_participant
 
 A2AMode = Literal["notify", "consult", "task_delegate"]
@@ -921,6 +922,17 @@ class RuntimeA2AService:
                             source_run_id,
                             tool_call_id,
                         )
+                        # This intake runs inside the parent run's observe_run
+                        # context: capture its Langfuse trace linkage so the
+                        # delegated run's trace attaches under the parent tree.
+                        parent_trace_payload: dict[str, str] = {}
+                        parent_trace_id = current_trace_id()
+                        parent_observation_id = current_observation_id()
+                        if parent_trace_id and parent_observation_id:
+                            parent_trace_payload = {
+                                "parent_trace_id": parent_trace_id,
+                                "parent_observation_id": parent_observation_id,
+                            }
                         handle = await RuntimeCommandIntake(
                             db,
                             settings=self._settings,
@@ -963,6 +975,7 @@ class RuntimeA2AService:
                                         reservation.execution.contract_version
                                     ),
                                     "correlation_id": correlation_id,
+                                    **parent_trace_payload,
                                 },
                                 actor_user_id=owner_user_id,
                                 actor_agent_id=source_agent.id,
