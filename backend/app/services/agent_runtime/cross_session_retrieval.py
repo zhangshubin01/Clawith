@@ -38,12 +38,16 @@ logger = logging.getLogger(__name__)
 MAX_SESSIONS_DEFAULT = 5
 MAX_INJECTED_ITEMS = 20
 
-# Detection: a bare number sequence after an action verb. Full-width digits
-# are normalized to half-width. ``改`` is the loosest verb but a stray match
-# only reaches the retrieval layer, which no-ops when no list carries those
+# Detection: a number reference after an action verb. Numbers may carry a
+# letter/symbol prefix (P2 / N3 / #4), matching how Focus labels and common
+# shorthand cite prior lists. Full-width digits are normalized to half-width.
+# The verb set is intentionally loose: a stray match (e.g. 执行 2 个测试) only
+# reaches the retrieval layer, which no-ops when no list carries those
 # numbers (the D5-2 false-positive guard).
 _NUMBER_REFERENCE = re.compile(
-    r"(?:做|完成|实现|改)\s*(?P<numbers>[0-9０-９]+(?:[、，,\s]+[0-9０-９]+)*)"
+    r"(?:做|完成|实现|改|执行|处理)\s*"
+    r"(?P<numbers>(?:[PpNn][-—]?|[#＃])?\s*[0-9０-９]+"
+    r"(?:[、，,\s]+(?:[PpNn][-—]?|[#＃])?\s*[0-9０-９]+)*)"
 )
 _FULLWIDTH_TO_HALFWIDTH = str.maketrans(
     {chr(0xFF10 + i): str(i) for i in range(10)}
@@ -82,11 +86,13 @@ def _normalize_digits(raw: str) -> tuple[int, ...]:
 
 
 def detect_list_reference(message: str) -> ListReferenceSignal | None:
-    """Detect a bare-number or pronoun list reference in one user message.
+    """Detect a numbered or pronoun list reference in one user message.
 
-    Pure function: no I/O, no state. A bare-number match wins over the
-    pronoun rule, so ``完成上一轮清单的 3、4、5`` extracts numbers. A message
-    with no verb-and-number sequence and no pronoun+noun pair returns ``None``.
+    Pure function: no I/O, no state. A number reference (``做 1、2、3、5``,
+    ``执行P2``, ``处理N3``, ``完成#4``) wins over the pronoun rule, so
+    ``完成上一轮清单的 3、4、5`` extracts no numbers and falls through to the
+    historical branch. A message with no verb-and-number sequence and no
+    pronoun+noun pair returns ``None``.
     """
     if not isinstance(message, str):
         return None

@@ -56,6 +56,23 @@ def test_detect_fullwidth_digits_are_normalized() -> None:
     assert signal.numbers == (1, 2, 3)
 
 
+def test_detect_prefixed_numbers_and_extended_verbs() -> None:
+    # Focus labels (P2) and shorthand (#4 / N3 / p2) after the extended verb
+    # set (执行/处理) — the 执行P2 shape observed in production on 2026-09-02.
+    for message, expected in (
+        ("执行P2", (2,)),
+        ("执行 P2", (2,)),
+        ("处理N3", (3,)),
+        ("完成#4", (4,)),
+        ("改 p2、N3、＃4", (2, 3, 4)),
+        ("执行 3 5", (3, 5)),
+    ):
+        signal = detect_list_reference(message)
+        assert signal is not None, message
+        assert signal.numbers == expected, message
+        assert signal.historical is False
+
+
 def test_detect_historical_pronoun() -> None:
     signal = detect_list_reference("上一轮的清单还在吗")
     assert signal is not None
