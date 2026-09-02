@@ -21,6 +21,7 @@ from app.services.agent_runtime.tool_repair_budget import (
 from app.services.sandbox.workspace_policy import (
     build_workspace_policy,
     classify_publish_path,
+    redact_git_secrets,
 )
 from app.services.storage_runtime.base import (
     ConditionalWriteResult,
@@ -396,7 +397,11 @@ def test_isolated_output_mode_unchanged():
         ("workspace/src/main.kt", "source"),
         ("_exec_tmp_run.py", "derived"),
         ("workspace/_exec_tmp_123.sh", "derived"),
-        (".git/HEAD", "derived"),
+        (".git/HEAD", "source"),
+        (".git/objects/ab/cdef1234", "source"),
+        ("workspace/proj/.git/config", "source"),
+        (".git-credentials", "derived"),
+        ("workspace/pkg/.netrc", "derived"),
         (".gradle/8.0/registry.bin", "derived"),
         ("workspace/target/x.jar", "derived"),
         ("workspace/__pycache__/mod.cpython.pyc", "derived"),
@@ -464,11 +469,43 @@ async def test_materialize_skips_derived(monkeypatch, tmp_path):
         assert (temp_ws.root / "workspace" / "build" / "outputs" / "apk" / "x.apk").is_file()
         assert not (temp_ws.root / "workspace" / "build" / "classes" / "x.class").exists()
         assert not (temp_ws.root / "workspace" / "node_modules" / "m" / "index.js").exists()
-        assert not (temp_ws.root / "workspace" / ".git" / "HEAD").exists()
+        # .git is source-grade on the materialize side (sandbox-git fix §3.1).
+        assert (temp_ws.root / "workspace" / ".git" / "HEAD").is_file()
         assert set(temp_ws.manifest) == {
             "workspace/src/Main.kt",
             "workspace/build/outputs/apk/x.apk",
+            "workspace/.git/HEAD",
         }
+    finally:
+        temp_ws.cleanup()
+
+
+@pytest.mark.asyncio
+async def test_materialize_drops_incomplete_git_dir(monkeypatch, tmp_path):
+    """Budget-skipped .git files must remove the whole .git dir (sandbox-git fix §3.3).
+
+    A half-materialized .git (HEAD present, objects missing) is worse than no
+    .git at all: keep the invariant ".git is either complete or absent".
+    """
+    agent_id = uuid.uuid4()
+    storage = MemoryStorageBackend(
+        {
+            f"{agent_id}/workspace/mydome1/.git/HEAD": b"ref: refs/heads/main\n",
+            f"{agent_id}/workspace/mydome1/.git/objects/pack/pack-huge.pack": b"x" * 64,
+            f"{agent_id}/workspace/mydome1/src/Main.kt": b"fun main() {}",
+        }
+    )
+    monkeypatch.setattr(agent_tools, "get_storage_backend", lambda: storage)
+
+    temp_ws = await agent_tools._prepare_temp_workspace(
+        agent_id,
+        paths=["workspace"],
+        max_file_bytes=32,
+    )
+    try:
+        assert (temp_ws.root / "workspace" / "mydome1" / "src" / "Main.kt").is_file()
+        assert not (temp_ws.root / "workspace" / "mydome1" / ".git").exists()
+        assert set(temp_ws.manifest) == {"workspace/mydome1/src/Main.kt"}
     finally:
         temp_ws.cleanup()
 
@@ -718,3 +755,99 @@ def test_oversized_stored_budget_is_trimmed_on_parse():
 def test_malformed_conflict_budget_raises(invalid):
     with pytest.raises(ToolRepairBudgetError):
         apply_workspace_sync_conflict(invalid, _conflict_message(), model_step=0)
+
+
+# ── 8. git credential redaction (publish side, sandbox-git fix plan §3.2) ──
+
+
+def test_redact_git_secrets_strips_userinfo_from_git_urls():
+    data = (
+        b"[remote \"origin\"]\n"
+        b"\turl = https://user:glpat-token@git.example.com/a/b.git\n"
+        b"[core]\n\trepositoryformatversion = 0\n"
+    )
+    assert redact_git_secrets(".git/config", data) == (
+        b"[remote \"origin\"]\n"
+        b"\turl = https://git.example.com/a/b.git\n"
+        b"[core]\n\trepositoryformatversion = 0\n"
+    )
+
+
+def test_redact_git_secrets_rewrites_extraheader_values():
+    data = b"[http \"https://git.example.com/\"]\n\textraheader = PRIVATE-TOKEN: glpat-secret\n"
+    out = redact_git_secrets(".git/config", data)
+    assert b"glpat-secret" not in out
+    assert b"extraheader = <redacted>\n" in out
+
+
+def test_redact_git_secrets_strips_userinfo_from_fetch_head():
+    data = b"abc123\t\tbranch 'main' of https://user:tok@git.example.com/a/b.git\n"
+    assert redact_git_secrets(".git/FETCH_HEAD", data) == (
+        b"abc123\t\tbranch 'main' of https://git.example.com/a/b.git\n"
+    )
+
+
+def test_redact_git_secrets_extraheader_only_inside_config():
+    data = b"extraheader = Authorization: Basic abc\n"
+    assert redact_git_secrets(".git/FETCH_HEAD", data) == data
+
+
+def test_redact_git_secrets_leaves_non_git_and_binary_untouched():
+    binary = b"\xff\xfe\x00\x01https://user:t@host/x"
+    assert redact_git_secrets("workspace/src/main.kt", b"https://user:t@host/x") == b"https://user:t@host/x"
+    assert redact_git_secrets(".git/index", binary) == binary
+
+
+@pytest.mark.asyncio
+async def test_flush_redacts_git_credentials_before_publish(monkeypatch, tmp_path):
+    agent_id = uuid.uuid4()
+    storage = MemoryStorageBackend(
+        {
+            f"{agent_id}/workspace/mydome1/.git/config": (
+                b"[remote \"origin\"]\n"
+                b"\turl = https://user:glpat-tok@git.example.com/a/b.git\n"
+                b"[http \"https://git.example.com/\"]\n"
+                b"\textraheader = PRIVATE-TOKEN: glpat-tok\n"
+            ),
+        }
+    )
+    monkeypatch.setattr(agent_tools, "get_storage_backend", lambda: storage)
+
+    temp_ws = await agent_tools._prepare_temp_workspace(agent_id, paths=["workspace"])
+    try:
+        result = await agent_tools.flush_temp_workspace(temp_ws)
+        assert result["conflicted"] == []
+        published = storage.files[f"{agent_id}/workspace/mydome1/.git/config"]
+        assert b"glpat-tok" not in published
+        assert b"https://git.example.com/a/b.git" in published
+        assert b"extraheader = <redacted>\n" in published
+    finally:
+        temp_ws.cleanup()
+
+
+@pytest.mark.asyncio
+async def test_candidate_changes_redact_git_credentials(monkeypatch, tmp_path):
+    agent_id = uuid.uuid4()
+    storage = MemoryStorageBackend(
+        {
+            f"{agent_id}/workspace/mydome1/.git/config": (
+                b"[remote \"origin\"]\n\turl = https://git.example.com/a/b.git\n"
+            ),
+        }
+    )
+    monkeypatch.setattr(agent_tools, "get_storage_backend", lambda: storage)
+
+    temp_ws = await agent_tools._prepare_temp_workspace(agent_id, paths=["workspace"])
+    try:
+        (temp_ws.root / "workspace" / "mydome1" / ".git" / "config").write_bytes(
+            b"[remote \"origin\"]\n\turl = https://user:glpat-tok@git.example.com/a/b.git\n"
+            b"[remote \"upstream\"]\n\turl = https://git.example.com/a/b.git\n"
+        )
+        changes = await agent_tools._workspace_candidate_changes(temp_ws)
+        config_changes = [c for c in changes if c.path == "workspace/mydome1/.git/config"]
+        assert len(config_changes) == 1
+        assert config_changes[0].data is not None
+        assert b"glpat-tok" not in config_changes[0].data
+        assert b"url = https://git.example.com/a/b.git" in config_changes[0].data
+    finally:
+        temp_ws.cleanup()

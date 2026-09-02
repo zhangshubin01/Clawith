@@ -23,6 +23,7 @@ import multiprocessing as mp
 import os
 import queue
 import re
+import shutil
 import tempfile
 import uuid
 import unicodedata
@@ -116,6 +117,7 @@ from app.services.sandbox.workspace_policy import (
     build_workspace_policy,
     classify_publish_path,
     parse_canonical_uuid,
+    redact_git_secrets,
 )
 from app.services.llm.finish import (
     FINISH_TOOL_NAME,
@@ -1797,6 +1799,42 @@ async def _materialize_storage_entry(storage, entry_key: str, root_key: str, loc
     target.write_bytes(await storage.read_bytes(entry_key))
 
 
+def _drop_incomplete_git_dirs(
+    root: Path,
+    budget: dict,
+    manifest: dict[str, TempWorkspaceManifestEntry],
+) -> None:
+    """Keep the invariant ".git is either complete or absent" in the sandbox.
+
+    Budget-limited materialization may skip ``.git`` files (large packs); a
+    half-materialized ``.git`` yields ``fatal: bad object``, which is worse
+    than ``not a git repository``. Remove any ``.git`` subtree that lost files,
+    and purge its manifest entries so the flush delete pass cannot mistake the
+    removed files for sandbox deletions.
+    """
+    skipped = budget.get("skipped") or []
+    if not skipped:
+        return
+    root_resolved = root.resolve()
+    git_prefixes: set[str] = set()
+    for rel in skipped:
+        parts = [part for part in str(rel).replace("\\", "/").split("/") if part]
+        if ".git" in parts:
+            git_prefixes.add("/".join(parts[: parts.index(".git") + 1]))
+    for prefix in sorted(git_prefixes):
+        git_dir = (root_resolved / prefix).resolve()
+        if not git_dir.is_relative_to(root_resolved) or not git_dir.is_dir():
+            continue
+        shutil.rmtree(git_dir, ignore_errors=True)
+        entry_prefix = normalize_workspace_path(prefix).rstrip("/") + "/"
+        for key in [key for key in manifest if key.startswith(entry_prefix)]:
+            manifest.pop(key, None)
+        logger.warning(
+            "[ToolWorkspaceGitIncomplete] dropped incomplete git dir: prefix={}",
+            entry_prefix,
+        )
+
+
 async def _prepare_temp_workspace(
     agent_id: uuid.UUID,
     tenant_id: str | None = None,
@@ -1826,6 +1864,7 @@ async def _prepare_temp_workspace(
             manifest,
             max_file_bytes=max_file_bytes,
         )
+    _drop_incomplete_git_dirs(temp_ws, budget, manifest)
     skipped_skills = [
         path
         for path in budget["skipped"]
@@ -1890,10 +1929,12 @@ async def _materialize_storage_entry(
 ) -> None:
     if await storage.is_file(storage_key):
         if classify_publish_path(rel_path) == "derived":
-            # L2 derived history never materializes into the sandbox copy, so
-            # stale build outputs cannot confuse the model nor re-enter the
+            # L2 derived outputs never materialize into the sandbox copy, so
+            # stale build artifacts cannot confuse the model nor re-enter the
             # publish enum.  The ``build/outputs`` artifact subtree is still
-            # materialized (classifier returns "artifact" for it).
+            # materialized (classifier returns "artifact" for it).  ``.git`` is
+            # source-grade and materializes in full (credential redaction
+            # applies on the publish side only).
             return
         version = await storage.get_version(storage_key)
         if version.size > max_file_bytes:
@@ -2045,7 +2086,7 @@ async def flush_temp_workspace(
             updated.append(rel_path)
 
         for rel_path, local_path in cas_files.items():
-            data = local_path.read_bytes()
+            data = redact_git_secrets(rel_path, local_path.read_bytes())
             current_hash = content_hash_bytes(data)
             entry = manifest.get(rel_path)
             if entry and entry.base_hash == current_hash:
@@ -2346,7 +2387,7 @@ async def _workspace_candidate_changes(
     changes: list[CandidateChange] = []
 
     for rel_path, local_path in cas_files.items():
-        data = local_path.read_bytes()
+        data = redact_git_secrets(rel_path, local_path.read_bytes())
         candidate_hash = content_hash_bytes(data)
         entry = temp_workspace.manifest.get(rel_path)
         if entry is not None:
@@ -3511,7 +3552,7 @@ def _derived_publication_note(flush_result: dict[str, list[str] | int] | None) -
     if not isinstance(count, int) or count <= 0:
         return ""
     return (
-        "\n构建产物等派生文件（build/、.git/ 等）按平台约定未同步回工作区；"
+        "\n构建产物等派生文件（build/、.gradle/、node_modules/ 等）按平台约定未同步回工作区；"
         "apk/aab 产物已作为 artifact 返回。"
     )
 

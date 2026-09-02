@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import uuid
 from dataclasses import dataclass
 from typing import Literal
@@ -14,10 +15,41 @@ PublicationConflictMode = Literal["fail", "overwrite"]
 PublishClass = Literal["source", "derived", "artifact"]
 
 # Derived outputs never published (segment-level, case-sensitive blacklist).
-# ``_exec_tmp`` also matches a ``_exec_tmp``-prefixed file basename, keeping the
-# legacy temp-file exclusion semantics.
-DERIVED_SEGMENTS = frozenset({"build", ".git", ".gradle", "node_modules", "target", "dist", "__pycache__", "_exec_tmp"})
+# ``.git`` is deliberately absent: git metadata is source-grade on both the
+# materialize and publish sides (credential redaction applies on publish, see
+# ``redact_git_secrets``). ``_exec_tmp`` also matches a ``_exec_tmp``-prefixed
+# file basename, keeping the legacy temp-file exclusion semantics.
+DERIVED_SEGMENTS = frozenset({"build", ".gradle", "node_modules", "target", "dist", "__pycache__", "_exec_tmp"})
 _EXEC_TMP_PREFIX = "_exec_tmp"
+# Pure credential files never enter CAS (basename-level, case-sensitive).
+_GIT_CREDENTIAL_FILES = frozenset({".git-credentials", ".netrc"})
+_GIT_URL_USERINFO_RE = re.compile(r"(\bhttps?://)[^/@\s]+@")
+_GIT_EXTRAHEADER_RE = re.compile(r"(?m)^(\s*extraheader\s*=\s*).+$")
+
+
+def redact_git_secrets(rel_path: str, data: bytes) -> bytes:
+    """Strip credentials from ``.git`` metadata before it reaches durable storage.
+
+    Sandbox = the agent's private execution environment (real tokens stay so
+    pull/push keep working); storage = the shared durable layer (tokens must
+    never land there). Rules:
+
+    - userinfo in ``https://`` remote URLs is stripped for every ``.git`` file
+      (covers ``config``, ``FETCH_HEAD`` and reflogs);
+    - ``extraheader`` values are fully redacted, but only in ``.git/config``;
+    - non-UTF-8 bytes and non-``.git`` paths are returned unchanged.
+    """
+    parts = [part for part in str(rel_path).replace("\\", "/").split("/") if part]
+    if ".git" not in parts:
+        return data
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError:
+        return data
+    text = _GIT_URL_USERINFO_RE.sub(r"\1", text)
+    if parts[-1] == "config":
+        text = _GIT_EXTRAHEADER_RE.sub(r"\1<redacted>", text)
+    return text.encode("utf-8")
 
 
 def classify_publish_path(rel_path: str) -> PublishClass:
@@ -27,8 +59,10 @@ def classify_publish_path(rel_path: str) -> PublishClass:
     - any segment in ``DERIVED_SEGMENTS`` (or an ``_exec_tmp``-prefixed
       basename) marks the path derived;
     - a ``build`` segment immediately followed by an ``outputs`` segment marks
-      the ``**/build/outputs/**`` artifact exception, which wins over derived.
-    Everything else is a CAS-protected source path.
+      the ``**/build/outputs/**`` artifact exception, which wins over derived;
+    - a basename in ``_GIT_CREDENTIAL_FILES`` (``.git-credentials``/``.netrc``)
+      marks the path derived, keeping pure credential files out of CAS.
+    Everything else is a CAS-protected source path, including ``.git`` metadata.
     """
     parts = [part for part in str(rel_path).replace("\\", "/").split("/") if part not in {"", "."}]
     for index, part in enumerate(parts):
@@ -37,6 +71,8 @@ def classify_publish_path(rel_path: str) -> PublishClass:
     for part in parts:
         if part in DERIVED_SEGMENTS:
             return "derived"
+    if parts and parts[-1] in _GIT_CREDENTIAL_FILES:
+        return "derived"
     if parts and parts[-1].startswith(_EXEC_TMP_PREFIX):
         return "derived"
     return "source"
