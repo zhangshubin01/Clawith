@@ -59,7 +59,7 @@ core memory 无条件注入）；没有一家靠正则猜「用户是否要继�
 **每会话一节**、同会话最新替换；仿 `清单.md` 解析/渲染模式，外来内容原样保留）：
 
 ```markdown
-## task:<session_id> | phase: active | 目标：<goal 截断 100 字符> | run:<run_id> | 2026-09-01 20:00
+## task:<session_id> | phase: active | ended: completed | 目标：<goal 截断 100 字符> | run:<run_id> | 2026-09-01 20:00
 未决事项：list:<list_id> 清单「title」（N 项）
 ```
 
@@ -79,7 +79,10 @@ core memory 无条件注入）；没有一家靠正则猜「用户是否要继�
 | `completed` 且有未决事项 | active | 已交付、仍有未决事项 |
 
 未决事项 = 收尾时刻 open_items 中的 `list_ref==memory/清单.md` 指针行（direct chat 下
-open_items 的唯一写入方就是 R1，即「清单已交付但条目未执行」）。注：direct chat 的
+open_items 的唯一写入方就是 R1，即「清单已交付但条目未执行」）。`ended` 记录 run 落点
+状态（completed/waiting_user/failed/cancelled），注记措辞按 **(phase, ended)** 派生——
+blocked 相位因此可区分 failed/cancelled 措辞，phase 枚举本身保持 dsh GoalPhase
+四相位不变。注：direct chat 的
 open_items 无 resolve 方，指针长期留存 → phase=active 可持续多轮——这是期望语义
 （「继续」时始终有据可依），文档化而非视为缺陷。注记中的清单 title/count 是任务状态
 **写时刻的快照**，清单后续版本合并更新标题后可能漂移——注记只作指针语义，可接受。
@@ -101,8 +104,7 @@ open_items 无 resolve 方，指针长期留存 → phase=active 可持续多轮
 幂等（同会话节整体替换，重放/重试收敛到同内容）；写失败 log 不阻塞收尾
 （沿用 R1 的 best-effort 定位）；前置 handler 失败时（`checkpoint_side_effects.py:1042-1053`
 错误只 append 不中断），TerminalHandler 读到的 open_items 可能欠账、phase 偏 complete——
-fail-open 接受，不阻塞收尾；R1 对 `completed` 的清单落库不改（waiting 清单
-落库=事故驱动观察项，本票不扩）。
+fail-open 接受，不阻塞收尾；waiting 收尾的清单落库由票 06（D-12）独立承担，不在本票。
 
 ### 3.4 注入侧（票 05）：phase≠complete 口径，无条件注入（D-9）
 
@@ -119,7 +121,8 @@ fail-open 接受，不阻塞收尾；R1 对 `completed` 的清单落库不改（
   - complete → 「上一轮已完成」（行为不变）
   - active → 「上一轮任务已交付，仍有未决事项」
   - paused → 「上一轮任务暂停，等待你的回复」
-  - blocked → 「上一轮任务未完成（已中断）」
+  - blocked + ended=failed → 「上一轮任务未完成（未成功）」
+  - blocked + ended=cancelled → 「上一轮任务未完成（已取消）」
   - state 缺失（legacy）→ 默认「上一轮已完成」（向后兼容，参数缺省 None）
 - **桥不活跃**（上一 run 已被 compact 移出窗口）且 phase≠complete：prepend 独立注记
   （R3 `render_retrieval_note` 同款过去时框架）：
@@ -141,16 +144,22 @@ fail-open 接受，不阻塞收尾；R1 对 `completed` 的清单落库不改（
   无 schema 膨胀——延续 D4 克制）；不新增模型工具。
 - **D-10 容错**：写失败不阻塞收尾（log+continue）、读失败不阻塞开局（无注记）；
   重放幂等。
-- **D-11 模型可见契约**：4 条 phase 短语 + 注记模板为契约常量，同步
-  backend/AGENTS.md「Model-facing contracts」段，单测钉死措辞（test_list_persistence.py:286
-  同款模式）。
+- **D-11 模型可见契约**：5 条短语（按 (phase, ended) 派生；blocked 区分 failed/cancelled，
+  phase 枚举不变）+ 注记模板为契约常量，同步 backend/AGENTS.md「Model-facing contracts」
+  段，单测钉死措辞（test_list_persistence.py:286 同款模式）。
+- **D-12 waiting 清单落库纳入本票群（票 06）**：对齐 dsh append-only 事件日志哲学
+  （一切投影派生、无「非终态不持久」）与 OpenHands 状态转换事件持久化（goal 状态非
+  只在 complete 时记录）；R1 触发条件扩 waiting_*、`_closing_content` 增 waiting_request
+  分支；parse_numbered_list 拒收非清单内容天然安全（waiting 提问多数无清单则 no-op）。
 
 ## 4. 挂点与影响面（已核实）
 
 - 新增文件：`session_task_state.py`（纯函数 + 3 个类：WaitingHandler / TerminalHandler / Loader）。
 - 改动文件：
-  - `worker_service.py`（两处注册：checkpoint_handlers 元组加 WaitingHandler、
-    terminal_handlers 元组末尾加 TerminalHandler）；
+  - `worker_service.py`（三处注册：checkpoint_handlers 元组加 WaitingHandler（票 04）与
+    waiting 清单落库 handler（票 06）、terminal_handlers 元组末尾加 TerminalHandler）；
+  - `list_persistence.py`（票 06：触发条件扩 waiting_*、`_closing_content` 增
+    waiting_request 分支）；
   - `context_builder.py`（构造参数 `task_state_loader`；build 内 load + 透传 phase +
     bridge-inactive 注记 prepend；挂点 :644-659 区域）；
   - `thread_visibility.py`（`bound_current_run_window`/`_prior_run_summary` 增
@@ -167,7 +176,10 @@ fail-open 接受，不阻塞收尾；R1 对 `completed` 的清单落库不改（
     round-trip、同会话替换、外来内容保留；WaitingHandler 仅 waiting_* 触发、direct-chat
     守卫；TerminalHandler 四映射 + 指针行 upsert + 重放幂等；Loader 命中/缺失/fail-open/
     自 run 守卫；契约短语钉死。
-  - `test_thread_visibility.py`：4 phase 措辞 + legacy 缺省 + 桥活跃透传。
+  - `test_thread_visibility.py`：5 短语措辞（blocked 按 ended 区分）+ legacy 缺省 +
+    桥活跃透传。
+  - `test_list_persistence.py`（票 06）：waiting_* 触发落库 / waiting 提问无清单 no-op /
+    completed 行为不变。
   - context build 集成：bridge-active 注记进桥、bridge-inactive 独立注记、
     complete 零注记（断言模型窗口内容）。
   - `test_agent_runtime_worker_service.py`：两处注册接线与顺序（TerminalHandler 位末）。
@@ -179,8 +191,8 @@ fail-open 接受，不阻塞收尾；R1 对 `completed` 的清单落库不改（
   旧 checkpoint 不含任务状态（新代码未部署时无写入），phase 注记/paused 落库的
   证据链 = 单测 + 部署后 §5 端到端场景，不由重放产出。
 - **端到端（部署后）**：①「有哪些可优化」→清单→新消息「继续」→注记注入、模型延续
-  不反问；②模型反问（waiting）→用户回复→同 run 续接、无「已完成」误报；③completed
-  无未决→窗口零增量（旧行为）。
+  不反问；②模型反问（waiting）→**清单落库**（票 06）→用户回复→同 run 续接、无「已
+  完成」误报；③completed 无未决→窗口零增量（旧行为）。
 
 ## 6. 票映射
 
@@ -188,13 +200,13 @@ fail-open 接受，不阻塞收尾；R1 对 `completed` 的清单落库不改（
 |---|---|---|
 | 04 | 会话任务状态确定性落库（waiting 缺口 + 终态映射 + 文件/指针） | 无 |
 | 05 | phase-aware 桥措辞 + bridge-inactive 独立注记（注入口径扩展） | 04 |
+| 06 | R1 扩 waiting 触发：waiting 收尾清单确定性落库（D-12） | 无 |
 
 跨线程任务快照（store 泛化 / session mention 协议）**暂不立票**，事故驱动。
 
 ## 7. 范围外与观察项
 
 - 跨线程（新会话）任务快照与显式 mention（用户裁定暂不做）。
-- waiting 收尾的清单落库（R1 扩 waiting 触发；无事故不扩）。
 - group 会话任务状态（D-6）。
 - 未决事项执行完毕后指针清理（R1 版本合并已有替代路径，观察即可）。
 - 部署：本票群与 39bad6c8 均待部署（红线：需用户明确说「部署」）。
