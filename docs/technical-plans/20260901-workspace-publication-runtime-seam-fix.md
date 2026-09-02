@@ -1,6 +1,6 @@
 # 2026-09-01 工作区发布冲突第三代修复（Runtime 直写 seam + 熔断重置语义）
 
-- **状态**：待评审
+- **状态**：已实施（2026-09-01 三修复全部落地，测试/ruff/arch-guard 全绿，待部署上线）
 - **前置**：
   - [ADR-0011](../adr/0011-workspace-direct-write-run-refresh.md)（直写工具刷新 Run 工作区，646be775 已部署）
   - [20260901-workspace-publication-p0-fix.md](./20260901-workspace-publication-p0-fix.md)（P0 分层发布 + P0.5 文案与熔断，63b70e91 已部署）
@@ -13,6 +13,8 @@
 |---|---|---|
 | v1 | 2026-09-01 | 初稿：事故证据链 + 两处设计缺陷 + 修复方案 |
 | v2 | 2026-09-01 | R2 评审并入：①指纹改熔断器内计算 sha256(name+error_code+content)（content_hash 不在工具消息里，`_result_message` 只透传 4 个 metadata 字段）；②指纹熔断升为必做（封堵「任意写成功即重置」的 ping-pong 洞）；③重置谓词独立 frozenset（不复用 `_WORKSPACE_WRITE_TOOLS`，语义不同） |
+| v3 | 2026-09-01 | R4 全文重审（逐处对照代码实读）：行号勘误（execute_builtin_tool_outcome :5168、APK refresh :5097、补列 :3349、调用点共 8 处）；成功出口精确化为双出口（主路径 + recovered 恢复路径）；legacy 调用点零改动表述；§1.1 content_hash 限定为账本层；§3.4 测试骨架改按实际命名引用；§5.2 mark_stale 落点精确化（flush 内统一，4 调用方清单） |
+| v4 | 2026-09-02 | R5 评审（结合真实任务日志）：§1.2 补诱因触发器活证据（run c52c5ffc 沙箱 .git 空壳、5 次 git 失败实锤）；观察结论=22h 零冲突为诱因未复现（修复未部署），方案容忍该诱因 |
 
 ## 1. 问题陈述（已核实的事实）
 
@@ -20,7 +22,7 @@
 
 部署 63b70e91（含 P0 分层发布 + P0.5 熔断）之后，真实 run 仍出现连续 8 次
 `workspace_sync_conflict`（12:19:22 → 12:21:59，每次 attempt=1，8 个独立 execute_code 调用，
-`content_hash` 全等 `b592ba57…`，即模型反复重跑同一段脚本）。冲突路径为 3 个**源码**文件
+账本层 outcome `content_hash` 全等 `b592ba57…`，即模型反复重跑同一段脚本）。冲突路径为 3 个**源码**文件
 （CalculatorReducer/UiState/ViewModel.kt），不在 L2 派生产物黑名单内。模型最终在第 8 次后
 改走 edit_file（12:24:02 成功）才脱困——「自愈」是模型换工具，不是状态自愈。
 
@@ -31,11 +33,11 @@
 1. `use_run_workspace` 按 run 每进程只物化一次临时工作区，manifest 的
    `base_version_token/base_hash` 是物化时刻快照；execute_code 发布时用 manifest token 做 CAS。
 2. 直写工具走 typed-outcome 路径：Runtime 的 `execute_builtin_tool_outcome`
-   （agent_tools.py:5162）把 `edit_file` 分发给 `_edit_file_outcome`（:4490）、`write_file` 给
+   （agent_tools.py:5168）把 `edit_file` 分发给 `_edit_file_outcome`（:4490）、`write_file` 给
    `_write_file_outcome`（:3823）、`move_file`/`delete_file` 给 :4181/:4338。**这四个函数没有
-   任何 `_refresh_run_workspace_after_direct_write` 调用**（全文件 grep 仅 :2185/:2191 位于
-   `flush_temp_workspace`，:3317/:3348/:3375/:3426 位于 legacy `_execute_workspace_mutation`，
-   :5091 位于 android_compile APK 回传）。
+   任何 `_refresh_run_workspace_after_direct_write` 调用**（全文件 grep 共 8 处调用点、全部不在
+   typed 路径：:2185/:2191 位于 `flush_temp_workspace`，:3317/:3348/:3349/:3375/:3426 位于
+   legacy `_execute_workspace_mutation`，:5097 位于 android_compile APK 回传）。
 3. ADR-0011 选择的接缝 `_execute_workspace_mutation` 如今只剩两个调用方：审批后执行
    `_execute_tool_direct`（无 run 上下文，refresh 必然 no-op）与 legacy 字符串分发——Runtime
    从不经过它。typed-outcome 迁移早在 3d359c28/ad606146 完成，**ADR-0011 撰写时前提已过时**。
@@ -50,6 +52,13 @@
 5. 诱因（非根因）：63b70e91 的 L2 派生产物过滤把 `.git` 排出沙箱物化 → 模型在沙箱内
    `git init` 重建并 fetch/checkout（12:16–12:18）→ 代码改掉 Calculator 四件套 .kt。冲突本身
    是**保护性**的（挡下了用远端内容覆盖 12:14 的本地新编辑），损失只是 8 次白跑。
+6. **诱因触发器仍然活着（09-02 真实任务日志实锤）**：run c52c5ffc（agent 950a1943，mydome1
+   项目）连续 5 次 execute_code git 操作全败（`sandbox_execution_failed`，exit 1/128）——沙箱内
+   `/workspace/mydome1/.git` 只剩空壳目录（ls -la 可见目录、git 报 not a git repository），
+   而 storage 侧 `.git/HEAD`、`refs/heads/f_android_ai`、`logs/` 均完整可读。L2 物化排除把
+   `.git` **内容**一并滤掉，模型在沙箱内无法使用 git——这正是 12:16「git init 重建」的触发器。
+   当前模型未走 git init 路径故无冲突；修复一+三组合后，即使该诱因链再触发（init→checkout→
+   改文件→flush），直写后 manifest 已刷新、真冲突也 1 败即重新物化，不再有 CAS 连败风暴。
 
 **层二：P0.5 熔断的重置语义与它自己的 remediation 文案自相矛盾。**
 
@@ -64,7 +73,7 @@ streak（:70-72），测试 `test_workspace_sync_conflict_breaker_resets_on_othe
 
 | 事实 | 证据 |
 |---|---|
-| typed 四函数零 refresh 调用 | 全文件 grep `_refresh_run_workspace_after_direct_write` 仅 7 处，均不在 typed 路径 |
+| typed 四函数零 refresh 调用 | 全文件 grep `_refresh_run_workspace_after_direct_write` 共 8 处调用点，均不在 typed 路径 |
 | legacy 钩子对 Runtime 不可达 | `_execute_workspace_mutation` 仅 `_execute_tool_direct` 与 legacy 分发调用 |
 | manifest base 陈旧是 8 连败直接原因 | 容器内 manifest.json + stat + 8 条 WorkspaceFlushConflict 日志，expected/current token 全同 |
 | 直写刷新确实没发生 | 12:00–12:19 日志窗口零直写 refresh 行（只有 2 条 APK） |
@@ -94,14 +103,18 @@ streak（:70-72），测试 `test_workspace_sync_conflict_breaker_resets_on_othe
 1. `_refresh_run_workspace_after_direct_write`（agent_tools.py:2207）增加
    `run_id: str | None = None` 参数：显式传入时优先于 contextvar（`sandbox_run_scope_id`），
    `None` 时回退 contextvar（兼容审批路径等无 run 上下文调用点，行为不变）。
-2. 四个 typed 直写函数在成功出口（`discard_candidate` 之后、`return _typed_success(...)`
-   之前）各加一个 refresh 调用，显式传 `run_id=runtime_run_id`：
+2. 四个 typed 直写函数在**每个成功出口**都加 refresh，显式传 `run_id=runtime_run_id`。
+   每个函数有两个成功出口、都要挂：主路径出口（`discard_candidate` 之后、
+   `return _typed_success(...)` 之前）与 recovered 恢复成功出口（写异常后
+   `_recover_workspace_candidate` 返回 recovered 的
+   `return _typed_success("…completed and verified.")`，同样是持久化写成功）：
    - `_edit_file_outcome`：`await _refresh_run_workspace_after_direct_write(agent_id, result.path, run_id=runtime_run_id)`
    - `_write_file_outcome`：同上（`write_result.path`；append 模式 refresh 读的是写后终态，天然正确）
    - `_move_file_outcome`：目标 `data` 刷新 + 源 `deleted=True` 刷新
    - `_delete_file_outcome`：`deleted=True` 刷新
-3. legacy `_execute_workspace_mutation` 内 :3317/:3348/:3375/:3426 的调用改为走同一 helper
-   （不加 run_id，回退 contextvar），删除重复逻辑——**两个 seam 一个实现**，杜绝第三次接错。
+3. legacy `_execute_workspace_mutation` 内 :3317/:3348/:3349/:3375/:3426 的调用**零改动**
+   （不加 run_id，回退 contextvar，行为不变）——typed 与 legacy **两个 seam 一个实现**，
+   杜绝第三次接错。
 4. 不传 `skip_workspace`：直写工具的 workspace 对象不是 run 工作区，无身份判等问题。
 
 ### 3.2 代码落点（全量清单）
@@ -109,10 +122,10 @@ streak（:70-72），测试 `test_workspace_sync_conflict_breaker_resets_on_othe
 | 文件 | 位置 | 改动 |
 |---|---|---|
 | agent_tools.py | `_refresh_run_workspace_after_direct_write`（:2207） | 加 `run_id` 参数与取值优先级 |
-| agent_tools.py | `_write_file_outcome`（:3823） | 成功出口加 refresh（run_id=runtime_run_id） |
-| agent_tools.py | `_move_file_outcome`（:4181） | 成功出口加目标 refresh + 源 deleted 刷新 |
-| agent_tools.py | `_delete_file_outcome`（:4338） | 成功出口加 deleted=True 刷新 |
-| agent_tools.py | `_edit_file_outcome`（:4490） | 成功出口加 refresh（run_id=runtime_run_id） |
+| agent_tools.py | `_write_file_outcome`（:3823） | 两个成功出口均加 refresh（主路径 + recovered，run_id=runtime_run_id） |
+| agent_tools.py | `_move_file_outcome`（:4181） | 两个成功出口均加目标 refresh + 源 deleted 刷新 |
+| agent_tools.py | `_delete_file_outcome`（:4338） | 两个成功出口均加 deleted=True 刷新 |
+| agent_tools.py | `_edit_file_outcome`（:4490） | 两个成功出口均加 refresh（主路径 + recovered，run_id=runtime_run_id） |
 | agent_tools.py | legacy `_execute_workspace_mutation` | 调用收敛到同一 helper（无行为变化） |
 
 ### 3.3 安全与副作用排查（已逐项核实）
@@ -132,12 +145,14 @@ streak（:70-72），测试 `test_workspace_sync_conflict_breaker_resets_on_othe
 
 - 新：typed `_edit_file_outcome`/`_write_file_outcome` 写成功后，同一 run 工作区 manifest
   对应条目 base_version/base_hash 更新为写后值；随后 execute_code 修改同路径 flush 不再冲突
-  （复用 `tests/test_agent_tools_storage_workspace.py` 的 T1–T4 骨架，改为走 typed 入口 +
-  `run_id` 显式传入）。
+  （复用 `tests/test_agent_tools_storage_workspace.py` 现有的 storage 直写/物化测试骨架
+  ——`test_agent_file_tools_use_storage_paths`、`test_temp_workspace_materializes_*` 等——改为走
+  typed 入口 + `run_id` 显式传入）。
 - 新：`_move_file_outcome` 目标刷新 + 源删除；`_delete_file_outcome` 删除路径后 manifest
   条目移除、temp 文件移除。
 - 新：`runtime_run_id=None` 且无 contextvar 时 refresh no-op（审批路径行为不变）。
-- 既有 T1–T4 与 `test_workspace_publication_filter.py` 全量保持绿。
+- 既有 storage/workspace 直写与物化测试（`test_agent_tools_storage_workspace.py`）与
+  `test_workspace_publication_filter.py` 全量保持绿。
 
 ## 4. 修复二（P1）：熔断重置语义收紧
 
@@ -196,7 +211,7 @@ streak（:70-72），测试 `test_workspace_sync_conflict_breaker_resets_on_othe
 | 文件 | 位置 | 改动 |
 |---|---|---|
 | run_workspace.py | `_run_workspace_tasks` 生命周期 | 增加 `mark_stale(run_id)`（或 close+重建路径），带锁 + identity 校验 |
-| agent_tools.py | `flush_temp_workspace` 冲突分支 | run 工作区身份下调用 `mark_stale` |
+| agent_tools.py | `flush_temp_workspace` 冲突出口（run_id 非空时） | 在函数内部统一调用 `mark_stale`——4 个调用方（:2735 legacy sync_back / :2784 typed execute_code / :3130 gateway 分层发布 / :3205 candidate 分层发布）全部自动受益，无需逐个改 |
 
 ### 5.3 测试
 
@@ -233,5 +248,6 @@ streak（:70-72），测试 `test_workspace_sync_conflict_breaker_resets_on_othe
 | 重新物化安全网 | 第一代事故「方案B」存档结论（否决原因=只治标）+ 本方案补充论证（与熔断互补） | 降级为 P2 兜底，不与修复一重复 |
 | 业界对照（外部） | reference-projects inventory：ADR-0011 业界对照表（OpenHands bind mount / CubeSandbox / gptme bwrap / SWE-agent 上传） | 无新增外部决策；维持「不退回裸挂载」结论 |
 | claw-code 血缘上游核查 | claw-code 源码（本仓库血缘上游） | 上游无直写工具实现、无 CAS/manifest（单一共享视图，与 OpenHands/CubeSandbox/E2B/gptme/SWE-agent 同类），印证 ADR-0011 业界对照表；发布机制无法从上游借鉴，不改变任何决策 |
+| `.git` 物化排除（R6 评审发现） | workspace_policy.py `DERIVED_SEGMENTS`（.git 与 build 同级）+ OpenHands/E2B 本地仓库实核 | 业界单一共享视图无「物化/发布双集合」先例，本仓库分层发布是自研设计；`.git` 被一刀切归 derived 致沙箱 git 不可用（c52c5ffc 实锤），属 L2 设计修订，独立小票，不进本方案三修复范围 |
 | 熔断重置语义外部对应物 | 外部 skills / 参考仓库检索 | 无权威对应物（N/A）；「只读不重置」决策仅以内源证据为准（P0.5 文案 + 事故账本），已显式声明 |
 | 评估基准（外部） | SWE-bench / Terminal-Bench / RE-Bench | 不适用：本决策的验收标准是真实 run 行为（Langfuse/账本），已显式声明 |

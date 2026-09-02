@@ -70,3 +70,16 @@ write 到物化集之外路径时，刷新顺带把该文件物化进 temp + man
 
 直写工具下沉进执行环境（与 execute_code 共享同一文件视图），从结构上消灭双写面；
 读侧一致性提示（execute_code 物化时发现 storage 比 manifest 新 → 告知模型）作为后续改进。
+
+## 勘误（2026-09-01，随第三代修复落库）
+
+1. **前提已过时**：本 ADR 决策节假定的接缝「Mutation 工具族
+   （`_execute_workspace_mutation`）」不再承载真实 run 的直写——Runtime 自
+   3d359c28/ad606146 起走 typed-outcome 路径（`_write_file_outcome` 等），646be775 实现的
+   钩子因此对真实 run **从未生效**（2026-08-30 连 8 败事故=同一根因第二次复发，见记忆
+   workspace-sync-conflict-root-cause）。
+2. **修正后的接缝清单**：见 `docs/technical-plans/20260901-workspace-publication-runtime-seam-fix.md`
+   §3.2——typed 四函数（write/move/delete/edit）八个成功出口（主路径 + recovered）挂 refresh，
+   legacy `_execute_workspace_mutation` 收敛到同一 helper（零行为变化），flush 钩子保持不变。
+3. **经验条款**：接缝类修复必须配「路径级回归测试」（断言刷新生效），否则运行时改道后
+   钩子死亡无人知晓——本 ADR 初版无此类测试，是复发事故的共因。

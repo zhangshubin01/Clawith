@@ -113,7 +113,13 @@ async def use_run_workspace(
 
 
 async def close_run_workspace(run_id: str) -> None:
-    """Discard the materialized workspace owned by one settled Agent loop."""
+    """Discard the materialized workspace: settled Agent loop, or stale view.
+
+    Also the flush-conflict recovery path (ADR-0011 fix three): a conflicted
+    flush means the materialized temp files and manifest trail storage, so
+    discarding them makes the next ``use_run_workspace`` re-materialize from
+    current storage. No-op when no live workspace task exists.
+    """
     task = _run_workspace_tasks.pop(run_id, None)
     if task is None:
         return

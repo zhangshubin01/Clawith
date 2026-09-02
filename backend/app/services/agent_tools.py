@@ -101,6 +101,7 @@ from app.services.sandbox.execution_lease import SandboxExecutionLeaseStore
 from app.services.sandbox.local.run_workspace import (
     RunWorkspaceIdentity,
     TempWorkspaceManifestEntry,
+    close_run_workspace,
     refresh_run_workspace_path,
     use_run_workspace,
 )
@@ -2000,6 +2001,23 @@ async def flush_temp_workspace(
     deleted: list[str] = []
     skipped: list[str] = []
 
+    async def _discard_stale_run_workspace() -> None:
+        # ADR-0011 fix three: a conflicted flush means the materialized run
+        # workspace trails storage — discard it so the next use re-materializes
+        # from current storage (N successive conflicts become 1). CAS semantics
+        # are untouched; if a third party keeps writing, conflicts recur and
+        # the workspace conflict breaker terminates the loop.
+        if not (run_id and conflicted):
+            return
+        try:
+            await close_run_workspace(run_id)
+        except Exception as exc:
+            logger.warning(
+                "[RunWorkspaceMarkStaleFailed] run_id=%s error_type=%s",
+                run_id,
+                type(exc).__name__,
+            )
+
     async with workspace_locks(
         temp_workspace.agent_id,
         selected_paths,
@@ -2098,6 +2116,7 @@ async def flush_temp_workspace(
                     skipped,
                 )
                 if conflict_mode == "fail":
+                    await _discard_stale_run_workspace()
                     return {
                         "updated": updated,
                         "deleted": deleted,
@@ -2167,6 +2186,7 @@ async def flush_temp_workspace(
                     skipped,
                 )
                 if conflict_mode == "fail":
+                    await _discard_stale_run_workspace()
                     return {
                         "updated": updated,
                         "deleted": deleted,
@@ -2195,6 +2215,8 @@ async def flush_temp_workspace(
                 skip_workspace=temp_workspace,
             )
 
+    await _discard_stale_run_workspace()
+
     return {
         "updated": updated,
         "deleted": deleted,
@@ -2208,16 +2230,20 @@ async def _refresh_run_workspace_after_direct_write(
     agent_id: uuid.UUID,
     rel_path: str,
     *,
+    run_id: str | None = None,
     deleted: bool = False,
     skip_workspace=None,
 ) -> None:
     """Refresh the run-scoped workspace after a direct storage write (ADR 0011).
 
-    No-op without an active Run scope (e.g. approval post-processing) or
-    before the run workspace materializes. Best-effort: failures are logged
-    and the previous conflict protection remains the safety net.
+    ``run_id`` explicitly passed by the typed tool outcomes takes precedence;
+    ``None`` falls back to the run-scope contextvar (approval post-processing
+    has neither and stays a no-op). No-op before the run workspace
+    materializes. Best-effort: failures are logged and the previous conflict
+    protection remains the safety net.
     """
-    run_id = sandbox_run_scope_id.get().strip() or None
+    if run_id is None:
+        run_id = sandbox_run_scope_id.get().strip() or None
     if not run_id:
         return
     storage = get_storage_backend()
@@ -3945,6 +3971,11 @@ async def _write_file_outcome(
                         reconciliation_scope,
                         candidate_ref,
                     )
+                    await _refresh_run_workspace_after_direct_write(
+                        agent_id,
+                        path,
+                        run_id=runtime_run_id,
+                    )
                     return _typed_success("Workspace file saved and verified.")
                 return _typed_unknown(
                     "Workspace write outcome requires file reconciliation.",
@@ -3964,6 +3995,11 @@ async def _write_file_outcome(
             reconciliation_scope,
             candidate_ref,
         )
+    await _refresh_run_workspace_after_direct_write(
+        agent_id,
+        write_result.path,
+        run_id=runtime_run_id,
+    )
     return _typed_success(f"{write_result.message}.")
 
 
@@ -4303,6 +4339,17 @@ async def _move_file_outcome(
                         reconciliation_scope,
                         candidate_ref,
                     )
+                    await _refresh_run_workspace_after_direct_write(
+                        agent_id,
+                        normalize_workspace_path(destination_path),
+                        run_id=runtime_run_id,
+                    )
+                    await _refresh_run_workspace_after_direct_write(
+                        agent_id,
+                        normalize_workspace_path(source_path),
+                        deleted=True,
+                        run_id=runtime_run_id,
+                    )
                     return _typed_success("Workspace move completed and verified.")
                 return _typed_unknown(
                     "Workspace move requires file reconciliation.",
@@ -4332,6 +4379,17 @@ async def _move_file_outcome(
                 ),
             )
         await reconciliation_service.discard_candidate(reconciliation_scope, candidate_ref)
+    await _refresh_run_workspace_after_direct_write(
+        agent_id,
+        normalize_workspace_path(destination_path),
+        run_id=runtime_run_id,
+    )
+    await _refresh_run_workspace_after_direct_write(
+        agent_id,
+        normalize_workspace_path(source_path),
+        deleted=True,
+        run_id=runtime_run_id,
+    )
     return _typed_success(result.message)
 
 
@@ -4465,6 +4523,12 @@ async def _delete_file_outcome(
                         reconciliation_scope,
                         candidate_ref,
                     )
+                    await _refresh_run_workspace_after_direct_write(
+                        agent_id,
+                        path,
+                        deleted=True,
+                        run_id=runtime_run_id,
+                    )
                     return _typed_success("Workspace deletion completed and verified.")
                 return _typed_unknown(
                     "Workspace deletion requires file reconciliation.",
@@ -4484,6 +4548,12 @@ async def _delete_file_outcome(
             reconciliation_scope,
             candidate_ref,
         )
+    await _refresh_run_workspace_after_direct_write(
+        agent_id,
+        path,
+        deleted=True,
+        run_id=runtime_run_id,
+    )
     return _typed_success(result.message)
 
 
@@ -4608,6 +4678,11 @@ async def _edit_file_outcome(
                         reconciliation_scope,
                         candidate_ref,
                     )
+                    await _refresh_run_workspace_after_direct_write(
+                        agent_id,
+                        path,
+                        run_id=runtime_run_id,
+                    )
                     return _typed_success("Workspace edit completed and verified.")
                 return _typed_unknown(
                     "Workspace edit requires file reconciliation.",
@@ -4627,6 +4702,11 @@ async def _edit_file_outcome(
             reconciliation_scope,
             candidate_ref,
         )
+    await _refresh_run_workspace_after_direct_write(
+        agent_id,
+        result.path,
+        run_id=runtime_run_id,
+    )
     replaced = count if replace_all else 1
     return _typed_success(
         f"Replaced {replaced} occurrence(s) in {result.path}."

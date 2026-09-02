@@ -14,6 +14,8 @@ import pytest
 from app.services import agent_tools
 from app.services.agent_runtime.tool_repair_budget import (
     WORKSPACE_SYNC_CONFLICT_LIMIT,
+    ToolRepairBudgetError,
+    _content_fingerprint,
     apply_workspace_sync_conflict,
 )
 from app.services.sandbox.workspace_policy import (
@@ -471,7 +473,7 @@ async def test_materialize_skips_derived(monkeypatch, tmp_path):
         temp_ws.cleanup()
 
 
-# ── P0.5 circuit breaker (same-error streak) ──
+# ── P0.5 circuit breaker (conflict streak + content fingerprints) ──
 
 
 def _conflict_message() -> dict:
@@ -486,6 +488,36 @@ def _conflict_message() -> dict:
     }
 
 
+def _read_result() -> dict:
+    return {
+        "name": "read_file",
+        "execution_status": "succeeded",
+        "model_action": "continue",
+        "side_effect_state": "confirmed",
+        "content": "content",
+        "tool_call_id": "call-read",
+    }
+
+
+def _durable_write_result(tool_name: str = "edit_file") -> dict:
+    return {
+        "name": tool_name,
+        "execution_status": "succeeded",
+        "model_action": "continue",
+        "side_effect_state": "confirmed",
+        "content": "updated",
+        "tool_call_id": "call-write",
+    }
+
+
+def _default_conflict_fingerprint() -> str:
+    return _content_fingerprint(
+        "execute_code",
+        "workspace_sync_conflict",
+        "Workspace publication conflicted.",
+    )
+
+
 def test_workspace_sync_conflict_breaker_trips_at_limit():
     assert WORKSPACE_SYNC_CONFLICT_LIMIT == 3
     budget: object = None
@@ -497,7 +529,7 @@ def test_workspace_sync_conflict_breaker_trips_at_limit():
     assert terminal is True
 
 
-def test_workspace_sync_conflict_breaker_resets_on_other_tool_result():
+def test_workspace_sync_conflict_breaker_keeps_streak_across_read_results():
     budget: object = None
     for step in range(2):
         budget = apply_workspace_sync_conflict(
@@ -505,24 +537,184 @@ def test_workspace_sync_conflict_breaker_resets_on_other_tool_result():
             _conflict_message(),
             model_step=step,
         ).budget
-    # Any other tool result (success, another failure, another tool) breaks
-    # the streak: the model changed course.
-    other = apply_workspace_sync_conflict(
-        budget,
-        {
-            "name": "read_file",
-            "execution_status": "succeeded",
-            "model_action": "continue",
-            "side_effect_state": "confirmed",
-            "content": "content",
-            "tool_call_id": "call-2",
-        },
-        model_step=3,
-    )
+    # A read-only success is part of the P0.5 remediation dance (read the
+    # current file before editing it): it must NOT reset the streak, or the
+    # breaker could never reach the limit.
+    other = apply_workspace_sync_conflict(budget, _read_result(), model_step=3)
     assert other.terminal is False
+    assert other.budget["count"] == 2  # streak kept accumulating
     resumed = apply_workspace_sync_conflict(
         other.budget,
         _conflict_message(),
         model_step=4,
     )
-    assert resumed.terminal is False  # streak restarted at 1
+    assert resumed.terminal is True  # third conflict in the streak trips it
+
+
+def test_conflict_streak_survives_read_interleaving():
+    """Conflict → read → conflict → read → conflict trips on the 3rd (be39c1ad)."""
+    budget: object = None
+    transition = None
+    for conflict_index in range(WORKSPACE_SYNC_CONFLICT_LIMIT):
+        transition = apply_workspace_sync_conflict(
+            budget,
+            _conflict_message(),
+            model_step=conflict_index * 2,
+        )
+        budget = transition.budget
+        if conflict_index < WORKSPACE_SYNC_CONFLICT_LIMIT - 1:
+            interleaved = apply_workspace_sync_conflict(
+                budget,
+                _read_result(),
+                model_step=conflict_index * 2 + 1,
+            )
+            assert interleaved.terminal is False
+            budget = interleaved.budget
+    assert transition is not None
+    assert transition.terminal is True
+
+
+def test_workspace_sync_conflict_breaker_resets_on_durable_write_success():
+    budget: object = None
+    for step in range(2):
+        budget = apply_workspace_sync_conflict(
+            budget,
+            _conflict_message(),
+            model_step=step,
+        ).budget
+    fingerprint = _default_conflict_fingerprint()
+    assert budget["count"] == 2
+    assert budget["fingerprints"] == {fingerprint: 2}
+    # A succeeded durable write resets the streak, but the fingerprints
+    # survive: they accumulate across resets so the ping-pong hole stays shut.
+    reset = apply_workspace_sync_conflict(budget, _durable_write_result(), model_step=3)
+    assert reset.terminal is False
+    assert reset.budget["count"] == 0
+    assert reset.budget["fingerprints"] == {fingerprint: 2}
+    # A conflict on different content restarts the streak at 1 and does not
+    # trip the fingerprint breaker.
+    resumed = apply_workspace_sync_conflict(
+        reset.budget,
+        {**_conflict_message(), "content": "a different conflict body"},
+        model_step=4,
+    )
+    assert resumed.terminal is False
+    assert resumed.budget["count"] == 1
+    assert len(resumed.budget["fingerprints"]) == 2
+
+
+def test_unrelated_failure_neither_resets_nor_counts():
+    budget: object = None
+    budget = apply_workspace_sync_conflict(budget, _conflict_message(), model_step=0).budget
+    unchanged = apply_workspace_sync_conflict(
+        budget,
+        {
+            "name": "execute_code",
+            "execution_status": "failed",
+            "error_code": "sandbox_execution_failed",
+            "model_action": "continue",
+            "side_effect_state": "unknown",
+            "content": "exit 1",
+            "tool_call_id": "call-other",
+        },
+        model_step=1,
+    )
+    assert unchanged.terminal is False
+    assert unchanged.budget == budget  # no reset, no count
+    next_conflict = apply_workspace_sync_conflict(
+        unchanged.budget,
+        _conflict_message(),
+        model_step=2,
+    )
+    assert next_conflict.terminal is False
+    assert next_conflict.budget["count"] == 2
+
+
+def test_same_content_fingerprint_trips_across_write_resets():
+    """conflictA → edit success → conflictA → edit success → conflictA → terminal."""
+    budget: object = None
+    transition = None
+    for round_index in range(WORKSPACE_SYNC_CONFLICT_LIMIT):
+        transition = apply_workspace_sync_conflict(
+            budget,
+            _conflict_message(),
+            model_step=round_index * 2,
+        )
+        budget = transition.budget
+        if round_index < WORKSPACE_SYNC_CONFLICT_LIMIT - 1:
+            assert transition.terminal is False
+            budget = apply_workspace_sync_conflict(
+                budget,
+                _durable_write_result(),
+                model_step=round_index * 2 + 1,
+            ).budget
+            assert budget["count"] == 0  # the streak resets each time...
+    assert transition is not None
+    # ...but the same content fingerprint accumulated to the limit and tripped.
+    assert transition.terminal is True
+    assert transition.budget["count"] == 1
+    assert transition.budget["fingerprints"][_default_conflict_fingerprint()] == WORKSPACE_SYNC_CONFLICT_LIMIT
+
+
+def test_legacy_version_1_budget_still_parses_and_counts():
+    legacy = {"version": 1, "count": 2}
+    transition = apply_workspace_sync_conflict(legacy, _conflict_message(), model_step=9)
+    assert transition.terminal is True  # 2 + 1 reaches the limit
+    assert transition.budget["version"] == 2
+    assert transition.budget["count"] == 3
+    assert transition.budget["fingerprints"] == {_default_conflict_fingerprint(): 1}
+
+
+def test_legacy_version_1_budget_resets_on_durable_write():
+    legacy = {"version": 1, "count": 2}
+    reset = apply_workspace_sync_conflict(legacy, _durable_write_result(), model_step=5)
+    assert reset.terminal is False
+    assert reset.budget == {"version": 2, "count": 0, "fingerprints": {}}
+
+
+def test_conflict_fingerprints_are_capped_at_sixteen():
+    budget: object = None
+    for index in range(20):
+        budget = apply_workspace_sync_conflict(
+            budget,
+            {**_conflict_message(), "content": f"conflict-{index}"},
+            model_step=index,
+        ).budget
+    assert len(budget["fingerprints"]) == 16
+    # Insertion order is time order: the four oldest were dropped, the newest
+    # sixteen survive.
+    assert _content_fingerprint("execute_code", "workspace_sync_conflict", "conflict-19") in budget["fingerprints"]
+    assert _content_fingerprint("execute_code", "workspace_sync_conflict", "conflict-0") not in budget["fingerprints"]
+    assert _content_fingerprint("execute_code", "workspace_sync_conflict", "conflict-3") not in budget["fingerprints"]
+    assert _content_fingerprint("execute_code", "workspace_sync_conflict", "conflict-4") in budget["fingerprints"]
+
+
+def test_oversized_stored_budget_is_trimmed_on_parse():
+    oversized = {
+        "version": 2,
+        "count": 0,
+        "fingerprints": {f"fp-{index}": 1 for index in range(30)},
+    }
+    transition = apply_workspace_sync_conflict(oversized, _read_result(), model_step=1)
+    assert len(transition.budget["fingerprints"]) == 16
+    assert "fp-29" in transition.budget["fingerprints"]
+    assert "fp-0" not in transition.budget["fingerprints"]
+
+
+@pytest.mark.parametrize(
+    "invalid",
+    [
+        {"version": 3, "count": 0},
+        {"version": 2, "count": -1},
+        {"version": 2, "count": True},
+        {"version": 2, "count": 1, "fingerprints": "nope"},
+        {"version": 2, "count": 1, "fingerprints": {"fp": 0}},
+        {"version": 2, "count": 1, "fingerprints": {"fp": -2}},
+        {"version": 2, "count": 1, "fingerprints": {"fp": True}},
+        {"version": 2, "count": 1, "fingerprints": {"": 1}},
+        "not-a-mapping",
+    ],
+)
+def test_malformed_conflict_budget_raises(invalid):
+    with pytest.raises(ToolRepairBudgetError):
+        apply_workspace_sync_conflict(invalid, _conflict_message(), model_step=0)

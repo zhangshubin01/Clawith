@@ -17,6 +17,20 @@ WORKSPACE_SYNC_CONFLICT_FAILURE_MESSAGE = (
     "the Run was stopped to prevent further ineffective retries."
 )
 _REPAIRABLE_MODEL_ACTIONS = frozenset({"repair_arguments", "choose_other_tool"})
+# Distinct from node_executor's _WORKSPACE_WRITE_TOOLS (memory-gate counting):
+# these tools persist workspace progress, so a succeeded result means the
+# workspace genuinely moved forward and may reset the conflict streak.
+_DURABLE_WORKSPACE_PROGRESS_TOOLS = frozenset(
+    {
+        "write_file",
+        "edit_file",
+        "move_file",
+        "delete_file",
+        "execute_code",
+        "android_compile",
+    }
+)
+_CONFLICT_FINGERPRINT_CAP = 16
 
 
 class ToolRepairBudgetError(ValueError):
@@ -38,15 +52,39 @@ class WorkspaceConflictTransition:
     terminal: bool = False
 
 
-def _parse_conflict_budget(raw: object) -> int:
+def _parse_conflict_budget(raw: object) -> tuple[int, dict[str, int]]:
     if raw in (None, {}):
-        return 0
-    if not isinstance(raw, Mapping) or raw.get("version") != 1:
-        raise ToolRepairBudgetError("workspace conflict budget requires version 1")
+        return 0, {}
+    if not isinstance(raw, Mapping):
+        raise ToolRepairBudgetError("workspace conflict budget must be an object")
+    version = raw.get("version")
+    if version not in (1, 2):
+        raise ToolRepairBudgetError("workspace conflict budget requires version 1 or 2")
     count = raw.get("count")
     if isinstance(count, bool) or not isinstance(count, int) or count < 0:
         raise ToolRepairBudgetError("workspace conflict budget count is invalid")
-    return count
+    fingerprints: dict[str, int] = {}
+    if version == 2:
+        raw_fingerprints = raw.get("fingerprints", {})
+        if not isinstance(raw_fingerprints, Mapping):
+            raise ToolRepairBudgetError("workspace conflict budget fingerprints is invalid")
+        for raw_fingerprint, raw_count in raw_fingerprints.items():
+            if not isinstance(raw_fingerprint, str) or not raw_fingerprint.strip():
+                raise ToolRepairBudgetError("workspace conflict budget fingerprint is invalid")
+            if isinstance(raw_count, bool) or not isinstance(raw_count, int) or raw_count < 1:
+                raise ToolRepairBudgetError("workspace conflict budget fingerprint count is invalid")
+            fingerprints[raw_fingerprint] = raw_count
+        while len(fingerprints) > _CONFLICT_FINGERPRINT_CAP:
+            del fingerprints[next(iter(fingerprints))]
+    return count, fingerprints
+
+
+def _is_durable_workspace_progress(message: Mapping[str, object]) -> bool:
+    return message.get("name") in _DURABLE_WORKSPACE_PROGRESS_TOOLS and message.get("execution_status") == "succeeded"
+
+
+def _content_fingerprint(name: str, error_code: str, content: str) -> str:
+    return hashlib.sha256(f"{name}\0{error_code}\0{content}".encode()).hexdigest()
 
 
 def apply_workspace_sync_conflict(
@@ -55,30 +93,54 @@ def apply_workspace_sync_conflict(
     *,
     model_step: int,
 ) -> WorkspaceConflictTransition:
-    """Count consecutive workspace_sync_conflict tool results (checkpoint-safe).
+    """Count workspace_sync_conflict tool results (checkpoint-safe).
 
-    Any tool result that is not a workspace_sync_conflict failure resets the
-    streak — a success or a course change breaks continuity.  Reaching
-    ``WORKSPACE_SYNC_CONFLICT_LIMIT`` marks the transition terminal so the
-    caller stops the Run instead of feeding the model another identical retry
-    (the P0.5 breaker; repair-budget pauses do not fit because these failures
-    carry ``model_action=continue`` and ``side_effect_state=unknown``).
+    Only durable workspace progress — a succeeded result from a tool in
+    ``_DURABLE_WORKSPACE_PROGRESS_TOOLS`` — resets the streak count: the
+    workspace genuinely moved forward.  Read-only successes (read_file and
+    friends) and failures of any other kind leave the budget untouched, so the
+    P0.5 remediation dance (read the current file, then edit it) cannot wash
+    the streak out.  Per-content fingerprints (sha256 of
+    name+error_code+content, computed inside the breaker — tool messages carry
+    no content_hash) survive every count reset and accumulate: three
+    conflicts on the same content triple trip the breaker even when a
+    successful write keeps zeroing the streak (the ping-pong hole).  Reaching
+    ``WORKSPACE_SYNC_CONFLICT_LIMIT`` on either the streak or a single
+    fingerprint marks the transition terminal so the caller stops the Run
+    instead of feeding the model another identical retry (the P0.5 breaker;
+    repair-budget pauses do not fit because these failures carry
+    ``model_action=continue`` and ``side_effect_state=unknown``).
     """
     if isinstance(model_step, bool) or not isinstance(model_step, int) or model_step < 0:
         raise ToolRepairBudgetError("model_step must be a non-negative integer")
-    count = _parse_conflict_budget(raw_budget)
+    count, fingerprints = _parse_conflict_budget(raw_budget)
     is_conflict = message.get("execution_status") == "failed" and message.get("error_code") == "workspace_sync_conflict"
     if not is_conflict:
-        return WorkspaceConflictTransition(budget=_json_conflict_budget(0))
+        if _is_durable_workspace_progress(message):
+            count = 0
+        return WorkspaceConflictTransition(budget=_json_conflict_budget(count, fingerprints))
     count += 1
+    fingerprint = _content_fingerprint(
+        str(message.get("name") or ""),
+        str(message.get("error_code") or ""),
+        str(message.get("content") or ""),
+    )
+    fingerprint_count = fingerprints.get(fingerprint, 0) + 1
+    fingerprints[fingerprint] = fingerprint_count
+    while len(fingerprints) > _CONFLICT_FINGERPRINT_CAP:
+        del fingerprints[next(iter(fingerprints))]
     return WorkspaceConflictTransition(
-        budget=_json_conflict_budget(count),
-        terminal=count >= WORKSPACE_SYNC_CONFLICT_LIMIT,
+        budget=_json_conflict_budget(count, fingerprints),
+        terminal=(count >= WORKSPACE_SYNC_CONFLICT_LIMIT or fingerprint_count >= WORKSPACE_SYNC_CONFLICT_LIMIT),
     )
 
 
-def _json_conflict_budget(count: int) -> JsonObject:
-    return {"version": 1, "count": count}
+def _json_conflict_budget(count: int, fingerprints: Mapping[str, int] | None = None) -> JsonObject:
+    return {
+        "version": 2,
+        "count": count,
+        "fingerprints": dict(fingerprints or {}),
+    }
 
 
 def _text(value: object, *, field: str, max_length: int = 255) -> str:
