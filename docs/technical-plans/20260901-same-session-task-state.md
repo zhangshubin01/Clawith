@@ -23,6 +23,13 @@ R1/R3/R4 上线后，「数据通道」已闭环：清单确定性落库、编�
 goal 状态当一等事件持久化、dsh 的 CHECKPOINT_PREAMBLE 无条件回注 GoalPhase、Letta
 core memory 无条件注入）；没有一家靠正则猜「用户是否要继续」。
 
+**上线后新实例（2026-09-01，会话承接「按你推荐的执行吧」）**：该消息命中不了任何通道——
+R4 桥的产出摘录（末 3 个 tool-result、head2048/marker/tail512）不含上一轮推荐正文
+（closing 回复被防污染设计丢弃，推荐正文的权威副本在 `memory/清单.md`），而
+「按你推荐的执行吧」无编号、无「上一轮」代词、无清单类名词 → R3 检测不命中 → 无任何
+通道把清单指给模型。实例证明：**检测式口径永远有漏网措辞，唯一稳健口径=任务状态
+无条件注记**（phase=active 时每轮都带未决事项指针 + 文件路径，模型可 read_file 取全文）。
+
 ## 1. 现状核实（本方案依据的代码事实，均已 read_file 验证）
 
 | 事实 | 位置 |
@@ -38,15 +45,17 @@ core memory 无条件注入）；没有一家靠正则猜「用户是否要继�
 | 收尾 handler 可读写 session_context（load_snapshot + compare_and_swap，R1 同款） | `list_persistence.py:409-483` |
 | 模型可见契约须同步 backend/AGENTS.md「Model-facing contracts」段 + 单测钉死 | `backend/AGENTS.md:126`、`test_list_persistence.py:286` 模式 |
 | 文件即记忆模式（agent 可 read_file）：`memory/清单.md` 结构化 section + open_items 纯索引指针 | R1 已验证 |
+| `AgentRun` **无执行状态列**（`delivery_status` 是交付态非执行态；执行状态只在 checkpoint） | `backend/app/models/agent_run.py` 全列已核 |
+| feishu 卡片/一对一 run 亦 `source_type=="chat"`、thread==session（D-6 按 thread==session 自然涵盖，语义同 direct chat） | `backend/app/api/feishu.py:93,688`、`chat_intake.py:239-269` |
 
 ## 2. 三方实证（本地源码已核实）
 
 | 参考 | 事实 | 借鉴点 |
 |---|---|---|
-| OpenHands（`~/Documents/UGit/software-agent-sdk` event_service.py:1550-1600） | goal 状态以 `ConversationStateUpdateEvent(key="goal")` **事件持久化**；`resume_goal_loop()` 显式续做 API；complete/capped 判定可续做性 | 任务状态一等公民、确定性写 |
-| deepseek-harness（`~/Documents/UGit/deepseek-harness`） | Session=append-only 事件日志，一切投影派生；CHECKPOINT_PREAMBLE **无条件**回注摘要；GoalPhase 状态机 active/paused/blocked/complete + continuation round | phase 语义集、无条件注入、过去时防误读措辞 |
-| openai-agents-python（src/agents/memory/session.py） | Session=append-only items、最近 N 条回放、零额外机制 | 「回放即记忆」下限——本方案比它多一步确定性 phase 标注 |
-| deepagents | todo 工具 + 记忆=AGENTS.md（文件即记忆） | 文件通道可被 agent read_file 自引用 |
+| OpenHands（`~/Documents/UGit/software-agent-sdk/openhands-agent-server/openhands/agent_server/event_service.py`，`resume_goal_loop` :1563、`_last_goal_loop_status` 事件扫描） | goal 状态以 `ConversationStateUpdateEvent(key="goal")` **事件持久化**（重启可恢复）；`resume_goal_loop()` 显式续做 API；status 含 complete/capped 判不可续做 | 任务状态一等公民、确定性写 |
+| deepseek-harness（`~/Documents/UGit/deepseek-harness`，`packages/compaction/compaction-basic/src/summarizer.ts:69`、`packages/goal/tool-goal/src/index.ts:92`） | Session=append-only 事件日志，一切投影派生；CHECKPOINT_PREAMBLE 摘要**无条件**回注；GoalPhase 枚举精确四值 `['active','paused','blocked','complete']` + continuation round | phase 语义集、无条件注入、过去时防误读措辞 |
+| openai-agents-python（src/agents/memory/session.py，`get_items(limit=N)`） | Session=append-only items、最近 N 条回放、零额外机制 | 「回放即记忆」下限——本方案比它多一步确定性 phase 标注 |
+| deepagents（`~/Documents/UGit/deepagents`，talon runtime `memory/AGENTS.md` 加载路径） | todo 工具 + 记忆=AGENTS.md（文件即记忆） | 文件通道可被 agent read_file 自引用 |
 | LangGraph 官方 | checkpointer=thread 内短时（同 thread 自动延续）/ BaseStore=跨 thread 长时 | 本方案=checkpointer 层内的状态投影；跨线程留事故驱动 |
 
 **共识**：紧邻衔接靠状态延续，不靠检测；远距衔接靠显式写入+检索（跨线程，已搁置）。
@@ -123,21 +132,28 @@ fail-open 接受，不阻塞收尾；waiting 收尾的清单落库由票 06（D-
   - paused → 「上一轮任务暂停，等待你的回复」
   - blocked + ended=failed → 「上一轮任务未完成（未成功）」
   - blocked + ended=cancelled → 「上一轮任务未完成（已取消）」
+  - active 且未决事项非空：桥末追加指针行 `未决事项：清单「title」（N 项，见 memory/清单.md）`
+    （有界）——「按你推荐的执行吧」实例的闭环路径，模型可 read_file 取全文
   - state 缺失（legacy）→ 默认「上一轮已完成」（向后兼容，参数缺省 None）
 - **桥不活跃**（上一 run 已被 compact 移出窗口）且 phase≠complete：prepend 独立注记
   （R3 `render_retrieval_note` 同款过去时框架）：
-  「历史上下文（非当前任务）：[phase 措辞]。任务「goal」。[未决事项：清单「title」…，有界截断]」。
+  「历史上下文（非当前任务）：[phase 措辞]。任务「goal」。[未决事项：清单「title」
+  （N 项，见 memory/清单.md）…，有界截断]」。
   phase=complete 时不注入任何注记（零增量，常见路径零成本）。
 - 措辞红线：全部过去时、非祈使、「非当前任务」标记——命中
   [[direct-chat-run-boundary-fix]]，防被模型读成新指令。
 
 ### 3.5 决定记录
 
-- **D-6 作用域**：写入+注入仅 direct chat（thread==session）。group 任务状态为观察项
+- **D-6 作用域**：写入+注入仅 direct chat（thread==session）；feishu 卡片/一对一 run
+  同为 source_type="chat"、thread==session，自然涵盖（语义同 direct chat，卡片 waiting
+  同样需要 paused 状态）。group 任务状态为观察项
   （群聊 short-term truth 是 group context pack，另立并行真相有冲突风险，同 D-015 论证）。
 - **D-7 存储**：文件 `memory/任务状态.md` 权威 + open_items 纯索引指针。否决 open_items
   内联 goal/phase（D5-1：compactor LLM 重述会改写）；否决新表/新列（本票零迁移；
-  若后续需要跨会话枚举检索再评估 store 形态）。
+  若后续需要跨会话枚举检索再评估 store 形态）；**否决「build 时从 DB 派生」替代**
+  （已核实 `AgentRun` 无执行状态列，状态只在 checkpoint——派生须每 run 开局读
+  checkpoint，成本不可接受，且失去快照固化语义与 agent read_file 可读性）。
 - **D-8 phase 映射**：见 §3.2 表。不引入 LLM 判定；「active=已完成但有未决事项」
   是产品语义决策，用户拍板点之一。
 - **D-9 注入原则**：同会话 phase≠complete 即无条件注入（无检测正则、无检索工具、
