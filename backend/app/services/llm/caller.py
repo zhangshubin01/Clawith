@@ -673,7 +673,6 @@ async def call_llm(
                 model=getattr(model, "model", None),
                 provider=getattr(model, "provider", None),
                 agent_id=agent_id,
-                capture_input=False,
             ) as gen:
                 response = await client.stream(
                     messages=api_messages,
@@ -685,7 +684,20 @@ async def call_llm(
                     on_thinking=on_thinking,
                 )
                 if gen is not None:
-                    gen.set_output(response.content)
+                    # Read-only normalization: merge embedded <think> blocks into
+                    # the structured reasoning channel for the trace; the later
+                    # protocol extract (below) remains authoritative for the API
+                    # messages and is unaffected by this duplicate computation.
+                    visible_content, merged_reasoning = extract_embedded_reasoning(
+                        response.content,
+                        response.reasoning_content,
+                    )
+                    gen.set_output(
+                        {
+                            "content": visible_content,
+                            "reasoning_content": merged_reasoning,
+                        }
+                    )
                     gen.set_usage(response.usage)
                     gen.add_metadata(
                         tool_round=round_i,

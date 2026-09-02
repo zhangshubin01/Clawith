@@ -455,7 +455,7 @@ def test_observe_generation_records_output_usage_and_identity(
         agent_id="a-1",
     ) as gen:
         assert gen is not None
-        gen.set_output("hello")
+        gen.set_output({"content": "hello", "reasoning_content": None})
         # DeepSeek counts cache hits inside prompt_tokens: input=3 = hit 2 + miss 1.
         # Langfuse prices buckets independently (no subtraction), so `input` must
         # be reported as the uncached remainder to avoid double-billing hits.
@@ -470,11 +470,88 @@ def test_observe_generation_records_output_usage_and_identity(
         )
 
     update = span.updates[-1]
-    assert update["output"] == "hello"
+    assert update["output"] == {"content": "hello", "reasoning_content": None}
     assert update["usage_details"] == {"input": 1, "output": 4, "total": 7, "input_cache_read": 2}
     assert update["metadata"]["agent_id"] == "a-1"
     assert update["metadata"]["provider"] == "deepseek"
     assert "latency_ms" in update["metadata"]
+
+
+def test_observe_generation_captures_input_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    span = _FakeSpan()
+    started: dict[str, Any] = {}
+
+    class _CapturingClient(_FakeClient):
+        def start_as_current_observation(self, **kwargs: Any) -> Any:
+            started.update(kwargs)
+            return _fake_start_cm(self.span)
+
+    monkeypatch.setattr(tracing, "_get_client", lambda _tenant_id=None: _CapturingClient(span=span))
+
+    prompt = [{"role": "user", "content": "hi"}]
+    with tracing.observe_generation(name="llm", input=prompt) as gen:
+        assert gen is not None
+
+    # The prompt is always captured now — there is no opt-out switch left.
+    assert started["input"] == prompt
+
+
+def test_observe_generation_output_dict_reasoning_exempt_from_default_bound(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    span = _FakeSpan()
+    monkeypatch.setattr(tracing, "_get_client", lambda _tenant_id=None, _span=span: _FakeClient(span=_span))
+
+    long_reasoning = "r" * 50000
+    long_content = "c" * 5000
+    with tracing.observe_generation(name="llm") as gen:
+        assert gen is not None
+        gen.set_output({"content": long_content, "reasoning_content": long_reasoning})
+
+    output = span.updates[-1]["output"]
+    # The generation cap (64k) bounds the whole output tree, so both keys
+    # survive past the generic 4k bound — the raised cap exists exactly so
+    # long reasoning text is not lost.
+    assert output["reasoning_content"] == long_reasoning
+    assert output["content"] == long_content
+
+
+def test_observe_generation_output_dict_reasoning_truncates_at_generation_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    span = _FakeSpan()
+    monkeypatch.setattr(tracing, "_get_client", lambda _tenant_id=None, _span=span: _FakeClient(span=_span))
+
+    overflow = "r" * 70000
+    with tracing.observe_generation(name="llm") as gen:
+        assert gen is not None
+        gen.set_output({"content": "ok", "reasoning_content": overflow})
+
+    output = span.updates[-1]["output"]
+    marker = "...<truncated 70000 chars>"
+    assert output["reasoning_content"] == "r" * tracing._GENERATION_MAX_STRING_CHARS + marker
+    assert output["content"] == "ok"
+
+
+def test_observe_generation_output_dict_redacts_secrets_in_reasoning(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    span = _FakeSpan()
+    monkeypatch.setattr(tracing, "_get_client", lambda _tenant_id=None, _span=span: _FakeClient(span=_span))
+
+    with tracing.observe_generation(name="llm") as gen:
+        assert gen is not None
+        gen.set_output(
+            {
+                "content": "the answer",
+                "reasoning_content": "credential hint: Bearer abc.def.ghi must not leak",
+            }
+        )
+
+    output = span.updates[-1]["output"]
+    assert "abc.def.ghi" not in output["reasoning_content"]
+    assert "[REDACTED]" in output["reasoning_content"]
+    assert output["content"] == "the answer"
 
 
 def test_observe_generation_records_error_and_reraises(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -6,6 +6,12 @@ backend runs unchanged in the default configuration. All ``langfuse`` imports
 are lazy, and any observability-internal failure is swallowed so tracing can
 never break an LLM call path. This module is the only integration point —
 swap-ready without touching call sites (C6 anti-reinvention).
+
+Generation contract (2026-09-03): every ``llm`` generation records the full
+prompt as input and a ``{"content", "reasoning_content"}`` dict as output;
+strings are bound at ``_GENERATION_MAX_STRING_CHARS`` (64k) for generations and
+``_MAX_STRING_CHARS`` (4k) elsewhere. Secrets redaction always precedes
+truncation. See docs/technical-plans/20260903-langfuse-reasoning-input-completeness.md.
 """
 
 from __future__ import annotations
@@ -63,6 +69,12 @@ _SECRET_PATTERNS: tuple[re.Pattern[str], ...] = (
 )
 
 _MAX_STRING_CHARS = 4000
+# Generation output carries the model's own reasoning text (DeepSeek thinking
+# regularly exceeds the generic bound by an order of magnitude). Generations get
+# this raised cap; every other observation type (run root judge window, tool and
+# node spans) keeps the default. Secrets redaction still runs first regardless
+# of the bound.
+_GENERATION_MAX_STRING_CHARS = 65536
 _UNSET = object()
 
 # Business control-flow exceptions that schedule a command retry rather than
@@ -216,35 +228,39 @@ def _is_retry_control_flow(exc: BaseException) -> bool:
     return type(exc).__name__ in _RETRY_CONTROL_FLOW_NAMES
 
 
-def _mask_string(value: str) -> str:
+def _mask_string(value: str, *, max_string_chars: int) -> str:
     result = value
     for pattern in _SECRET_PATTERNS:
         result = pattern.sub("[REDACTED]", result)
-    if len(result) > _MAX_STRING_CHARS:
-        result = result[:_MAX_STRING_CHARS] + f"...<truncated {len(value)} chars>"
+    if len(result) > max_string_chars:
+        result = result[:max_string_chars] + f"...<truncated {len(value)} chars>"
     return result
 
 
-def mask_text(value: Any) -> Any:
+def mask_text(value: Any, *, max_string_chars: int = _MAX_STRING_CHARS) -> Any:
     """Recursively redact secrets and bound payload size before trace export."""
     if isinstance(value, str):
-        return _mask_string(value)
+        return _mask_string(value, max_string_chars=max_string_chars)
     if isinstance(value, dict):
         return {
-            key: ("[REDACTED]" if isinstance(key, str) and key.lower() in _SENSITIVE_KEYS else mask_text(val))
+            key: (
+                "[REDACTED]"
+                if isinstance(key, str) and key.lower() in _SENSITIVE_KEYS
+                else mask_text(val, max_string_chars=max_string_chars)
+            )
             for key, val in value.items()
         }
     if isinstance(value, (list, tuple, set)):
-        return [mask_text(item) for item in value]
+        return [mask_text(item, max_string_chars=max_string_chars) for item in value]
     if dataclasses.is_dataclass(value):
-        return mask_text(dataclasses.asdict(value))
+        return mask_text(dataclasses.asdict(value), max_string_chars=max_string_chars)
     if hasattr(value, "__dict__") and not isinstance(value, type):
-        return mask_text(vars(value))
+        return mask_text(vars(value), max_string_chars=max_string_chars)
     try:
         json.dumps(value)
         return value
     except (TypeError, ValueError):
-        return repr(value)[:_MAX_STRING_CHARS]
+        return repr(value)[:max_string_chars]
 
 
 def _map_usage(
@@ -296,12 +312,20 @@ def _map_usage(
 class GenerationHandle:
     """Write-side of an in-flight generation observation. All writes are safe."""
 
-    __slots__ = ("_span", "_mask", "_output", "_usage", "_metadata", "_level", "_status", "_provider")
+    __slots__ = ("_span", "_mask", "_output", "_usage", "_metadata", "_level", "_status", "_provider", "_max_string_chars")
 
-    def __init__(self, span: Any, *, mask: bool, provider: str | None = None) -> None:
+    def __init__(
+        self,
+        span: Any,
+        *,
+        mask: bool,
+        provider: str | None = None,
+        max_string_chars: int = _MAX_STRING_CHARS,
+    ) -> None:
         self._span = span
         self._mask = mask
         self._provider = provider
+        self._max_string_chars = max_string_chars
         self._output: Any = _UNSET
         self._usage: dict[str, int] = {}
         self._metadata: dict[str, Any] = {}
@@ -332,7 +356,11 @@ class GenerationHandle:
         self._metadata.setdefault("latency_ms", round((time.perf_counter() - started) * 1000, 2))
         update: dict[str, Any] = {"metadata": self._metadata}
         if self._output is not _UNSET:
-            update["output"] = mask_text(self._output) if self._mask else self._output
+            update["output"] = (
+                mask_text(self._output, max_string_chars=self._max_string_chars)
+                if self._mask
+                else self._output
+            )
         if self._usage:
             update["usage_details"] = self._usage
         if self._level is not None:
@@ -355,12 +383,14 @@ def observe_generation(
     provider: str | None = None,
     agent_id: Any = None,
     input: Any = None,
-    capture_input: bool = True,
 ) -> Iterator[GenerationHandle | None]:
     """Open a ``generation`` observation around one LLM call (no-op when disabled).
 
-    Exceptions raised inside the block are recorded as ``level=ERROR`` and
-    re-raised to the caller; observability-internal failures are swallowed.
+    The full prompt payload (``input``) is always captured; generation output is
+    a ``{"content", "reasoning_content"}`` dict whose strings are bound at
+    ``_GENERATION_MAX_STRING_CHARS``. Exceptions raised inside the block are
+    recorded as ``level=ERROR`` and re-raised to the caller;
+    observability-internal failures are swallowed.
     """
     identity = dict(_run_identity.get())
     if agent_id is not None:
@@ -373,7 +403,7 @@ def observe_generation(
         yield None
         return
 
-    span_input = mask_text(input) if (capture_input and input is not None) else None
+    span_input = mask_text(input) if input is not None else None
 
     # Propagate native Langfuse user/session attributes so standalone
     # generations (no enclosing ``observe_run``) still group by user/session.
@@ -397,7 +427,12 @@ def observe_generation(
         if prop_cm is not None:
             stack.enter_context(prop_cm)
         with start_cm as span:
-            handle = GenerationHandle(span, mask=True, provider=provider)
+            handle = GenerationHandle(
+                span,
+                mask=True,
+                provider=provider,
+                max_string_chars=_GENERATION_MAX_STRING_CHARS,
+            )
             handle.add_metadata(**identity)
             try:
                 yield handle

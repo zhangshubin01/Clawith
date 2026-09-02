@@ -206,7 +206,20 @@ async def complete_llm_once(
                     **provider_toggle,
                 )
             if gen is not None:
-                gen.set_output(response.content)
+                # Read-only normalization for the trace: merge embedded <think>
+                # blocks into the structured reasoning channel. The protocol
+                # extract performed on the returned LLMCompletionStep below stays
+                # authoritative and is unaffected by this duplicate pass.
+                visible_content, merged_reasoning = extract_embedded_reasoning(
+                    response.content,
+                    response.reasoning_content,
+                )
+                gen.set_output(
+                    {
+                        "content": visible_content,
+                        "reasoning_content": merged_reasoning,
+                    }
+                )
                 gen.set_usage(response.usage)
     finally:
         await client.close()
