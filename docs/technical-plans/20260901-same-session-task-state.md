@@ -64,8 +64,10 @@ core memory 无条件注入）；没有一家靠正则猜「用户是否要继�
 ```
 
 `session_context_states.open_items` 写入**纯索引指针** `{"task_state_ref": "memory/任务状态.md"}`
-（不复制 goal/phase——权威在文件，compactor LLM 重述 open_items 的残余风险压到最小，
-同 D5-1 论证；零 schema 迁移）。
+（不复制 goal/phase——权威在文件；**已核实 direct chat 的 open_items 无 LLM 写入方**：
+后台 scanner 只扫 group（`session_context_background.py:124` 拒绝非 group）、无 API compact
+入口、group-cutoff 重建仅 group 路径、D-015 跳过 direct 的 delta 合并——指针行只有确定性
+写入方（R1 + 本票），重述风险为零，D5-1 论证在此场景自动满足；零 schema 迁移）。
 
 ### 3.2 phase 语义（D-8，确定性映射，无 LLM）
 
@@ -79,7 +81,8 @@ core memory 无条件注入）；没有一家靠正则猜「用户是否要继�
 未决事项 = 收尾时刻 open_items 中的 `list_ref==memory/清单.md` 指针行（direct chat 下
 open_items 的唯一写入方就是 R1，即「清单已交付但条目未执行」）。注：direct chat 的
 open_items 无 resolve 方，指针长期留存 → phase=active 可持续多轮——这是期望语义
-（「继续」时始终有据可依），文档化而非视为缺陷。
+（「继续」时始终有据可依），文档化而非视为缺陷。注记中的清单 title/count 是任务状态
+**写时刻的快照**，清单后续版本合并更新标题后可能漂移——注记只作指针语义，可接受。
 
 ### 3.3 写入侧（票 04）：两个挂点，补 waiting 缺口
 
@@ -96,7 +99,9 @@ open_items 无 resolve 方，指针长期留存 → phase=active 可持续多轮
 共同约束：仅 direct chat（`run.thread_id == run.session_id`，D-6）——group 会话的
 任务语义（多 agent 交错、公开消息流）与「上一轮任务」概念不匹配，列为观察项；
 幂等（同会话节整体替换，重放/重试收敛到同内容）；写失败 log 不阻塞收尾
-（沿用 R1 的 best-effort 定位）；R1 对 `completed` 的清单落库不改（waiting 清单
+（沿用 R1 的 best-effort 定位）；前置 handler 失败时（`checkpoint_side_effects.py:1042-1053`
+错误只 append 不中断），TerminalHandler 读到的 open_items 可能欠账、phase 偏 complete——
+fail-open 接受，不阻塞收尾；R1 对 `completed` 的清单落库不改（waiting 清单
 落库=事故驱动观察项，本票不扩）。
 
 ### 3.4 注入侧（票 05）：phase≠complete 口径，无条件注入（D-9）
@@ -168,9 +173,11 @@ open_items 无 resolve 方，指针长期留存 → phase=active 可持续多轮
   - `test_agent_runtime_worker_service.py`：两处注册接线与顺序（TerminalHandler 位末）。
   - 全量 pytest + arch-guard.sh。
 - **真实 checkpoint 重放**（clawith-graph-state-triage 规则，禁止只信合成消息）：
-  取真实 direct-chat 多 run thread（含 545e8262 同款），导出 checkpoint 重放
-  ContextBuilder.build，断言 phase 措辞/注记真实落进模型窗口；waiting 形态 thread
-  同样重放验证 paused 落库。
+  取真实 direct-chat 多 run thread（含 545e8262 同款）导出 checkpoint 重放
+  ContextBuilder.build，验证**无任务状态时的向后兼容**（legacy 措辞、零注记、模型
+  窗口与部署前一致）与新签名（`prior_task_phase` 透传）在真实消息上的行为。
+  旧 checkpoint 不含任务状态（新代码未部署时无写入），phase 注记/paused 落库的
+  证据链 = 单测 + 部署后 §5 端到端场景，不由重放产出。
 - **端到端（部署后）**：①「有哪些可优化」→清单→新消息「继续」→注记注入、模型延续
   不反问；②模型反问（waiting）→用户回复→同 run 续接、无「已完成」误报；③completed
   无未决→窗口零增量（旧行为）。
