@@ -36,6 +36,10 @@ from app.services.agent_runtime.scheduling_lane import SchedulingLaneCompletionH
 from app.services.agent_runtime.session_context_completion import (
     SessionContextCompletionHandler,
 )
+from app.services.agent_runtime.session_task_state import (
+    SessionTaskStateTerminalHandler,
+    SessionTaskStateWaitingHandler,
+)
 from app.services.agent_runtime.state import RunRegistrySnapshot
 from app.services.agent_runtime.task_completion import TaskRuntimeCompletionHandler
 from app.services.agent_runtime.tool_result_store import ToolResultReconcileResult
@@ -410,10 +414,15 @@ def test_component_builder_installs_current_agent_and_planning_graphs() -> None:
         OnboardingRuntimeCompletionHandler,
         A2ARuntimeCompletionHandler,
         SchedulingLaneCompletionHandler,
+        SessionTaskStateTerminalHandler,
     ]
     checkpoint_handlers = components.worker._post_checkpoint_handler._checkpoint_handlers
     assert [type(handler) for handler in checkpoint_handlers] == [
         PlanningCheckpointScheduler,
+        # 票 06（D-12）：waiting 清单落库须在任务状态 WaitingHandler 之前，
+        # paused 节才能带上本 run 的 waiting 清单指针。
+        ListPersistenceCompletionHandler,
+        SessionTaskStateWaitingHandler,
     ]
 
 

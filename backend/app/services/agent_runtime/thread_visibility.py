@@ -47,6 +47,8 @@ async def _prior_run_summary(
     *,
     current_run_id: str,
     resolve_tool_result: Callable[[str], Awaitable[str | None]] | None = None,
+    completion_phrase: str | None = None,
+    pending_lists_line: str | None = None,
 ) -> JsonObject | None:
     """Collapse the prior Run into one deterministic, bounded context note.
 
@@ -60,6 +62,11 @@ async def _prior_run_summary(
     excerpts, replacing URIs the model cannot parse. Resolution is strictly
     best-effort: any failure falls back to the legacy raw ref so a Run's
     startup is never blocked by a missing or unreadable tool result.
+
+    ``completion_phrase`` replaces the fixed "上一轮已完成" lead (D-9: the
+    prior Run's actual phase wording); when ``None`` the legacy phrase is
+    kept, backward-compatible. ``pending_lists_line`` is appended after the
+    goal and artifacts when non-empty (the bounded 未决事项 pointer).
 
     The wording is deliberately past-tense and marked "非当前任务": a
     user-role summary that read "目标：重新编译项目" was itself mistaken for a
@@ -91,7 +98,7 @@ async def _prior_run_summary(
     unique.reverse()
     unique = unique[-3:]
 
-    parts = ["历史上下文（非当前任务）：上一轮已完成"]
+    parts = [f"历史上下文（非当前任务）：{completion_phrase or '上一轮已完成'}"]
     if goal:
         parts.append(f"任务「{goal}」")
     if unique:
@@ -116,6 +123,8 @@ async def _prior_run_summary(
             parts.append(f"产出摘录：\n{body}")
         else:
             parts.append("产出 " + "、".join(unique))
+    if pending_lists_line:
+        parts.append(pending_lists_line)
     content = "，".join(parts) + "。"
     return {
         "id": f"prior-run-summary:{current_run_id}",
@@ -130,6 +139,8 @@ async def bound_current_run_window(
     *,
     current_run_id: str,
     resolve_tool_result: Callable[[str], Awaitable[str | None]] | None = None,
+    completion_phrase: str | None = None,
+    pending_lists_line: str | None = None,
 ) -> tuple[JsonObject | None, tuple[JsonObject, ...]]:
     """Bound the model window at the current Run's start marker.
 
@@ -139,6 +150,9 @@ async def bound_current_run_window(
     ``current_run_messages`` starts exactly at the current Run's marker.
     ``resolve_tool_result`` optionally inlines resolved ``tool-result://``
     content into that summary as bounded excerpts (see ``_prior_run_summary``).
+    ``completion_phrase`` and ``pending_lists_line`` pass through to the
+    summary (D-9 phase-aware wording); both default ``None`` for the legacy
+    backward-compatible fixed phrase and no pending pointer.
 
     Without a current marker (legacy single-Run threads, or non-direct Runs
     whose Thread holds only their own messages) the whole Thread is returned
@@ -154,6 +168,8 @@ async def bound_current_run_window(
         prior,
         current_run_id=current_run_id,
         resolve_tool_result=resolve_tool_result,
+        completion_phrase=completion_phrase,
+        pending_lists_line=pending_lists_line,
     )
     return summary, current
 

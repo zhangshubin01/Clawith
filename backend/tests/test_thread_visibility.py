@@ -10,6 +10,8 @@ that inlines resolved ``tool-result://`` content as bounded excerpts.
 import uuid
 from collections.abc import Awaitable, Callable
 
+import pytest
+
 from app.services.agent_runtime.thread_visibility import (
     bound_current_run_window,
     summary_is_stale_for_run,
@@ -416,3 +418,87 @@ async def test_summary_keeps_non_tool_result_refs_verbatim():
 
     assert "artifact://apk" in summary["content"]
     assert consulted == []
+
+
+@pytest.mark.parametrize(
+    "completion_phrase",
+    [
+        "上一轮已完成",
+        "上一轮任务已交付，仍有未决事项",
+        "上一轮任务暂停，等待你的回复",
+        "上一轮任务未完成（未成功）",
+        "上一轮任务未完成（已取消）",
+    ],
+)
+async def test_summary_replaces_fixed_phrase_with_completion_phrase(completion_phrase):
+    # D-9: the phase-aware wording replaces the fixed "上一轮已完成" lead when
+    # a completion phrase is supplied, while the rest of the bridge is intact.
+    prior = [
+        _marker("run-prior", "重新编译项目"),
+        _assistant("run-prior", "p1", ["call-compile"]),
+        _result("run-prior", "p2", "call-compile", result_ref="artifact://apk"),
+    ]
+    messages = [*prior, _marker("run-current", "优化")]
+
+    summary, _ = await bound_current_run_window(
+        messages,
+        current_run_id="run-current",
+        completion_phrase=completion_phrase,
+    )
+
+    assert summary["content"].startswith(f"历史上下文（非当前任务）：{completion_phrase}")
+    assert "重新编译项目" in summary["content"]
+
+
+async def test_summary_keeps_legacy_phrase_when_no_completion_phrase():
+    # Backward-compatible default: omitting completion_phrase keeps the legacy
+    # fixed phrase exactly as before this change.
+    prior = [
+        _marker("run-prior", "重新编译项目"),
+        _assistant("run-prior", "p1", ["call-compile"]),
+        _result("run-prior", "p2", "call-compile", result_ref="artifact://apk"),
+    ]
+    messages = [*prior, _marker("run-current", "优化")]
+
+    summary, _ = await bound_current_run_window(messages, current_run_id="run-current")
+
+    assert summary["content"].startswith("历史上下文（非当前任务）：上一轮已完成")
+
+
+async def test_summary_appends_pending_lists_line_after_goal_and_artifacts():
+    # The 未决事项 pointer line is appended after the goal and artifacts (and
+    # never leaked into the current Run's own messages).
+    prior = [
+        _marker("run-prior", "优化 app"),
+        _assistant("run-prior", "p1", ["call-compile"]),
+        _result("run-prior", "p2", "call-compile", result_ref="artifact://apk"),
+    ]
+    messages = [*prior, _marker("run-current", "继续")]
+
+    summary, _ = await bound_current_run_window(
+        messages,
+        current_run_id="run-current",
+        completion_phrase="上一轮任务已交付，仍有未决事项",
+        pending_lists_line="未决事项：清单「app 优化清单」（2 项，见 memory/清单.md）",
+    )
+
+    content = summary["content"]
+    assert content.startswith("历史上下文（非当前任务）：上一轮任务已交付，仍有未决事项")
+    assert "任务「优化 app」" in content
+    assert "artifact://apk" in content
+    assert content.endswith("未决事项：清单「app 优化清单」（2 项，见 memory/清单.md）。")
+    # the pointer line comes after the goal
+    assert content.index("任务「优化 app」") < content.index("未决事项：")
+
+
+async def test_summary_omits_pending_lists_line_when_not_supplied():
+    prior = [
+        _marker("run-prior", "优化 app"),
+        _assistant("run-prior", "p1", ["call-compile"]),
+        _result("run-prior", "p2", "call-compile", result_ref="artifact://apk"),
+    ]
+    messages = [*prior, _marker("run-current", "继续")]
+
+    summary, _ = await bound_current_run_window(messages, current_run_id="run-current")
+
+    assert "未决事项：" not in summary["content"]

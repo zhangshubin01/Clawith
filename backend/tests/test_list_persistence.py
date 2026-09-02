@@ -17,6 +17,7 @@ from app.services.agent_runtime.context_builder import RuntimeContextBuild
 from app.services.agent_runtime.list_persistence import (
     LIST_FILE_PATH,
     LIST_NUMBERING_CONTRACT,
+    WAITING_STATUSES,
     ListPersistenceCompletionHandler,
     extract_list_title,
     extract_workspace_project,
@@ -422,6 +423,7 @@ def _state(
     final_answer: str | None = None,
     messages: list | None = None,
     session_id: str | None = None,
+    waiting_request: dict | None = None,
 ) -> RuntimeGraphState:
     registry = RunRegistrySnapshot(
         tenant_id=str(uuid.uuid4()),
@@ -440,6 +442,8 @@ def _state(
         "next_route": "terminal",
         "final_answer": final_answer,
     }
+    if waiting_request is not None:
+        lifecycle["waiting_request"] = waiting_request
     if status != "completed":
         lifecycle["error"] = {"code": "runtime_failed"}
     return {
@@ -462,6 +466,7 @@ def _records(
     final_answer: str | None = ("1. 输入精度截断 — Calculator.kt:204 用 Float\n2. 超大指数上限 — power() 无上限\n"),
     messages: list | None = None,
     session_id: str | None = None,
+    waiting_request: dict | None = None,
 ) -> tuple[RuntimeRunRecord, CheckpointObservation]:
     tenant_id = uuid.uuid4()
     agent_id = uuid.uuid4()
@@ -487,6 +492,7 @@ def _records(
         final_answer=final_answer,
         messages=messages,
         session_id=session_id,
+        waiting_request=waiting_request,
     )
     checkpoint = CheckpointObservation(
         checkpoint_id="checkpoint-terminal",
@@ -518,6 +524,7 @@ def _handler(
     context_service: _ContextService | None = None,
     snapshots: list | None = None,
     conflicts: int = 0,
+    trigger_statuses: tuple[str, ...] = ("completed",),
 ) -> tuple[ListPersistenceCompletionHandler, _ContextService]:
     service = context_service or _ContextService(
         snapshots if snapshots is not None else [_snapshot()],
@@ -527,6 +534,7 @@ def _handler(
         session_factory=_SessionFactory(),  # type: ignore[arg-type]
         context_service=service,  # type: ignore[arg-type]
         storage=storage,  # type: ignore[arg-type]
+        trigger_statuses=trigger_statuses,
     )
     return handler, service
 
@@ -740,3 +748,113 @@ async def test_handler_noop_when_merged_list_unchanged() -> None:
 
     assert storage.writes == []
     assert service.compare_calls == []
+
+
+# ---------------------------------------------------------------- waiting trigger (ticket 06)
+
+
+def _waiting_request(question: str) -> dict:
+    return {
+        "waiting_type": "user",
+        "correlation_id": str(uuid.uuid4()),
+        "question": question,
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", WAITING_STATUSES)
+async def test_handler_waiting_trigger_persists_numbered_list(status: str) -> None:
+    storage = _Storage()
+    run, checkpoint = _records(
+        status=status,
+        final_answer=None,
+        waiting_request=_waiting_request(
+            "你想优化哪些？\n\n"
+            "1. 输入精度截断 — Calculator.kt:204 用 Float\n"
+            "2. 超大指数上限 — power() 无上限\n"
+        ),
+        messages=_workspace_messages(),
+    )
+    handler, service = _handler(
+        storage=storage,
+        snapshots=[_snapshot()],
+        trigger_statuses=WAITING_STATUSES,
+    )
+
+    await handler.handle(run=run, checkpoint=checkpoint)
+
+    assert storage.writes, "expected a file write for a waiting closing list"
+    key, content = storage.writes[0]
+    assert key.endswith(LIST_FILE_PATH)
+    assert "1. 输入精度截断 — Calculator.kt:204 用 Float" in content
+    assert "2. 超大指数上限 — power() 无上限" in content
+    assert len(service.compare_calls) == 1
+    _, candidate = service.compare_calls[0]
+    assert len(candidate.open_items) == 1
+    assert candidate.open_items[0]["list_ref"] == LIST_FILE_PATH
+
+
+@pytest.mark.asyncio
+async def test_handler_waiting_trigger_noop_without_numbered_list() -> None:
+    storage = _Storage()
+    run, checkpoint = _records(
+        status="waiting_user",
+        final_answer=None,
+        waiting_request=_waiting_request("请确认是否继续优化？"),
+    )
+    handler, service = _handler(
+        storage=storage,
+        snapshots=[_snapshot()],
+        trigger_statuses=WAITING_STATUSES,
+    )
+
+    await handler.handle(run=run, checkpoint=checkpoint)
+
+    assert storage.writes == []
+    assert service.compare_calls == []
+
+
+@pytest.mark.asyncio
+async def test_handler_default_trigger_ignores_waiting_status() -> None:
+    storage = _Storage()
+    run, checkpoint = _records(
+        status="waiting_user",
+        final_answer=None,
+        waiting_request=_waiting_request(
+            "1. 输入精度截断 — Calculator.kt:204 用 Float\n"
+            "2. 超大指数上限 — power() 无上限\n"
+        ),
+        messages=_workspace_messages(),
+    )
+    handler, service = _handler(storage=storage, snapshots=[_snapshot()])
+
+    await handler.handle(run=run, checkpoint=checkpoint)
+
+    assert storage.writes == []
+    assert service.compare_calls == []
+
+
+@pytest.mark.asyncio
+async def test_handler_waiting_replay_is_idempotent() -> None:
+    storage = _Storage()
+    run, checkpoint = _records(
+        status="waiting_user",
+        final_answer=None,
+        waiting_request=_waiting_request(
+            "1. 输入精度截断 — Calculator.kt:204 用 Float\n"
+            "2. 超大指数上限 — power() 无上限\n"
+        ),
+        messages=_workspace_messages(),
+    )
+    handler, _ = _handler(
+        storage=storage,
+        snapshots=[_snapshot()],
+        trigger_statuses=WAITING_STATUSES,
+    )
+
+    await handler.handle(run=run, checkpoint=checkpoint)
+    assert len(storage.writes) == 1
+    # Replaying the same waiting closing over the now-merged file must not
+    # write again (merged list is unchanged).
+    await handler.handle(run=run, checkpoint=checkpoint)
+    assert len(storage.writes) == 1

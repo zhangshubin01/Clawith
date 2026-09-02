@@ -165,8 +165,11 @@ fail-open 接受，不阻塞收尾；waiting 收尾的清单落库由票 06（D-
   段，单测钉死措辞（test_list_persistence.py:286 同款模式）。
 - **D-12 waiting 清单落库纳入本票群（票 06）**：对齐 dsh append-only 事件日志哲学
   （一切投影派生、无「非终态不持久」）与 OpenHands 状态转换事件持久化（goal 状态非
-  只在 complete 时记录）；R1 触发条件扩 waiting_*、`_closing_content` 增 waiting_request
-  分支；parse_numbered_list 拒收非清单内容天然安全（waiting 提问多数无清单则 no-op）。
+  只在 complete 时记录）；R1 触发条件扩 waiting_*（`trigger_statuses` 参数泛化），
+  收尾内容提取经 **`delivery.waiting_content()`** 权威提取器（已核实
+  `waiting_request` 无 `content` 字段，实际字段 question/prompt/reason，
+  `checkpoint_side_effects.py:33` 同款）；parse_numbered_list 拒收非清单内容天然安全
+  （waiting 提问多数无清单则 no-op）。
 
 ## 4. 挂点与影响面（已核实）
 

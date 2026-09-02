@@ -37,6 +37,15 @@ from app.services.agent_runtime.session_context_completion import (
     SessionCompactRequest,
     SessionContextCompactor,
 )
+from app.services.agent_runtime.session_task_state import (
+    PHASE_ACTIVE,
+    PHASE_COMPLETE,
+    SessionTaskStateLoader,
+    TaskSection,
+    completion_phrase_for,
+    render_pending_lists_line,
+    render_task_state_note,
+)
 from app.services.agent_runtime.state import (
     JsonObject,
     JsonValue,
@@ -339,6 +348,7 @@ class ContextBuilder:
         session_context_compactor: SessionContextCompactor | None = None,
         tool_result_store: ToolResultStore | None = None,
         cross_session_retriever: CrossSessionListRetriever | None = None,
+        task_state_loader: SessionTaskStateLoader | None = None,
     ) -> None:
         runtime_settings = settings or get_settings()
         if group_context_builder is None:
@@ -352,6 +362,7 @@ class ContextBuilder:
         self.session_context_compactor = session_context_compactor
         self._tool_result_store = tool_result_store
         self._cross_session_retriever = cross_session_retriever
+        self._task_state_loader = task_state_loader
 
     async def _retrieve_list_context(
         self,
@@ -398,6 +409,40 @@ class ContextBuilder:
         if result is None:
             return None
         return render_retrieval_note(result, current_run_id=context.run_id)
+
+    async def _load_task_state(self, context: RuntimeContext) -> TaskSection | None:
+        """Load the prior Run's persisted task state, or ``None`` (no-op).
+
+        The loader is best-effort: no loader, unparseable UUID scope, or any
+        load failure degrades to ``None`` so a Run's startup is never blocked
+        by a missing file or an unavailable store. The loader's own self-Run
+        guard already skips the current Run's freshly-written state.
+        """
+        if self._task_state_loader is None:
+            return None
+        agent_id = _optional_uuid(context.agent_id)
+        if agent_id is None:
+            return None
+        tenant_id = _optional_uuid(context.tenant_id)
+        if tenant_id is None:
+            return None
+        session_id = _optional_uuid(context.session_id)
+        if session_id is None:
+            return None
+        try:
+            return await self._task_state_loader.load(
+                tenant_id=tenant_id,
+                session_id=session_id,
+                agent_id=agent_id,
+                current_run_id=context.run_id,
+            )
+        except Exception:
+            logger.warning(
+                "Session task-state load failed for run %s; skipping injection",
+                context.run_id,
+                exc_info=True,
+            )
+            return None
 
     async def _rebuild_group_context_pack(
         self,
@@ -641,10 +686,23 @@ class ContextBuilder:
             if self._tool_result_store is not None
             else None
         )
+        task_section = await self._load_task_state(context)
+        completion_phrase = (
+            completion_phrase_for(task_section.phase, task_section.ended)
+            if task_section is not None
+            else None
+        )
+        pending_lists_line = (
+            render_pending_lists_line(task_section)
+            if task_section is not None and task_section.phase == PHASE_ACTIVE
+            else None
+        )
         prior_run_summary, current_run_messages = await bound_current_run_window(
             thread_messages,
             current_run_id=context.run_id,
             resolve_tool_result=resolve_tool_result,
+            completion_phrase=completion_phrase,
+            pending_lists_line=pending_lists_line,
         )
         window_messages = (
             (prior_run_summary, *current_run_messages)
@@ -657,6 +715,18 @@ class ContextBuilder:
         )
         if retrieval_note is not None:
             window_messages = (retrieval_note, *window_messages)
+        if (
+            prior_run_summary is None
+            and task_section is not None
+            and task_section.phase != PHASE_COMPLETE
+        ):
+            # Bridge inactive and a non-complete prior task state survives:
+            # inject a standalone past-tense note (D-9). Placed after the R3
+            # retrieval-note prepend, which stays in front.
+            window_messages = (
+                render_task_state_note(task_section, current_run_id=context.run_id),
+                *window_messages,
+            )
         selection = build_recent_tool_safe_window(
             window_messages,
             tool_execution_ledger,

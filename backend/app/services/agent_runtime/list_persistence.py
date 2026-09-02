@@ -22,6 +22,7 @@ from app.services.agent_runtime.command_worker import (
     RuntimeRunRecord,
     RuntimeSessionFactory,
 )
+from app.services.agent_runtime.delivery import waiting_content
 from app.services.agent_runtime.session_context_service import (
     SessionContextCandidate,
     SessionContextConflict,
@@ -38,6 +39,12 @@ from app.services.storage_runtime.base import StorageBackend
 logger = logging.getLogger(__name__)
 
 LIST_FILE_PATH = "memory/清单.md"
+
+# Lifecycle statuses that mark a Run as waiting (non-terminal). In these
+# states the closing content lives in ``lifecycle.waiting_request`` rather than
+# ``final_answer``. Exposed so the worker_service checkpoint-handler wiring
+# (ticket 06) can opt into persisting waiting closing lists.
+WAITING_STATUSES = ("waiting_user", "waiting_external", "waiting_agent")
 
 # R5 numbering contract, injected once per Run into the system prompt. Stable
 # wording: changes here are a model-visible contract change (backend/AGENTS.md).
@@ -349,6 +356,11 @@ def _closing_content(checkpoint: CheckpointObservation) -> str | None:
         content = request.get("content")
         if isinstance(content, str) and content.strip():
             return content.strip()
+    waiting = lifecycle.get("waiting_request")
+    if isinstance(waiting, Mapping):
+        content = waiting_content(waiting)
+        if content.strip():
+            return content.strip()
     return None
 
 
@@ -377,6 +389,7 @@ class ListPersistenceCompletionHandler:
         storage: StorageBackend | None = None,
         max_conflict_retries: int = 3,
         clock: Callable[[], datetime] | None = None,
+        trigger_statuses: Sequence[str] = ("completed",),
     ) -> None:
         if max_conflict_retries <= 0:
             raise ValueError("max_conflict_retries must be positive")
@@ -385,6 +398,7 @@ class ListPersistenceCompletionHandler:
         self._storage = storage
         self._max_conflict_retries = max_conflict_retries
         self._clock = clock or (lambda: datetime.now(UTC))
+        self._trigger_statuses = tuple(trigger_statuses)
 
     def _storage_backend(self) -> StorageBackend:
         return self._storage or get_storage_backend()
@@ -488,7 +502,7 @@ class ListPersistenceCompletionHandler:
         run: RuntimeRunRecord,
         checkpoint: CheckpointObservation,
     ) -> None:
-        if checkpoint.state["lifecycle"].get("status") != "completed":
+        if checkpoint.state["lifecycle"].get("status") not in self._trigger_statuses:
             return
         if run.agent_id is None:
             return
@@ -581,6 +595,7 @@ class ListPersistenceCompletionHandler:
 __all__ = [
     "LIST_FILE_PATH",
     "LIST_NUMBERING_CONTRACT",
+    "WAITING_STATUSES",
     "ListItem",
     "ListFile",
     "ListPersistenceCompletionHandler",

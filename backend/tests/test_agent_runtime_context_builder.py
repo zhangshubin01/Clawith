@@ -10,6 +10,13 @@ from app.services.agent_runtime.session_context_service import (
     SessionContextPack,
     SessionContextSnapshot,
 )
+from app.services.agent_runtime.session_task_state import (
+    PHASE_ACTIVE,
+    PHASE_COMPLETE,
+    PHASE_PAUSED,
+    PendingListRef,
+    TaskSection,
+)
 from app.services.agent_runtime.state import (
     RunInputSnapshots,
     RunRegistrySnapshot,
@@ -513,3 +520,161 @@ async def test_checkpoint_json_contract_rejects_non_finite_numbers(invalid_numbe
 
     assert exc_info.value.code == "invalid_runtime_context"
     assert "non-finite" in str(exc_info.value)
+
+
+# ---------------------------------------------------------------- task-state injection (票 05)
+
+
+class _FakeTaskStateLoader:
+    """Stub ``SessionTaskStateLoader`` returning one fixed section or ``None``."""
+
+    def __init__(self, section: TaskSection | None) -> None:
+        self.section = section
+        self.calls: list[tuple] = []
+
+    async def load(self, *, tenant_id, session_id, agent_id, current_run_id):
+        self.calls.append((tenant_id, session_id, agent_id, current_run_id))
+        return self.section
+
+
+def _task_section(
+    *,
+    phase: str,
+    ended: str,
+    goal: str = "优化 app",
+    pending: tuple[PendingListRef, ...] = (),
+) -> TaskSection:
+    return TaskSection(
+        session_id=uuid.uuid4(),
+        phase=phase,
+        ended=ended,
+        goal=goal,
+        run_id=uuid.uuid4(),
+        timestamp="2026-09-01 20:00",
+        pending_lists=pending,
+    )
+
+
+def _empty_snapshots() -> RunInputSnapshots:
+    return RunInputSnapshots(
+        session_context=SessionContextSnapshot.empty().to_json(),
+        session_context_version=0,
+        recent_session_messages=(),
+        related_run_summaries=(),
+        initial_input={"content": "start"},
+    )
+
+
+def _marker(run_id: str, content: str) -> dict:
+    return {
+        "id": f"current-input-{run_id}",
+        "role": "user",
+        "content": content,
+        "runtime_input": "current",
+        "runtime_run_id": run_id,
+    }
+
+
+@pytest.mark.asyncio
+async def test_bridge_active_active_section_uses_phase_phrase_and_pending_line():
+    # Bridge active (prior Run messages precede the marker) + a persisted
+    # ``active`` section: the summary must carry the phase phrase and the
+    # bounded 未决事项 pointer line.
+    run_id = str(uuid.uuid4())
+    prior_run_id = str(uuid.uuid4())
+    prior_marker = _marker(prior_run_id, "优化 app")
+    prior_result = _tool_result("prior-result", "call-compile")
+    prior_result["result_ref"] = "artifact://apk"
+    current_marker = _marker(run_id, "继续")
+    run_messages = [prior_marker, prior_result, current_marker]
+    section = _task_section(
+        phase=PHASE_ACTIVE,
+        ended="completed",
+        pending=(PendingListRef(list_id=uuid.uuid4(), title="app 优化清单", item_count=2),),
+    )
+    builder = context_builder.ContextBuilder(
+        _SessionContextService(SessionContextPack(SessionContextSnapshot.empty(), ())),
+        task_state_loader=_FakeTaskStateLoader(section),
+    )
+    state = _state(snapshots=_empty_snapshots(), run_messages=run_messages, run_id=run_id)
+
+    built = await builder.build(state, _context(state))
+
+    summary = built.recent_thread_messages[0]
+    assert summary["id"] == f"prior-run-summary:{run_id}"
+    assert summary["content"].startswith(
+        "历史上下文（非当前任务）：上一轮任务已交付，仍有未决事项"
+    )
+    assert "未决事项：清单「app 优化清单」（2 项，见 memory/清单.md）" in summary["content"]
+
+
+@pytest.mark.asyncio
+async def test_bridge_inactive_non_complete_prepends_standalone_note():
+    # No prior Run messages (bridge inactive) + a persisted non-complete
+    # section: a standalone past-tense note is prepended to the window.
+    run_id = str(uuid.uuid4())
+    current_marker = _marker(run_id, "继续")
+    run_messages = [current_marker, _normal("recent-0")]
+    section = _task_section(phase=PHASE_PAUSED, ended="waiting_user", goal="优化 app")
+    builder = context_builder.ContextBuilder(
+        _SessionContextService(SessionContextPack(SessionContextSnapshot.empty(), ())),
+        task_state_loader=_FakeTaskStateLoader(section),
+    )
+    state = _state(snapshots=_empty_snapshots(), run_messages=run_messages, run_id=run_id)
+
+    built = await builder.build(state, _context(state))
+
+    messages = built.recent_thread_messages
+    assert messages[0]["runtime_input"] == "session_task_state"
+    assert messages[0]["id"] == f"session-task-state:{run_id}"
+    assert "历史上下文（非当前任务）：上一轮任务暂停，等待你的回复" in messages[0]["content"]
+    assert "任务「优化 app」" in messages[0]["content"]
+    # the current run's own messages still follow the note
+    assert messages[1]["id"] == f"current-input-{run_id}"
+
+
+@pytest.mark.asyncio
+async def test_complete_section_injects_no_standalone_note():
+    # phase == complete → zero injection even when the bridge is inactive.
+    run_id = str(uuid.uuid4())
+    current_marker = _marker(run_id, "继续")
+    run_messages = [current_marker]
+    section = _task_section(phase=PHASE_COMPLETE, ended="completed")
+    builder = context_builder.ContextBuilder(
+        _SessionContextService(SessionContextPack(SessionContextSnapshot.empty(), ())),
+        task_state_loader=_FakeTaskStateLoader(section),
+    )
+    state = _state(snapshots=_empty_snapshots(), run_messages=run_messages, run_id=run_id)
+
+    built = await builder.build(state, _context(state))
+
+    assert all(
+        message["runtime_input"] != "session_task_state"
+        for message in built.recent_thread_messages
+    )
+    assert built.recent_thread_messages[0]["id"] == f"current-input-{run_id}"
+
+
+@pytest.mark.asyncio
+async def test_no_task_state_loader_keeps_legacy_bridge_wording():
+    # No loader configured (backward-compatible default): the bridge keeps the
+    # legacy fixed phrase and no standalone note is injected.
+    run_id = str(uuid.uuid4())
+    prior_run_id = str(uuid.uuid4())
+    prior_marker = _marker(prior_run_id, "重新编译项目")
+    current_marker = _marker(run_id, "优化")
+    run_messages = [prior_marker, current_marker]
+    builder = context_builder.ContextBuilder(
+        _SessionContextService(SessionContextPack(SessionContextSnapshot.empty(), ()))
+    )
+    state = _state(snapshots=_empty_snapshots(), run_messages=run_messages, run_id=run_id)
+
+    built = await builder.build(state, _context(state))
+
+    summary = built.recent_thread_messages[0]
+    assert summary["id"] == f"prior-run-summary:{run_id}"
+    assert summary["content"].startswith("历史上下文（非当前任务）：上一轮已完成")
+    assert all(
+        message["runtime_input"] != "session_task_state"
+        for message in built.recent_thread_messages
+    )

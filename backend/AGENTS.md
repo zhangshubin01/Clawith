@@ -140,6 +140,39 @@ Treat stable model-visible wording and schemas as behavior. Changes require an
 update to the owning contract and verification through the assembled model
 request or Tool execution path.
 
+### Session task-state completion phrases (D-11)
+
+The same-Session previous-Run task-state bridge wording is a stable model-visible
+contract derived from `(phase, ended)`: always past-tense, marked 非当前任务,
+never imperative. Owning contract:
+`docs/technical-plans/20260901-same-session-task-state.md` §3.4 / D-11.
+
+| phase | wording (verbatim) |
+|---|---|
+| complete | 上一轮已完成 |
+| active | 上一轮任务已交付，仍有未决事项 |
+| paused | 上一轮任务暂停，等待你的回复 |
+| blocked + ended=failed | 上一轮任务未完成（未成功） |
+| blocked + ended=cancelled | 上一轮任务未完成（已取消） |
+| blocked + other/missing ended | 上一轮任务未完成 |
+| missing state (legacy default) | 上一轮已完成 |
+
+When the bridge is inactive (the previous Run was compacted out of the window)
+and `phase != complete`, a standalone past-tense 非当前任务 note is prepended to
+the window (the goal part is omitted when empty). Its 未决事项 pointer is
+bounded: at most 3 lists, each title stripped and truncated to 30 characters
+(blank titles fall back to 清单), with a trailing 等 when more lists exist:
+
+```text
+历史上下文（非当前任务）：[phase wording]。任务「goal」。[未决事项：清单「title」（N 项，见 memory/清单.md）；…]
+```
+
+Wording constants and renderers live in `session_task_state.py`
+(`PHASE_COMPLETION_PHRASES` / `completion_phrase_for` / `render_task_state_note` /
+`render_pending_lists_line`); `test_session_task_state.py` pins the wording. A
+wording change must update those constants, this section, and the pinned tests
+together.
+
 ## Enforcement
 
 The operation that reads protected data, mutates authoritative state, or causes

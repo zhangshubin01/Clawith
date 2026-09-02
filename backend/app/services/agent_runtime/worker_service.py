@@ -64,6 +64,7 @@ from app.services.agent_runtime.langgraph_driver import (
 )
 from app.services.agent_runtime.list_persistence import (
     ListPersistenceCompletionHandler,
+    WAITING_STATUSES,
 )
 from app.services.agent_runtime.model_step_service import RuntimeModelStepService
 from app.services.agent_runtime.node_executor import DeterministicRuntimeNodeExecutor
@@ -92,6 +93,11 @@ from app.services.agent_runtime.session_context_background import (
 )
 from app.services.agent_runtime.session_context_completion import (
     SessionContextCompletionHandler,
+)
+from app.services.agent_runtime.session_task_state import (
+    SessionTaskStateLoader,
+    SessionTaskStateTerminalHandler,
+    SessionTaskStateWaitingHandler,
 )
 from app.services.agent_runtime.task_completion import TaskRuntimeCompletionHandler
 from app.services.agent_runtime.tool_lease_reconcile import (
@@ -234,12 +240,17 @@ def build_runtime_worker_components(
         session_factory=session_factory,
         context_service=session_context_service,
     )
+    task_state_loader = SessionTaskStateLoader(
+        session_factory=session_factory,
+        context_service=session_context_service,
+    )
     context_builder = ContextBuilder(
         session_context_service,
         settings=runtime_settings,
         session_context_compactor=session_context_compactor,
         tool_result_store=tool_result_store,
         cross_session_retriever=cross_session_retriever,
+        task_state_loader=task_state_loader,
     )
     cancel_source = DatabaseRuntimeCancelSource(session_factory=session_factory)
     model_service = RuntimeModelStepService(
@@ -327,6 +338,19 @@ def build_runtime_worker_components(
                 session_factory=session_factory,
                 settings=runtime_settings,
             ),
+            # 票 06（D-12）：waiting 收尾的编号清单同样确定性落库（dsh append-only 哲学）。
+            # 必须排在 SessionTaskStateWaitingHandler 之前：paused 节快照 open_items
+            # 时才能带上本 run 自己的 waiting 清单指针。终态路径由下方
+            # terminal_handlers 中的默认注册（trigger=completed）承担。
+            ListPersistenceCompletionHandler(
+                session_factory=session_factory,
+                context_service=session_context_service,
+                trigger_statuses=WAITING_STATUSES,
+            ),
+            SessionTaskStateWaitingHandler(
+                session_factory=session_factory,
+                context_service=session_context_service,
+            ),
         ),
         terminal_handlers=(
             SessionContextCompletionHandler(
@@ -344,6 +368,10 @@ def build_runtime_worker_components(
             OnboardingRuntimeCompletionHandler(session_factory=session_factory),
             A2ARuntimeCompletionHandler(session_factory=session_factory),
             SchedulingLaneCompletionHandler(session_factory=session_factory),
+            SessionTaskStateTerminalHandler(
+                session_factory=session_factory,
+                context_service=session_context_service,
+            ),
         ),
     )
     resolved_claimant = claimant or runtime_worker_claimant()
