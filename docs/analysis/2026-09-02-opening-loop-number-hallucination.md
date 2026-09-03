@@ -73,6 +73,8 @@
 - **条目标题列表注入**：有未决清单指针即每个 model step 注入全部**条目标题**（编号+标题、每份 ≤20 条、无描述、≤3 份清单），含 heartbeat 语义统一；正文不注入，模型按需 read_file；
 - 超 20 条显式标注「仅列出前 K 项；完整内容见 memory/清单.md」；措辞 past-tense 且**无「当前」**：「历史上下文（非当前任务）：此前已确认、尚未完结的清单…」。
 
+**上线后补丁（2026-09-03，已实施）**：dec47111 上线后首验发现后台 run（trigger/heartbeat）结构性不注入——`StartRunCommand` 不传 `actor_user_id`（None）→ `retrieve()` 的 user_id=None 跳过跨会话分支 + 每 fire 全新 run-scoped trigger 会话步时无指针。补丁=user_id=None 时回退到本 agent 近期 trigger 会话的指针（Q5「含 heartbeat」意图补全）。方案 `docs/technical-plans/20260903-r3-background-run-scope-fix.md` + 评审 `20260903-r3-background-run-scope-fix-review.md`。
+
 **附注（参考资料对照）**：查证 letta-code（recall 子代理）、mem0（embedding 检索）、deepseek-harness（压缩零词集、指代原话逐字保留）、Claude Code/Codex（主模型对齐 todo 状态）、OpenHands（condenser）——**「正则词集解析用户意图」不是任何参考项目的做法**；行业分工是触发用规则、消解交 LLM。本方案进一步：连触发规则都删，注入交给确定性条件（指针存在性），对齐交给主模型。教训已入记忆 `plans-compare-reference-materials`。
 
 ### 第 2 层：历史上下文瘦身（主因，中等改动，归入待办 3.1）

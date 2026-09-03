@@ -136,11 +136,14 @@ class _ContextService:
         self,
         snapshot_open_items: tuple = (),
         recent: list | None = None,
+        trigger_recent: list | None = None,
     ) -> None:
         self._snapshot = snapshot_open_items
         self._recent = recent if recent is not None else []
+        self._trigger_recent = trigger_recent if trigger_recent is not None else []
         self.load_snapshot_calls: list = []
         self.recent_calls: list = []
+        self.trigger_recent_calls: list = []
 
     async def load_snapshot(self, db, *, tenant_id, session_id):
         del db
@@ -169,6 +172,19 @@ class _ContextService:
         del db
         self.recent_calls.append((tenant_id, agent_id, user_id, exclude_session_id, limit))
         return tuple(self._recent)
+
+    async def load_recent_agent_trigger_sessions_open_items(
+        self,
+        db,
+        *,
+        tenant_id,
+        agent_id,
+        exclude_session_id=None,
+        limit=5,
+    ):
+        del db
+        self.trigger_recent_calls.append((tenant_id, agent_id, exclude_session_id, limit))
+        return tuple(self._trigger_recent)
 
 
 def _pointer(list_id: uuid.UUID, project: str | None = "mydome1") -> dict:
@@ -275,6 +291,138 @@ async def test_retrieve_cross_session_injects_all_titles() -> None:
     assert [item.number for item in result.sections[0].items] == [1, 2, 3, 4, 5]
     # The prior session's pointer was found; the current session was excluded.
     assert service.recent_calls == [(tenant_id, agent_id, user_id, current_session_id, 5)]
+
+
+@pytest.mark.asyncio
+async def test_retrieve_background_run_falls_back_to_agent_trigger_sessions() -> None:
+    # Regression for run 35338e16: a background run has no acting user
+    # (user_id=None) and its fresh run-scoped trigger session has no pointer
+    # at step time. The open-list title index must still resolve from the
+    # agent's own recent trigger sessions.
+    list_id = uuid.uuid4()
+    tenant_id = uuid.uuid4()
+    agent_id = uuid.uuid4()
+    current_session_id = uuid.uuid4()
+    prior_trigger_session_id = uuid.uuid4()
+    storage = _Storage(_list_file_content(list_id))
+    service = _ContextService(
+        snapshot_open_items=(),
+        trigger_recent=[(prior_trigger_session_id, (_pointer(list_id),))],
+    )
+    retriever = _retriever(storage=storage, context_service=service)
+
+    result = await retriever.retrieve(
+        tenant_id=tenant_id,
+        agent_id=agent_id,
+        user_id=None,
+        session_id=current_session_id,
+        project="mydome1",
+    )
+
+    assert result is not None
+    assert result.total_lists == 1
+    assert [item.number for item in result.sections[0].items] == [1, 2, 3, 4, 5]
+    assert service.load_snapshot_calls == [(tenant_id, current_session_id)]
+    assert service.trigger_recent_calls == [(tenant_id, agent_id, current_session_id, 5)]
+    assert service.recent_calls == []
+
+
+@pytest.mark.asyncio
+async def test_retrieve_background_current_session_first_then_trigger_dedup() -> None:
+    # Current-session pointers come first; the trigger-session fallback
+    # contributes only pointers not already seen (dedup), after them.
+    current_list_id = uuid.uuid4()
+    shared_list_id = uuid.uuid4()
+    prior_list_id = uuid.uuid4()
+    storage = _Storage(
+        _list_file_content(current_list_id, title="当前清单")
+        + _list_file_content(shared_list_id, title="共享清单")
+        + _list_file_content(prior_list_id, title="回退清单")
+    )
+    service = _ContextService(
+        snapshot_open_items=(_pointer(current_list_id), _pointer(shared_list_id)),
+        trigger_recent=[(uuid.uuid4(), (_pointer(shared_list_id), _pointer(prior_list_id)))],
+    )
+    retriever = _retriever(storage=storage, context_service=service)
+
+    result = await retriever.retrieve(
+        tenant_id=uuid.uuid4(),
+        agent_id=uuid.uuid4(),
+        user_id=None,
+        session_id=uuid.uuid4(),
+        project=None,
+    )
+
+    assert result is not None
+    assert result.total_lists == 3
+    assert [section.title for section in result.sections] == ["当前清单", "共享清单", "回退清单"]
+
+
+@pytest.mark.asyncio
+async def test_retrieve_with_user_keeps_direct_path_only() -> None:
+    # A run with an acting user keeps the direct-session path and never
+    # consults the agent-internal trigger-session fallback.
+    list_id = uuid.uuid4()
+    user_id = uuid.uuid4()
+    storage = _Storage(_list_file_content(list_id))
+    service = _ContextService(
+        snapshot_open_items=(),
+        recent=[(uuid.uuid4(), (_pointer(list_id),))],
+        trigger_recent=[(uuid.uuid4(), (_pointer(list_id),))],
+    )
+    retriever = _retriever(storage=storage, context_service=service)
+
+    result = await retriever.retrieve(
+        tenant_id=uuid.uuid4(),
+        agent_id=uuid.uuid4(),
+        user_id=user_id,
+        session_id=uuid.uuid4(),
+        project=None,
+    )
+
+    assert result is not None
+    assert service.trigger_recent_calls == []
+    assert len(service.recent_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_retrieve_background_without_any_pointer_is_noop() -> None:
+    storage = _Storage(None)
+    service = _ContextService(snapshot_open_items=(), trigger_recent=[])
+    retriever = _retriever(storage=storage, context_service=service)
+
+    result = await retriever.retrieve(
+        tenant_id=uuid.uuid4(),
+        agent_id=uuid.uuid4(),
+        user_id=None,
+        session_id=uuid.uuid4(),
+        project=None,
+    )
+
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_retrieve_background_project_mismatch_is_noop() -> None:
+    # The project filter applies on the fallback path too: a pointer for a
+    # different project must not resolve.
+    list_id = uuid.uuid4()
+    storage = _Storage(_list_file_content(list_id, project="mydome1"))
+    service = _ContextService(
+        snapshot_open_items=(),
+        trigger_recent=[(uuid.uuid4(), (_pointer(list_id, project="other-project"),))],
+    )
+    retriever = _retriever(storage=storage, context_service=service)
+
+    result = await retriever.retrieve(
+        tenant_id=uuid.uuid4(),
+        agent_id=uuid.uuid4(),
+        user_id=None,
+        session_id=uuid.uuid4(),
+        project="mydome1",
+    )
+
+    assert result is None
 
 
 @pytest.mark.asyncio

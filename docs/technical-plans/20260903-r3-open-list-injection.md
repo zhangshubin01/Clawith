@@ -79,6 +79,8 @@
 - 仅 chat run 注入：Q5 否决；
 - flash 幻觉放大器的模型升级：归 3.2 待办。
 
+**补丁（2026-09-03）**：上线后首验发现后台 trigger/heartbeat run 因 actor=None 结构性不注入（Q5「含 heartbeat」意图被静默架空）——补丁方案见 `docs/technical-plans/20260903-r3-background-run-scope-fix.md`（评审 `-review.md`）。
+
 ## 六、引用严谨性声明（评审第 3 条）
 
 - 源码级查证：letta-code（recall 子代理）、mem0（20+ 向量后端）、deepseek-harness（compaction 零词集、verbatim 原则）；

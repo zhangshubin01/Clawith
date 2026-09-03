@@ -335,6 +335,42 @@ def _recent_sessions_open_items_statement(
     return statement.order_by(SessionContextState.updated_at.desc()).limit(limit)
 
 
+def _recent_trigger_sessions_open_items_statement(
+    tenant_id: uuid.UUID,
+    agent_id: uuid.UUID,
+    *,
+    exclude_session_id: uuid.UUID | None,
+    limit: int,
+):
+    """Recent agent-internal trigger sessions' Session Context rows.
+
+    R3 fallback scope for background Runs without an acting user: the agent's
+    own ``session_type='trigger'`` sessions only — same tenant and agent, so
+    there is no cross-user or cross-agent exposure.
+    """
+    statement = (
+        select(SessionContextState.session_id, SessionContextState.open_items)
+        .join(
+            ChatSession,
+            and_(
+                ChatSession.tenant_id == SessionContextState.tenant_id,
+                ChatSession.id == SessionContextState.session_id,
+            ),
+        )
+        .where(
+            SessionContextState.tenant_id == tenant_id,
+            SessionContextState.agent_id == agent_id,
+            ChatSession.session_type == "trigger",
+            ChatSession.deleted_at.is_(None),
+        )
+    )
+    if exclude_session_id is not None:
+        statement = statement.where(
+            SessionContextState.session_id != exclude_session_id
+        )
+    return statement.order_by(SessionContextState.updated_at.desc()).limit(limit)
+
+
 def _message_scope(tenant_id: uuid.UUID, session_id: uuid.UUID):
     return (
         ChatSession.tenant_id == tenant_id,
@@ -756,6 +792,43 @@ class SessionContextService:
                 tenant_id,
                 agent_id,
                 user_id,
+                exclude_session_id=exclude_session_id,
+                limit=limit,
+            )
+        )
+        return tuple(
+            (
+                row.session_id,
+                tuple(_copy_json_sequence(row.open_items, "open_items")),
+            )
+            for row in result.all()
+        )
+
+    async def load_recent_agent_trigger_sessions_open_items(
+        self,
+        db: AsyncSession,
+        *,
+        tenant_id: uuid.UUID,
+        agent_id: uuid.UUID,
+        exclude_session_id: uuid.UUID | None = None,
+        limit: int = 5,
+    ) -> tuple[tuple[uuid.UUID, tuple[JsonValue, ...]], ...]:
+        """Recent agent-internal trigger sessions' open_items, newest first.
+
+        R3 fallback scope for background Runs without an acting user: same
+        tenant, same agent, ``session_type='trigger'`` sessions only,
+        soft-deleted excluded, ordered by the Session Context row's
+        ``updated_at`` descending and capped at ``limit``. Returns
+        ``(session_id, open_items)`` pairs; pointer/domain interpretation
+        belongs to the caller. ``exclude_session_id`` drops the caller's own
+        session so its current state is not double-counted.
+        """
+        if limit <= 0:
+            raise ValueError("limit must be greater than zero")
+        result = await db.execute(
+            _recent_trigger_sessions_open_items_statement(
+                tenant_id,
+                agent_id,
                 exclude_session_id=exclude_session_id,
                 limit=limit,
             )

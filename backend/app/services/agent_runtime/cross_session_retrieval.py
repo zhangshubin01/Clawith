@@ -1,7 +1,9 @@
 """Cross-session open-list title injection (R3 of Run-context inheritance).
 
 While an open ``memory/清单.md`` pointer exists in the current session's
-``session_context_states.open_items`` or in recent sessions, the Runtime
+``session_context_states.open_items`` or in recent sessions (the acting user's
+direct sessions, or — for background Runs without an acting user — the agent's
+own trigger sessions), the Runtime
 injects a bounded **title index** of those lists into the model window as a
 past-tense "非当前任务" note. There is no intent detection: the note is
 unconditional session-level standing context, so the model can align a goal's
@@ -205,7 +207,12 @@ class CrossSessionListRetriever:
         """Return the open-list title index, or ``None`` on a miss (no-op).
 
         Unconditional: whichever open-list pointers resolve against the list
-        file are injected, without inspecting the Run's goal wording.
+        file are injected, without inspecting the Run's goal wording. When the
+        Run has an acting user, cross-session candidates come from the user's
+        recent direct sessions; a background Run without an acting user
+        (``user_id=None``, e.g. trigger/heartbeat) falls back to the agent's
+        own recent trigger sessions so open-list continuity survives across
+        fires.
         """
         candidates: list[uuid.UUID] = []
         async with self._session_factory() as db:
@@ -227,10 +234,22 @@ class CrossSessionListRetriever:
                     exclude_session_id=session_id,
                     limit=self._max_sessions,
                 )
-                for _session_id, open_items in recent:
-                    for list_id in _collect_list_pointer_ids(open_items, project=project):
-                        if list_id not in candidates:
-                            candidates.append(list_id)
+            else:
+                # Background Run without an acting user: each trigger fire runs
+                # in a fresh run-scoped trigger session whose pointer is only
+                # written by the Run's own completion node, so the title index
+                # must come from the agent's earlier trigger sessions.
+                recent = await self._context_service.load_recent_agent_trigger_sessions_open_items(
+                    db,
+                    tenant_id=tenant_id,
+                    agent_id=agent_id,
+                    exclude_session_id=session_id,
+                    limit=self._max_sessions,
+                )
+            for _session_id, open_items in recent:
+                for list_id in _collect_list_pointer_ids(open_items, project=project):
+                    if list_id not in candidates:
+                        candidates.append(list_id)
         if not candidates:
             return None
 
