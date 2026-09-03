@@ -91,8 +91,9 @@ Langfuse v4 采用双表分层：
 **P1 数据复检——✅ 已执行（2026-09-03 06:05Z，窗口 02:02Z 起）**
 
 - §8 查询复跑：reasoning 合并 17/17 ✅、run 根 input 5/5 ✅；TTFT 与跨 run parent 见 §4 结构性结论
-- judge 输入窗口（root output）复检：本窗口无 judge run，待下次 judge 触发时顺带确认
+- judge 输入窗口（root output）复检：**✅ 已随 10:17Z 三轮体检验证**——run-goal-judge evaluator 09:03Z/09:06Z 两次执行，输入 5833 字符完整含 run goal（`Goal of the run: # HEARTBEAT...`），未因 run 根 input 新增 goal 而受影响
 - **二次复检（08:28Z，窗口 06:00Z 起）**：TTFT 已由真实 chat 数据关闭（foreground 10/10 有可见内容的全有值）；全窗口无异常——ERROR 仅 2 条用户取消、input/usage 100% 填充、evaluator 52 span=26 TOOL×2 规则正常
+- **三轮复检（10:17Z，窗口 08:28Z 起，GENERATION 266）**：TTFT 104（foreground 104/139 有可见内容即全填）、reasoning 246/248、run 根 input 18/18、input/usage 100%。18 条 ERROR=网络层断连（15 RemoteProtocolError+3 其他），集中在 1 个 1 小时长任务（trace 2a41a974，119 次调用中 15 次失败、12.6% 偶发断连，payload 9K~137K 无关，最终 cancelled_by_user）——属运行时网络事件非采集缺陷；跨 run parent 仍无 A2A 场景（0/18）
 
 **P2 分析口径约定（零改动，已部分落地）**
 
