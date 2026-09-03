@@ -75,8 +75,38 @@ Langfuse v4 采用双表分层：
 ## 7. 新发现（此前未意识到，非阻塞）
 
 1. **Langfuse UI 列表视图永远只显示 200 字符预览**（§1）——看完整 input/output 必须进详情页或走 events_full 的 API。这与 Clawith 侧 64k/4000 的上限无关
-2. **evaluator 噪声**：tool-failure 与 tool-retry-exhausted 两条 CODE 规则对每条 TOOL 全量执行，每天生成 ~2500 条 evaluator span（占 SPAN 总数 32%）。若后续增加工具调用量，先考虑给这两条规则加采样
+2. **evaluator span 不是噪声，是第一方评分的载体**：tool-failure 与 tool-retry-exhausted 两条 CODE 规则对每条 TOOL 全量执行，每个执行产 1 条 span + **1 条 score**（3 天各 1903 条 `tool_failure`/`tool_retry_exhausted` score，即工具失败率指标的数据源）。这 3762 条 span（占 SPAN 32%）是逐工具评分的固有成本——**不能采样**（采样=丢失败率指标），若 UI 列表噪声困扰，用过滤视图而非改采样率
 3. **run 根 span 只占 SPAN 的 0.9%**（108/11772）：根级聚合（按 run 统计）需按 `name='run'` 过滤而非 `is_app_root`（后者把 3762 条 evaluator span 也算进去，`is_app_root` 语义是「外部父级的逻辑根」）
+
+## 9. 优先级待办（按收益/风险）
+
+**P0 部署 f-shubin-0806 的观测修复（1224cf77 + e3204afb）——唯一必须的动作**
+
+- 收益：一次部署同时关闭全部 4 个实锤缺口——TTFT（0/1134 → 全量）、reasoning 记录（0 → 全量）、run 根 input（0/108 → 108，goal 从 metadata 转正为 input）、跨 run parent 关联（0 → 有）。监控能力型收益：推理行为可观测、首 token 延迟可观测、judge 输入窗口语义完整、子 run 血缘可追溯
+- 风险：
+  - 部署固有风险（杀在途 run）→ 已有 6f43d25b 账本终态复用+审计防护，按 clawith-prod-deploy 清单执行
+  - 唯一新代码风险点：e3204afb 改动 a2a_runtime 子 run 创建的 command payload + langgraph_driver 的 trace_context 解析——部署后重点验证 a2a 子 run 正常发起、父子 trace 关联出现
+  - 1224cf77 改变 generation output 结构（`{"content","reasoning_content"}`）——下游读 generation output 的只有 Langfuse 内展示/分析（judge 读 run 根 output，前端 reasoning 走 DB tool_call_log，均不受影响）
+  - 已过 165 测试 + arch-guard + ruff + pyright 基线
+- 部署后验证：§8 填充率查询复跑——TTFT 非空、output 含 reasoning_content、run 根 input=goal、app-root with parent 出现
+
+**P1 数据复检（跟随部署，半小时级）**
+
+- 复跑 §8 四条查询确认缺口关闭；顺带确认 judge 输入窗口（root output）内容未因 input 新增而变化
+
+**P2 分析口径约定（零改动，已部分落地）**
+
+- 成本/用量分析按 `run_kind` 拆心跳（heartbeat 占 LLM 调用 46%）
+- 根级聚合按 `name='run'` 过滤，不按 `is_app_root`
+- events_core/full 双表陷阱已存记忆 langfuse-events-core-vs-full
+
+**P3 明确不做（评估过，收益不足或风险过高）**
+
+- tool-failure/tool-retry-exhausted 加采样：**否决**——它们各产 1903 条 score/3 天（逐工具评分），采样=丢工具失败率指标；UI 噪声用过滤视图解决
+- GENERATION 层记录 tool_calls 数组：工具参数含敏感数据，与「工具入参不入 trace」的设计冲突（权威账本在 agent_tool_executions）——不做
+- 改 events_core 的 200 字符截断：平台物化视图固定值，需重建 CH 表，高风险低收益——不做
+- TOOL/SPAN 层成本定价：Langfuse 不支持工具层计价——不做
+- DeepSeek 思考/回答 token 拆分：provider 不回传分桶——无法做
 
 ## 8. 复查用的 CH 查询配方（只读）
 
