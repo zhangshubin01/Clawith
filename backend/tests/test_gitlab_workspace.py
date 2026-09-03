@@ -431,3 +431,181 @@ def test_schedule_signature_distinguishes_base_url(monkeypatch):
 
     asyncio.run(_run())
     assert calls == [("g/r", "http://h1"), ("g/r", "http://h2")]
+
+
+# ── 物化时凭证重注入（sandbox .git 凭证补齐）──────────────────
+
+
+def _fake_repo_copy(root, name="mydome1"):
+    repo = root / "workspace" / name
+    (repo / ".git").mkdir(parents=True)
+    (repo / ".git" / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+    return repo
+
+
+def test_inject_temp_workspace_no_git_skips_binding(tmp_path, monkeypatch):
+    async def boom(agent_id):
+        raise AssertionError("no .git in copy → binding lookup must be skipped")
+
+    monkeypatch.setattr(gw, "_load_binding_credential", boom)
+    ws = tmp_path / "ws"
+    (ws / "workspace" / "proj").mkdir(parents=True)
+    assert _run(gw.inject_credentials_into_temp_workspace(ws, uuid.uuid4())) is False
+
+
+def test_inject_temp_workspace_no_binding_noop(tmp_path, monkeypatch):
+    async def no_cred(agent_id):
+        return None
+
+    monkeypatch.setattr(gw, "_load_binding_credential", no_cred)
+    ws = tmp_path / "ws"
+    _fake_repo_copy(ws)
+    assert _run(gw.inject_credentials_into_temp_workspace(ws, uuid.uuid4())) is False
+
+
+def test_inject_temp_workspace_applies_repo_config(tmp_path, monkeypatch):
+    async def fake_cred(agent_id):
+        return ("glpat-test123", "http://192.168.5.254", "mydome1", "Android 工程师 07", "agent-abc@clawith.local")
+
+    monkeypatch.setattr(gw, "_load_binding_credential", fake_cred)
+    fake = FakeGit({})
+    monkeypatch.setattr(gw, "_run_git", fake)
+    ws = tmp_path / "ws"
+    _fake_repo_copy(ws)
+    assert _run(gw.inject_credentials_into_temp_workspace(ws, uuid.uuid4())) is True
+    joined = [" ".join(c) for c in fake.calls]
+    assert any("url.http://oauth2:glpat-test123@192.168.5.254/.insteadOf http://192.168.5.254/" in j for j in joined)
+    assert any("user.name Android 工程师 07" in j for j in joined)
+    assert any("user.email agent-abc@clawith.local" in j for j in joined)
+
+
+def test_inject_temp_workspace_repo_name_mismatch_noop(tmp_path, monkeypatch):
+    async def fake_cred(agent_id):
+        return ("glpat-test123", "http://192.168.5.254", "other-repo", "n", "e@x")
+
+    monkeypatch.setattr(gw, "_load_binding_credential", fake_cred)
+    fake = FakeGit({})
+    monkeypatch.setattr(gw, "_run_git", fake)
+    ws = tmp_path / "ws"
+    _fake_repo_copy(ws, name="mydome1")
+    assert _run(gw.inject_credentials_into_temp_workspace(ws, uuid.uuid4())) is False
+    assert fake.calls == []
+
+
+def test_inject_temp_workspace_git_failure_returns_false(tmp_path, monkeypatch):
+    async def fake_cred(agent_id):
+        return ("glpat-test123", "http://192.168.5.254", "mydome1", "n", "e@x")
+
+    monkeypatch.setattr(gw, "_load_binding_credential", fake_cred)
+    monkeypatch.setattr(gw, "_run_git", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("git broken")))
+    ws = tmp_path / "ws"
+    _fake_repo_copy(ws)
+    assert _run(gw.inject_credentials_into_temp_workspace(ws, uuid.uuid4())) is False
+
+
+# ── _load_binding_credential（DB/解密层）──────────────────────
+
+
+class _Scalar:
+    def __init__(self, value):
+        self._value = value
+
+    def scalar_one_or_none(self):
+        return self._value
+
+
+class _FakeSession:
+    """Answers the two queries in order: ChannelConfig, then Agent."""
+
+    def __init__(self, config=None, agent=None):
+        self._config = config
+        self._agent = agent
+        self._queries = 0
+
+    async def execute(self, stmt):
+        self._queries += 1
+        return _Scalar(self._config if self._queries == 1 else self._agent)
+
+
+class _FakeDaoSessionCtx:
+    def __init__(self, inner):
+        self._inner = inner
+
+    async def __aenter__(self):
+        return self._inner
+
+    async def __aexit__(self, *exc):
+        return False
+
+
+class _FakeQueryDao:
+    def __init__(self, inner):
+        self._inner = inner
+
+    def session(self, *, readonly=False):
+        return _FakeDaoSessionCtx(self._inner)
+
+
+def _patch_query_dao(monkeypatch, inner):
+    from app.dao import query_dao  # QueryDAO 实例（包属性，非子模块）
+
+    monkeypatch.setattr(query_dao, "session", _FakeQueryDao(inner).session)
+
+
+def _patch_decrypt(monkeypatch, fn):
+    import app.core.security as sec
+
+    monkeypatch.setattr(sec, "decrypt_data", fn)
+
+
+def test_load_binding_credential_no_binding_none(monkeypatch):
+    _patch_query_dao(monkeypatch, _FakeSession(config=None))
+    assert _run(gw._load_binding_credential(uuid.uuid4())) is None
+
+
+def test_load_binding_credential_decrypt_failure_none(monkeypatch):
+    from app.models.channel_config import ChannelConfig
+
+    agent_id = uuid.uuid4()
+    config = ChannelConfig(
+        agent_id=agent_id,
+        channel_type="gitlab",
+        app_secret="garbage",
+        is_configured=True,
+        extra_config={
+            "project_path": "zhangshubin/mydome1",
+            "base_url": "http://192.168.5.254",
+            "init_status": "done",
+        },
+    )
+    _patch_query_dao(monkeypatch, _FakeSession(config=config))
+    _patch_decrypt(monkeypatch, lambda c, k: (_ for _ in ()).throw(ValueError("bad ciphertext")))
+    assert _run(gw._load_binding_credential(agent_id)) is None
+
+
+def test_load_binding_credential_success(monkeypatch):
+    from types import SimpleNamespace
+
+    from app.models.channel_config import ChannelConfig
+
+    agent_id = uuid.uuid4()
+    config = ChannelConfig(
+        agent_id=agent_id,
+        channel_type="gitlab",
+        app_secret="cipher",
+        is_configured=True,
+        extra_config={
+            "project_path": "zhangshubin/mydome1",
+            "base_url": "http://192.168.5.254/",
+            "init_status": "done",
+        },
+    )
+    _patch_query_dao(monkeypatch, _FakeSession(config=config, agent=SimpleNamespace(name="Android 工程师 07")))
+    _patch_decrypt(monkeypatch, lambda c, k: "glpat-secret")
+    assert _run(gw._load_binding_credential(agent_id)) == (
+        "glpat-secret",
+        "http://192.168.5.254",
+        "mydome1",
+        "Android 工程师 07",
+        f"agent-{agent_id.hex[:8]}@clawith.local",
+    )

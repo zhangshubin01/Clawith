@@ -314,6 +314,102 @@ async def _inject_mode(
     return out.strip() if rc == 0 else None
 
 
+def _iter_repo_copies(root: Path):
+    """Complete git repos directly under ``workspace/`` of a materialized copy."""
+    workspace = root / "workspace"
+    if not workspace.is_dir():
+        return
+    for entry in sorted(workspace.iterdir()):
+        if entry.is_dir() and (entry / ".git" / "HEAD").is_file():
+            yield entry
+
+
+async def _load_binding_credential(agent_id: uuid.UUID) -> tuple[str, str, str, str, str] | None:
+    """Load ``(pat, base_url, repo_name, agent_name, agent_email)`` from the
+    agent's GitLab binding; ``None`` when there is nothing injectable.
+
+    Never raises: credential injection is best-effort and must not affect the
+    workspace materialization path.
+    """
+    try:
+        from sqlalchemy import select
+
+        from app.core.security import decrypt_data
+        from app.dao import query_dao
+        from app.models.agent import Agent as AgentModel
+        from app.models.channel_config import ChannelConfig
+
+        settings = get_settings()
+        async with query_dao.session(readonly=True) as session:
+            result = await session.execute(
+                select(ChannelConfig).where(
+                    ChannelConfig.agent_id == agent_id,
+                    ChannelConfig.channel_type == "gitlab",
+                )
+            )
+            config = result.scalar_one_or_none()
+            if config is None or not config.app_secret:
+                return None
+            extra = dict(config.extra_config or {})
+            project_path = (extra.get("project_path") or "").strip()
+            base_url = (extra.get("base_url") or settings.GITLAB_BASE_URL or "").rstrip("/")
+            if not project_path or not base_url:
+                return None
+            repo_name = _repo_dir_name(project_path)
+            pat = decrypt_data(config.app_secret, settings.SECRET_KEY)
+            if not pat:
+                return None
+            agent_result = await session.execute(select(AgentModel).where(AgentModel.id == agent_id))
+            agent = agent_result.scalar_one_or_none()
+            agent_name = (agent.name if agent else "") or str(agent_id)
+            agent_email = f"agent-{agent_id.hex[:8]}@clawith.local"
+            return pat, base_url, repo_name, agent_name, agent_email
+    except Exception:  # noqa: BLE001 — best-effort credential lookup
+        logger.debug("[GitLabBinding] inject credential lookup failed agent={}", agent_id)
+        return None
+
+
+async def inject_credentials_into_temp_workspace(
+    temp_workspace_root: Path,
+    agent_id: uuid.UUID,
+) -> bool:
+    """Re-inject the binding PAT into a materialized workspace copy's ``.git/config``.
+
+    The durable storage layer stays credential-free: ``redact_git_secrets``
+    strips userinfo from every ``.git`` file on the publish path, so the token
+    written by binding init is washed out at the first flush. The sandbox copy
+    is the agent's private environment where real tokens are allowed (git
+    pull/push need them) — this restores the credential rewrite in the COPY
+    only. Because the publish path redacts before hashing,
+    ``redact(injected config) == storage base`` → the flush sees no change and
+    skips, so storage remains clean and CAS-stable.
+
+    Fast paths (silent ``False``): the copy has no complete ``.git`` (zero DB /
+    zero git), no configured binding, no token, decryption failure, or the
+    bound repo is absent from the copy. Never raises — credential injection
+    must not break tool execution.
+    """
+    try:
+        candidates = list(_iter_repo_copies(temp_workspace_root))
+        if not candidates:
+            return False
+        cred = await _load_binding_credential(agent_id)
+        if cred is None:
+            return False
+        pat, base_url, repo_name, agent_name, agent_email = cred
+        target = next((c for c in candidates if c.name == repo_name), None)
+        if target is None:
+            return False
+        rewrite = _credential_rewrite(base_url, pat)
+        prefix = _base_prefix(base_url)
+        await _apply_repo_config(target, rewrite, prefix, agent_name, agent_email, pat)
+        logger.info("[GitLabBinding] creds injected into temp workspace agent={} repo={}", agent_id, repo_name)
+        return True
+    except Exception as exc:  # noqa: BLE001 — materialization must never fail on creds
+        logger.debug("[GitLabBinding] inject skipped agent={}: {}", agent_id, exc)
+        return False
+
+
 async def _relocate_legacy(root: Path, repo: Path, pat: str) -> None:
     """Migrate the v2 layout (repo at the workspace root) into the repo dir.
 

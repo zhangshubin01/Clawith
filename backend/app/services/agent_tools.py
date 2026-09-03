@@ -119,6 +119,7 @@ from app.services.sandbox.workspace_policy import (
     parse_canonical_uuid,
     redact_git_secrets,
 )
+from app.services import gitlab_workspace
 from app.services.llm.finish import (
     FINISH_TOOL_NAME,
 )
@@ -1865,6 +1866,7 @@ async def _prepare_temp_workspace(
             max_file_bytes=max_file_bytes,
         )
     _drop_incomplete_git_dirs(temp_ws, budget, manifest)
+    await gitlab_workspace.inject_credentials_into_temp_workspace(temp_ws, agent_id)
     skipped_skills = [
         path
         for path in budget["skipped"]
