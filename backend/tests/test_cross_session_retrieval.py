@@ -1,8 +1,10 @@
-"""Cross-session automatic list retrieval (R3) tests.
+"""Cross-session open-list title injection (R3) tests.
 
-Covers the detection signal (bare-number and historical-pronoun), the
-retrieval across the current + recent sessions, the past-tense injection
-framing, and the strict no-op invariant on a miss.
+Covers the unconditional title-index injection (no intent detection), the
+retrieval across the current + recent sessions with the shared pointer-line
+bounds (≤3 lists, 30-char titles, ≤20 item titles, explicit truncation
+marker), the past-tense non-imperative note framing, and the strict no-op
+invariant on a miss.
 """
 
 from __future__ import annotations
@@ -14,9 +16,8 @@ import pytest
 from app.services.agent_runtime import context_builder
 from app.services.agent_runtime.cross_session_retrieval import (
     CrossSessionListRetriever,
-    ListReferenceSignal,
     ListRetrievalResult,
-    detect_list_reference,
+    RetrievedListSection,
     render_retrieval_note,
 )
 from app.services.agent_runtime.list_persistence import (
@@ -34,127 +35,61 @@ from app.services.agent_runtime.state import (
 )
 
 
-# ---------------------------------------------------------------- detection
-
-
-def test_detect_number_sequence() -> None:
-    signal = detect_list_reference("做 1、2、3、5")
-    assert signal is not None
-    assert signal.numbers == (1, 2, 3, 5)
-    assert signal.historical is False
-
-
-def test_detect_space_separated_numbers() -> None:
-    signal = detect_list_reference("完成 3 4 5")
-    assert signal is not None
-    assert signal.numbers == (3, 4, 5)
-
-
-def test_detect_fullwidth_digits_are_normalized() -> None:
-    signal = detect_list_reference("做 １、２、３")
-    assert signal is not None
-    assert signal.numbers == (1, 2, 3)
-
-
-def test_detect_prefixed_numbers_and_extended_verbs() -> None:
-    # Focus labels (P2) and shorthand (#4 / N3 / p2) after the extended verb
-    # set (执行/处理) — the 执行P2 shape observed in production on 2026-09-02.
-    for message, expected in (
-        ("执行P2", (2,)),
-        ("执行 P2", (2,)),
-        ("处理N3", (3,)),
-        ("完成#4", (4,)),
-        ("改 p2、N3、＃4", (2, 3, 4)),
-        ("执行 3 5", (3, 5)),
-    ):
-        signal = detect_list_reference(message)
-        assert signal is not None, message
-        assert signal.numbers == expected, message
-        assert signal.historical is False
-
-
-def test_detect_historical_pronoun() -> None:
-    signal = detect_list_reference("上一轮的清单还在吗")
-    assert signal is not None
-    assert signal.numbers == ()
-    assert signal.historical is True
-
-
-def test_detect_historical_pronoun_variants() -> None:
-    for message in ("上次的优化项做完了吗", "上回那个编号呢", "上一次的列表"):
-        signal = detect_list_reference(message)
-        assert signal is not None, message
-        assert signal.historical is True
-        assert signal.numbers == ()
-
-
-def test_detect_historical_pronoun_and_noun_sets_per_plan() -> None:
-    # Word sets from the plan R3-1: pronouns 上一轮/上次/之前/刚才 and nouns
-    # 清单/结论/优化/方案.
-    for message in (
-        "之前的方案是什么",
-        "刚才的结论还在吗",
-        "上次的优化还在吗",
-        "之前的清单呢",
-    ):
-        signal = detect_list_reference(message)
-        assert signal is not None, message
-        assert signal.historical is True
-        assert signal.numbers == ()
-
-
-def test_detect_pronoun_with_trailing_numbers_is_historical() -> None:
-    # The numbered rule requires the verb immediately before the digits; when a
-    # pronoun intervenes the message is treated as a historical reference and
-    # the whole list is injected (a coarser but still correct match).
-    signal = detect_list_reference("完成上一轮清单的 3、4、5")
-    assert signal is not None
-    assert signal.numbers == ()
-    assert signal.historical is True
-
-
-def test_detect_no_signal() -> None:
-    assert detect_list_reference("优化 app 性能") is None
-    assert detect_list_reference("帮我重新编译一下项目") is None
-    assert detect_list_reference("") is None
-    assert detect_list_reference("给我 3 个测试用例") is None  # no action verb
-
-
-def test_detect_bare_number_false_positive_is_still_a_signal() -> None:
-    # D5-2: a bare-number phrase like "做 1、2、3 个测试用例" IS detected as a
-    # signal; the false-positive guard is the retrieval no-op, not detection.
-    signal = detect_list_reference("做 1、2、3 个测试用例")
-    assert signal is not None
-    assert signal.numbers == (1, 2, 3)
-
-
-def test_detect_non_string_returns_none() -> None:
-    assert detect_list_reference(None) is None  # type: ignore[arg-type]
-
-
 # ---------------------------------------------------------------- rendering
 
 
 def test_render_note_is_past_tense_and_non_imperative() -> None:
-    result = ListRetrievalResult(
+    section = RetrievedListSection(
         title="app 优化清单",
         items=(
             ListItem(number=1, title="输入精度截断", description="Calculator.kt:204 用 Float"),
             ListItem(number=3, title="无缓存解析", description="每次重读文件"),
         ),
+        total_count=2,
     )
-    note = render_retrieval_note(result, current_run_id="run-1")
+    note = render_retrieval_note(
+        ListRetrievalResult(sections=(section,), total_lists=1),
+        current_run_id="run-1",
+    )
     assert note["role"] == "user"
     assert note["runtime_input"] == "cross_session_list"
     assert note["id"] == "cross-session-list:run-1"
     content = note["content"]
-    assert content.startswith("历史上下文（非当前任务）")
-    assert "此前会话曾产出清单" in content
-    assert "1. 输入精度截断 — Calculator.kt:204 用 Float" in content
-    assert "3. 无缓存解析 — 每次重读文件" in content
-    # Never an imperative or goal-style phrasing (direct-chat-run-boundary-fix).
+    assert content.startswith("历史上下文（非当前任务）：此前已确认、尚未完结的清单：")
+    assert "清单「app 优化清单」（2 项）：" in content
+    assert "1. 输入精度截断" in content
+    assert "3. 无缓存解析" in content
+    # Titles only (A2): descriptions never enter the note.
+    assert "Calculator.kt:204 用 Float" not in content
+    assert "每次重读文件" not in content
+    # No present-tense "当前未决" wording; never imperative or goal-style
+    # (direct-chat-run-boundary-fix).
+    assert "当前未决" not in content
     assert "目标：" not in content
     assert not content.lstrip().startswith("请")
+
+
+def test_render_note_truncation_marker_and_extra_lists() -> None:
+    first = RetrievedListSection(
+        title="app 优化清单",
+        items=(ListItem(number=1, title="输入精度截断", description="d"),),
+        total_count=25,
+    )
+    second = RetrievedListSection(
+        title="部署清单",
+        items=(ListItem(number=1, title="灰度", description="d"),),
+        total_count=1,
+    )
+    note = render_retrieval_note(
+        ListRetrievalResult(sections=(first, second), total_lists=3),
+        current_run_id="run-1",
+    )
+    content = note["content"]
+    assert "清单「app 优化清单」（25 项）：" in content
+    assert "（仅列出前 1 项；完整内容见 memory/清单.md）" in content
+    assert "清单「部署清单」（1 项）：" in content
+    # A list dropped past the three-list bound is marked, never silent.
+    assert content.endswith("等")
 
 
 # ---------------------------------------------------------------- retriever fakes
@@ -284,7 +219,7 @@ def _retriever(
 
 
 @pytest.mark.asyncio
-async def test_retrieve_same_session_numbered_hit() -> None:
+async def test_retrieve_same_session_injects_all_titles() -> None:
     list_id = uuid.uuid4()
     tenant_id = uuid.uuid4()
     agent_id = uuid.uuid4()
@@ -300,19 +235,21 @@ async def test_retrieve_same_session_numbered_hit() -> None:
         user_id=user_id,
         session_id=session_id,
         project="mydome1",
-        signal=ListReferenceSignal(numbers=(1, 3, 5), historical=False),
     )
 
     assert result is not None
-    assert result.title == "app 优化清单"
-    assert [item.number for item in result.items] == [1, 3, 5]
-    assert result.items[0].title == "输入精度截断"
+    assert result.total_lists == 1
+    assert len(result.sections) == 1
+    section = result.sections[0]
+    assert section.title == "app 优化清单"
+    assert section.total_count == 5
+    assert [item.number for item in section.items] == [1, 2, 3, 4, 5]
     assert service.load_snapshot_calls == [(tenant_id, session_id)]
     assert service.recent_calls == [(tenant_id, agent_id, user_id, session_id, 5)]
 
 
 @pytest.mark.asyncio
-async def test_retrieve_cross_session_hit() -> None:
+async def test_retrieve_cross_session_injects_all_titles() -> None:
     list_id = uuid.uuid4()
     tenant_id = uuid.uuid4()
     agent_id = uuid.uuid4()
@@ -332,35 +269,12 @@ async def test_retrieve_cross_session_hit() -> None:
         user_id=user_id,
         session_id=current_session_id,
         project=None,
-        signal=ListReferenceSignal(numbers=(1, 3, 5), historical=False),
     )
 
     assert result is not None
-    assert [item.number for item in result.items] == [1, 3, 5]
+    assert [item.number for item in result.sections[0].items] == [1, 2, 3, 4, 5]
     # The prior session's pointer was found; the current session was excluded.
-    assert service.recent_calls == [
-        (tenant_id, agent_id, user_id, current_session_id, 5)
-    ]
-
-
-@pytest.mark.asyncio
-async def test_retrieve_historical_injects_all_items() -> None:
-    list_id = uuid.uuid4()
-    storage = _Storage(_list_file_content(list_id))
-    service = _ContextService(snapshot_open_items=(_pointer(list_id),))
-    retriever = _retriever(storage=storage, context_service=service)
-
-    result = await retriever.retrieve(
-        tenant_id=uuid.uuid4(),
-        agent_id=uuid.uuid4(),
-        user_id=uuid.uuid4(),
-        session_id=uuid.uuid4(),
-        project=None,
-        signal=ListReferenceSignal(numbers=(), historical=True),
-    )
-
-    assert result is not None
-    assert [item.number for item in result.items] == [1, 2, 3, 4, 5]
+    assert service.recent_calls == [(tenant_id, agent_id, user_id, current_session_id, 5)]
 
 
 @pytest.mark.asyncio
@@ -368,9 +282,7 @@ async def test_retrieve_project_filter_narrows() -> None:
     list_id = uuid.uuid4()
     storage = _Storage(_list_file_content(list_id, project="mydome1"))
     # Pointer belongs to a different project: must not match.
-    service = _ContextService(
-        snapshot_open_items=(_pointer(list_id, project="other-project"),)
-    )
+    service = _ContextService(snapshot_open_items=(_pointer(list_id, project="other-project"),))
     retriever = _retriever(storage=storage, context_service=service)
 
     result = await retriever.retrieve(
@@ -379,7 +291,6 @@ async def test_retrieve_project_filter_narrows() -> None:
         user_id=uuid.uuid4(),
         session_id=uuid.uuid4(),
         project="mydome1",
-        signal=ListReferenceSignal(numbers=(1,), historical=False),
     )
 
     assert result is None
@@ -401,18 +312,18 @@ async def test_retrieve_session_level_pointer_is_wildcard_for_known_project() ->
         user_id=uuid.uuid4(),
         session_id=uuid.uuid4(),
         project="mydome1",
-        signal=ListReferenceSignal(numbers=(2,), historical=False),
     )
 
     assert result is not None
-    assert result.title == "app 优化清单"
-    assert [item.number for item in result.items] == [2]
+    assert result.sections[0].title == "app 优化清单"
+    assert [item.number for item in result.sections[0].items] == [1, 2, 3, 4, 5]
 
 
 @pytest.mark.asyncio
-async def test_retrieve_exact_project_preferred_over_wildcard() -> None:
+async def test_retrieve_exact_project_list_first_then_wildcard() -> None:
     # With both an exact-project pointer and a session-level (project=None)
-    # pointer available, the exact match must win.
+    # pointer available, both lists are injected; the exact match comes first
+    # (same pointer order as TaskSection.pending_lists).
     exact_list_id = uuid.uuid4()
     wildcard_list_id = uuid.uuid4()
     storage = _Storage(
@@ -433,18 +344,47 @@ async def test_retrieve_exact_project_preferred_over_wildcard() -> None:
         user_id=uuid.uuid4(),
         session_id=uuid.uuid4(),
         project="mydome1",
-        signal=ListReferenceSignal(numbers=(1,), historical=False),
     )
 
     assert result is not None
-    assert result.title == "mydome1 清单"
+    assert result.total_lists == 2
+    assert [section.title for section in result.sections] == ["mydome1 清单", "会话级清单"]
 
 
 @pytest.mark.asyncio
-async def test_retrieve_miss_when_numbers_absent() -> None:
-    list_id = uuid.uuid4()
-    storage = _Storage(_list_file_content(list_id))
-    service = _ContextService(snapshot_open_items=(_pointer(list_id),))
+async def test_retrieve_most_recent_list_first_without_project() -> None:
+    newer_list_id = uuid.uuid4()
+    older_list_id = uuid.uuid4()
+    content = _list_file_content(older_list_id, title="旧清单") + _list_file_content(newer_list_id, title="新清单")
+    storage = _Storage(content)
+    # No current-session pointer; two prior sessions, newest first.
+    service = _ContextService(
+        snapshot_open_items=(),
+        recent=[
+            (uuid.uuid4(), (_pointer(newer_list_id),)),
+            (uuid.uuid4(), (_pointer(older_list_id),)),
+        ],
+    )
+    retriever = _retriever(storage=storage, context_service=service)
+
+    result = await retriever.retrieve(
+        tenant_id=uuid.uuid4(),
+        agent_id=uuid.uuid4(),
+        user_id=uuid.uuid4(),
+        session_id=uuid.uuid4(),
+        project=None,
+    )
+
+    assert result is not None
+    assert [section.title for section in result.sections] == ["新清单", "旧清单"]
+
+
+@pytest.mark.asyncio
+async def test_retrieve_caps_sections_at_three_and_keeps_pointer_order() -> None:
+    list_ids = [uuid.uuid4() for _ in range(4)]
+    content = "".join(_list_file_content(list_id, title=f"清单{index}") for index, list_id in enumerate(list_ids))
+    storage = _Storage(content)
+    service = _ContextService(snapshot_open_items=tuple(_pointer(list_id) for list_id in list_ids))
     retriever = _retriever(storage=storage, context_service=service)
 
     result = await retriever.retrieve(
@@ -453,7 +393,50 @@ async def test_retrieve_miss_when_numbers_absent() -> None:
         user_id=uuid.uuid4(),
         session_id=uuid.uuid4(),
         project="mydome1",
-        signal=ListReferenceSignal(numbers=(99,), historical=False),
+    )
+
+    assert result is not None
+    assert result.total_lists == 4
+    assert [section.title for section in result.sections] == ["清单0", "清单1", "清单2"]
+
+
+@pytest.mark.asyncio
+async def test_retrieve_caps_item_titles_at_twenty() -> None:
+    list_id = uuid.uuid4()
+    items = tuple((number, f"条目{number}", f"描述{number}") for number in range(1, 26))
+    storage = _Storage(_list_file_content(list_id, items=items))
+    service = _ContextService(snapshot_open_items=(_pointer(list_id),))
+    retriever = _retriever(storage=storage, context_service=service)
+
+    result = await retriever.retrieve(
+        tenant_id=uuid.uuid4(),
+        agent_id=uuid.uuid4(),
+        user_id=uuid.uuid4(),
+        session_id=uuid.uuid4(),
+        project=None,
+    )
+
+    assert result is not None
+    section = result.sections[0]
+    assert section.total_count == 25
+    assert [item.number for item in section.items] == list(range(1, 21))
+
+
+@pytest.mark.asyncio
+async def test_retrieve_miss_when_list_section_absent() -> None:
+    # The pointer exists but the list file carries no such section: no-op.
+    pointer_list_id = uuid.uuid4()
+    stored_list_id = uuid.uuid4()
+    storage = _Storage(_list_file_content(stored_list_id))
+    service = _ContextService(snapshot_open_items=(_pointer(pointer_list_id),))
+    retriever = _retriever(storage=storage, context_service=service)
+
+    result = await retriever.retrieve(
+        tenant_id=uuid.uuid4(),
+        agent_id=uuid.uuid4(),
+        user_id=uuid.uuid4(),
+        session_id=uuid.uuid4(),
+        project="mydome1",
     )
 
     assert result is None
@@ -471,7 +454,6 @@ async def test_retrieve_miss_without_pointers() -> None:
         user_id=uuid.uuid4(),
         session_id=uuid.uuid4(),
         project=None,
-        signal=ListReferenceSignal(numbers=(1, 2), historical=False),
     )
 
     assert result is None
@@ -491,43 +473,9 @@ async def test_retrieve_miss_when_list_file_missing() -> None:
         user_id=uuid.uuid4(),
         session_id=uuid.uuid4(),
         project="mydome1",
-        signal=ListReferenceSignal(numbers=(1,), historical=False),
     )
 
     assert result is None
-
-
-@pytest.mark.asyncio
-async def test_retrieve_prefers_most_recent_list_without_project() -> None:
-    newer_list_id = uuid.uuid4()
-    older_list_id = uuid.uuid4()
-    content = (
-        _list_file_content(older_list_id, title="旧清单")
-        + _list_file_content(newer_list_id, title="新清单")
-    )
-    storage = _Storage(content)
-    # No current-session pointer; two prior sessions, newest first. Without a
-    # project filter the most recent session's list wins.
-    service = _ContextService(
-        snapshot_open_items=(),
-        recent=[
-            (uuid.uuid4(), (_pointer(newer_list_id),)),
-            (uuid.uuid4(), (_pointer(older_list_id),)),
-        ],
-    )
-    retriever = _retriever(storage=storage, context_service=service)
-
-    result = await retriever.retrieve(
-        tenant_id=uuid.uuid4(),
-        agent_id=uuid.uuid4(),
-        user_id=uuid.uuid4(),
-        session_id=uuid.uuid4(),
-        project=None,
-        signal=ListReferenceSignal(numbers=(1,), historical=False),
-    )
-
-    assert result is not None
-    assert result.title == "新清单"
 
 
 # ---------------------------------------------------------------- build wiring
@@ -600,7 +548,9 @@ def _context(state: RuntimeGraphState, *, actor_user_id: str | None = None) -> R
     )
 
 
-def _builder(retriever: _FakeRetriever | None) -> context_builder.ContextBuilder:
+def _builder(
+    retriever: CrossSessionListRetriever | _FakeRetriever | None,
+) -> context_builder.ContextBuilder:
     return context_builder.ContextBuilder(
         session_context_service=object(),  # type: ignore[arg-type]
         cross_session_retriever=retriever,  # type: ignore[arg-type]
@@ -611,21 +561,28 @@ def _builder(retriever: _FakeRetriever | None) -> context_builder.ContextBuilder
 async def test_build_injects_retrieval_note_on_hit() -> None:
     run_id = str(uuid.uuid4())
     result = ListRetrievalResult(
-        title="app 优化清单",
-        items=(
-            ListItem(number=1, title="输入精度截断", description="Calculator.kt:204 用 Float"),
-            ListItem(number=3, title="无缓存解析", description="每次重读文件"),
+        sections=(
+            RetrievedListSection(
+                title="app 优化清单",
+                items=(
+                    ListItem(number=1, title="输入精度截断", description="Calculator.kt:204 用 Float"),
+                    ListItem(number=3, title="无缓存解析", description="每次重读文件"),
+                ),
+                total_count=2,
+            ),
         ),
+        total_lists=1,
     )
     fake = _FakeRetriever(result)
-    state = _state(run_id=run_id, goal="做 1、2、3、5")
+    state = _state(run_id=run_id, goal="那执行 1→2→3→4（P1）")
     builder = _builder(fake)
 
     built = await builder.build(state, _context(state))
 
     assert len(fake.calls) == 1
     call = fake.calls[0]
-    assert call["signal"].numbers == (1, 2, 3, 5)
+    # No intent detection: no signal is extracted from the goal anymore.
+    assert "signal" not in call
     assert call["agent_id"] == uuid.UUID(state["registry"].agent_id)
     assert call["session_id"] == uuid.UUID(state["registry"].session_id)
     assert call["user_id"] is None
@@ -653,7 +610,9 @@ async def test_build_noop_when_retriever_misses() -> None:
 
 
 @pytest.mark.asyncio
-async def test_build_noop_when_goal_has_no_signal() -> None:
+async def test_build_invokes_retriever_even_without_reference() -> None:
+    # The open-list note is unconditional session standing context: a goal with
+    # no list reference still retrieves (and injects nothing on a miss).
     run_id = str(uuid.uuid4())
     fake = _FakeRetriever(None)
     state = _state(run_id=run_id, goal="优化 app 性能")
@@ -661,8 +620,7 @@ async def test_build_noop_when_goal_has_no_signal() -> None:
 
     built = await builder.build(state, _context(state))
 
-    # Detection short-circuits: the retriever is never invoked.
-    assert fake.calls == []
+    assert len(fake.calls) == 1
     assert [m["id"] for m in built.recent_thread_messages] == [f"current-input-{run_id}"]
 
 
@@ -678,16 +636,49 @@ async def test_build_noop_without_retriever_configured() -> None:
 
 
 @pytest.mark.asyncio
+async def test_build_goal_arrow_numbers_injects_all_titles() -> None:
+    # Regression for the 2026-09-02 incident (run 5ad111a9): the goal
+    # "那执行 1→2→3→4（P1）" used to be regex-truncated to the single number 1,
+    # injecting only the first list item. With detection deleted the whole
+    # title index is injected, so every number in the goal aligns to a title.
+    list_id = uuid.uuid4()
+    storage = _Storage(_list_file_content(list_id))
+    service = _ContextService(snapshot_open_items=(_pointer(list_id),))
+    retriever = _retriever(storage=storage, context_service=service)
+    run_id = str(uuid.uuid4())
+    state = _state(run_id=run_id, goal="那执行 1→2→3→4（P1）")
+    builder = _builder(retriever)
+
+    built = await builder.build(state, _context(state))
+
+    notes = [
+        message for message in built.recent_thread_messages if message.get("runtime_input") == "cross_session_list"
+    ]
+    assert len(notes) == 1
+    content = notes[0]["content"]
+    for number, title, _description in _DEFAULT_ITEMS:
+        assert f"{number}. {title}" in content
+    # The old failure mode injected only item 1; all five titles are present.
+    assert "5. 网络线程" in content
+
+
+@pytest.mark.asyncio
 async def test_injected_note_is_model_visible_through_prompt_messages() -> None:
     from app.services.agent_runtime.model_step_service import _prompt_messages
 
     run_id = str(uuid.uuid4())
     result = ListRetrievalResult(
-        title="app 优化清单",
-        items=(
-            ListItem(number=1, title="输入精度截断", description="Calculator.kt:204 用 Float"),
-            ListItem(number=3, title="无缓存解析", description="每次重读文件"),
+        sections=(
+            RetrievedListSection(
+                title="app 优化清单",
+                items=(
+                    ListItem(number=1, title="输入精度截断", description="Calculator.kt:204 用 Float"),
+                    ListItem(number=3, title="无缓存解析", description="每次重读文件"),
+                ),
+                total_count=2,
+            ),
         ),
+        total_lists=1,
     )
     fake = _FakeRetriever(result)
     state = _state(run_id=run_id, goal="做 1、2、3、5")
@@ -702,12 +693,12 @@ async def test_injected_note_is_model_visible_through_prompt_messages() -> None:
         build=built,
     )
     user_contents = [
-        content for message in messages if message.role == "user"
-        if isinstance((content := message.content), str)
+        content for message in messages if message.role == "user" if isinstance((content := message.content), str)
     ]
     assert any(
-        "历史上下文（非当前任务）" in content
-        and "1. 输入精度截断 — Calculator.kt:204 用 Float" in content
-        and "3. 无缓存解析 — 每次重读文件" in content
+        "历史上下文（非当前任务）：此前已确认、尚未完结的清单：" in content
+        and "1. 输入精度截断" in content
+        and "3. 无缓存解析" in content
+        and "Calculator.kt:204 用 Float" not in content
         for content in user_contents
     )

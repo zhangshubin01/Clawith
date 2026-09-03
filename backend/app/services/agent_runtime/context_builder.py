@@ -23,7 +23,6 @@ from app.config import Settings, get_settings
 from app.models.chat_session import ChatSession
 from app.services.agent_runtime.cross_session_retrieval import (
     CrossSessionListRetriever,
-    detect_list_reference,
     render_retrieval_note,
 )
 from app.services.agent_runtime.list_persistence import extract_workspace_project
@@ -369,17 +368,15 @@ class ContextBuilder:
         context: RuntimeContext,
         thread_messages: Sequence[JsonObject],
     ) -> JsonObject | None:
-        """R3: auto-retrieve a referenced prior list and render its injection note.
+        """R3: open-list title index injected unconditionally for the model to align number references.
 
-        Returns ``None`` (a strict no-op) unless the current goal carries a
-        list-reference signal AND a matching list is found. Retrieval is
+        The note is session-level standing context, not a directive, and the
+        goal wording is never parsed (no extraction means no mis-truncation).
+        Returns ``None`` (a strict no-op) when no list resolves. Retrieval is
         best-effort: any unavailable scope or read failure degrades to
         ``None`` rather than blocking the Run or entering a waiting decision.
         """
         if self._cross_session_retriever is None:
-            return None
-        signal = detect_list_reference(context.goal)
-        if signal is None:
             return None
         agent_id = _optional_uuid(context.agent_id)
         if agent_id is None:
@@ -397,7 +394,6 @@ class ContextBuilder:
                 user_id=user_id,
                 session_id=session_id,
                 project=project,
-                signal=signal,
             )
         except (OSError, ValueError):
             # Retrieval is auxiliary: storage/parse failures degrade to no-op.

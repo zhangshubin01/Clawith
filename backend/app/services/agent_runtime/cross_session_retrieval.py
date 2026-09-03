@@ -1,14 +1,18 @@
-"""Cross-session automatic numbered-list retrieval (R3 of Run-context inheritance).
+"""Cross-session open-list title injection (R3 of Run-context inheritance).
 
-When a Run's opening message references a prior numbered list — bare numbers
-after an action verb (``做 1、2、3、5``), or a prior-session list by pronoun
-(``上一轮的清单``) — the Runtime retrieves the matching ``memory/清单.md``
-entries through the ``session_context_states.open_items`` pointer rows and
-injects them into the model window as a past-tense "非当前任务" note.
+While an open ``memory/清单.md`` pointer exists in the current session's
+``session_context_states.open_items`` or in recent sessions, the Runtime
+injects a bounded **title index** of those lists into the model window as a
+past-tense "非当前任务" note. There is no intent detection: the note is
+unconditional session-level standing context, so the model can align a goal's
+number references (``那执行 1→2→3→4（P1）``) to list entries without any
+regex parsing of user wording — no extraction means no mis-truncation.
 
-A hit injects; a miss is a strict no-op (no injection, no waiting decision).
-This mirrors the existing ``_prior_run_summary`` past-tense framing so the
-note is never mistaken for a new directive.
+Nothing resolves (no pointers, unreadable file, absent section) → strict
+no-op. The wording mirrors ``_prior_run_summary`` and
+``render_task_state_note`` so the note is never mistaken for a new directive;
+the list-count and title bounds are shared with ``session_task_state`` so the
+pointer line and this title index carry the same boundaries.
 """
 
 from __future__ import annotations
@@ -16,7 +20,6 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 import logging
-import re
 import uuid
 
 from app.services.agent_runtime.command_worker import RuntimeSessionFactory
@@ -26,90 +29,55 @@ from app.services.agent_runtime.list_persistence import (
     parse_list_file,
 )
 from app.services.agent_runtime.session_context_service import SessionContextService
+from app.services.agent_runtime.session_task_state import (
+    _MAX_PENDING_LIST_NOTES,
+    _bounded_pending_title,
+)
 from app.services.agent_runtime.state import JsonObject, JsonValue
 from app.services.storage import get_storage_backend, normalize_storage_key
 from app.services.storage_runtime.base import StorageBackend
 
 logger = logging.getLogger(__name__)
 
-# Scope constants: how many past sessions to project over, and how many items
-# may be injected into one window (bounded so a long list cannot blow up the
-# model budget).
+# Scope constants: how many past sessions to project over, and how many item
+# titles one list may contribute to the window (bounded so a long list cannot
+# blow up the model budget).
 MAX_SESSIONS_DEFAULT = 5
 MAX_INJECTED_ITEMS = 20
 
-# Detection: a number reference after an action verb. Numbers may carry a
-# letter/symbol prefix (P2 / N3 / #4), matching how Focus labels and common
-# shorthand cite prior lists. Full-width digits are normalized to half-width.
-# The verb set is intentionally loose: a stray match (e.g. 执行 2 个测试) only
-# reaches the retrieval layer, which no-ops when no list carries those
-# numbers (the D5-2 false-positive guard).
-_NUMBER_REFERENCE = re.compile(
-    r"(?:做|完成|实现|改|执行|处理)\s*"
-    r"(?P<numbers>(?:[PpNn][-—]?|[#＃])?\s*[0-9０-９]+"
-    r"(?:[、，,\s]+(?:[PpNn][-—]?|[#＃])?\s*[0-9０-９]+)*)"
-)
-_FULLWIDTH_TO_HALFWIDTH = str.maketrans(
-    {chr(0xFF10 + i): str(i) for i in range(10)}
-)
-# Word sets per plan R3-1: pronouns「上一轮/上次/之前/刚才」(上一轮/上一次/上回
-# kept as synonyms) and nouns「清单/结论/优化/方案」(列表/编号 kept as synonyms).
-_HISTORICAL_PRONOUNS = ("上一轮", "上一次", "上次", "上回", "之前", "刚才")
-_LIST_NOUNS = ("清单", "列表", "优化", "结论", "方案", "编号")
+# ponytail: the private import below is deliberate — the three-list bound and
+# the 30-char title bound are single-sourced from
+# session_task_state.render_pending_lists_line so the pointer line and this
+# title index never diverge. Promotion of those names to a shared module is
+# the upgrade path when a third consumer appears.
 
 
 @dataclass(frozen=True, slots=True)
-class ListReferenceSignal:
-    """A detected reference to a prior numbered list.
+class RetrievedListSection:
+    """One open list selected for injection.
 
-    ``numbers`` is non-empty for a bare-number reference (``做 1、2、3、5``)
-    and empty for a pronoun-only historical reference (``上一轮的清单``).
+    ``items`` is the bounded title index (at most ``MAX_INJECTED_ITEMS``
+    entries, number+title each); ``total_count`` is the list's true item count
+    so the note can mark truncation instead of silently dropping entries.
     """
 
-    numbers: tuple[int, ...]
-    historical: bool
+    title: str
+    items: tuple[ListItem, ...]
+    total_count: int
 
 
 @dataclass(frozen=True, slots=True)
 class ListRetrievalResult:
-    """The list entries selected for injection into the model window."""
+    """The open-list sections selected for injection into the model window.
 
-    title: str
-    items: tuple[ListItem, ...]
-
-
-def _normalize_digits(raw: str) -> tuple[int, ...]:
-    numbers: list[int] = []
-    for chunk in re.findall(r"[0-9０-９]+", raw):
-        numbers.append(int(chunk.translate(_FULLWIDTH_TO_HALFWIDTH)))
-    return tuple(numbers)
-
-
-def detect_list_reference(message: str) -> ListReferenceSignal | None:
-    """Detect a numbered or pronoun list reference in one user message.
-
-    Pure function: no I/O, no state. A number reference (``做 1、2、3、5``,
-    ``执行P2``, ``处理N3``, ``完成#4``) wins over the pronoun rule, so
-    ``完成上一轮清单的 3、4、5`` extracts no numbers and falls through to the
-    historical branch. A message with no verb-and-number sequence and no
-    pronoun+noun pair returns ``None``.
+    ``sections`` holds at most ``_MAX_PENDING_LIST_NOTES`` lists in pointer
+    order (current session first, then recent sessions newest-first);
+    ``total_lists`` is the number of resolved lists before the bound, so a
+    value larger than ``len(sections)`` renders the trailing 等 marker.
     """
-    if not isinstance(message, str):
-        return None
-    text = message.strip()
-    if not text:
-        return None
-    match = _NUMBER_REFERENCE.search(text)
-    if match is not None:
-        numbers = _normalize_digits(match.group("numbers"))
-        if numbers:
-            return ListReferenceSignal(numbers=numbers, historical=False)
-    historical = any(pronoun in text for pronoun in _HISTORICAL_PRONOUNS) and any(
-        noun in text for noun in _LIST_NOUNS
-    )
-    if historical:
-        return ListReferenceSignal(numbers=(), historical=True)
-    return None
+
+    sections: tuple[RetrievedListSection, ...]
+    total_lists: int
 
 
 def render_retrieval_note(
@@ -117,15 +85,24 @@ def render_retrieval_note(
     *,
     current_run_id: str,
 ) -> JsonObject:
-    """Render the retrieved entries as a past-tense, non-imperative user note.
+    """Render the injected title index as a past-tense, non-imperative note.
 
-    Wording mirrors ``_prior_run_summary``: past tense (``曾产出``) and marked
-    "非当前任务" so the model never reads it as a new directive.
+    Wording shares the "非当前任务" frame with ``_prior_run_summary`` and
+    ``render_task_state_note``; descriptions never enter the note (the pointer
+    line and ``read_file`` are the paths to full text), and truncation is
+    explicit rather than silent.
     """
-    body = "\n".join(
-        f"{item.number}. {item.title} — {item.description}" for item in result.items
-    )
-    content = f"历史上下文（非当前任务）：此前会话曾产出清单「{result.title}」，条目：\n{body}"
+    paragraphs = ["历史上下文（非当前任务）：此前已确认、尚未完结的清单："]
+    for section in result.sections:
+        lines = [f"清单「{section.title}」（{section.total_count} 项）："]
+        for item in section.items:
+            lines.append(f"{item.number}. {item.title}")
+        if section.total_count > len(section.items):
+            lines.append(f"（仅列出前 {len(section.items)} 项；完整内容见 {LIST_FILE_PATH}）")
+        paragraphs.append("\n".join(lines))
+    content = "\n\n".join(paragraphs)
+    if result.total_lists > len(result.sections):
+        content += "等"
     return {
         "id": f"cross-session-list:{current_run_id}",
         "role": "user",
@@ -178,7 +155,7 @@ def _collect_list_pointer_ids(
 
 
 class CrossSessionListRetriever:
-    """Retrieve referenced list entries across the current and recent sessions.
+    """Retrieve the open-list title index across the current and recent sessions.
 
     Best-effort by design: any read failure degrades to ``None`` so a Run's
     startup is never blocked by a missing list file or an unavailable store.
@@ -224,9 +201,12 @@ class CrossSessionListRetriever:
         user_id: uuid.UUID | None,
         session_id: uuid.UUID | None,
         project: str | None,
-        signal: ListReferenceSignal,
     ) -> ListRetrievalResult | None:
-        """Return the referenced entries, or ``None`` on a miss (no-op)."""
+        """Return the open-list title index, or ``None`` on a miss (no-op).
+
+        Unconditional: whichever open-list pointers resolve against the list
+        file are injected, without inspecting the Run's goal wording.
+        """
         candidates: list[uuid.UUID] = []
         async with self._session_factory() as db:
             if session_id is not None:
@@ -258,32 +238,33 @@ class CrossSessionListRetriever:
         content = await self._load_file(storage_key)
         if not content:
             return None
-        parsed = parse_list_file(content)
-        sections_by_id = {section.list_id: section for section in parsed.sections}
+        sections_by_id = {section.list_id: section for section in parse_list_file(content).sections}
 
-        numbers = signal.numbers
+        resolved: list[RetrievedListSection] = []
         for list_id in candidates:
             section = sections_by_id.get(list_id)
-            if section is None:
+            if section is None or not section.items:
                 continue
-            if numbers:
-                selected = [item for item in section.items if item.number in numbers]
-            else:
-                selected = list(section.items)
-            if selected:
-                return ListRetrievalResult(
-                    title=section.title,
-                    items=tuple(selected[:MAX_INJECTED_ITEMS]),
+            resolved.append(
+                RetrievedListSection(
+                    title=_bounded_pending_title(section.title),
+                    items=tuple(section.items[:MAX_INJECTED_ITEMS]),
+                    total_count=len(section.items),
                 )
-        return None
+            )
+        if not resolved:
+            return None
+        return ListRetrievalResult(
+            sections=tuple(resolved[:_MAX_PENDING_LIST_NOTES]),
+            total_lists=len(resolved),
+        )
 
 
 __all__ = [
     "MAX_INJECTED_ITEMS",
     "MAX_SESSIONS_DEFAULT",
     "CrossSessionListRetriever",
-    "ListReferenceSignal",
     "ListRetrievalResult",
-    "detect_list_reference",
+    "RetrievedListSection",
     "render_retrieval_note",
 ]
