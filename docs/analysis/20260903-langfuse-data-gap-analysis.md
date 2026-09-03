@@ -50,14 +50,16 @@ Langfuse v4 采用双表分层：
 - TOOL 100% 有 output（均值 <1k 字符），metadata 富集：`tool_execution_id` / `tool_call_id` / `side_effect_classification` / `retry_policy` 全量
 - SPAN/TOOL 无 cost：Langfuse 只对 GENERATION 按模型定价计费（3 天 3.94+4.05+0.02 USD），工具/节点层成本不可见
 
-## 4. 已修复待部署（3 项，代码在分支 f-shubin-0806，部署后消失）
+## 4. 已部署 + 部署后复检（2026-09-03 ~02:02Z 随 dec47111 部署上线；06:05Z 复检，窗口 SPAN 141 / GENERATION 17 / TOOL 17）
 
-| 缺口 | 现状证据 | 修复 |
-|---|---|---|
-| TTFT 全空 | completionStartTime 0/1134 | e3204afb（首 token 标记 + `completion_start_time`） |
-| reasoning_content 缺失 | output 含 `reasoning_content`/`<think>` 的 0 条 | 1224cf77（结构化 output + `<think>` 块合并） |
-| run 根 input 空 | 108/108 空（goal 目前在 `metadata.goal` 里，完整） | e3204afb（`observe_run(input=run.goal)`） |
-| 跨 run parent 无关联 | `is_app_root AND parent_span_id!=''` = 0 条 | e3204afb（trace_context 跨 trace 挂载） |
+| 缺口 | 部署前证据 | 修复 | 部署后复检 |
+|---|---|---|---|
+| TTFT 全空 | completionStartTime 0/1134 | e3204afb（首 token 标记 + `completion_start_time`） | ⚠️ 0/17，**结构性空白非 bug**：窗口内 17 条 GENERATION 全是后台 trigger/heartbeat run，走 single_step 非流式 `client.complete()` 分支（无 card_bridge_key → 无 on_chunk/on_thinking 回调 → first_token_at 不设置）。TTFT 只在流式路径（直聊/卡片模式）有意义，待 UI 场景 run 再验 |
+| reasoning_content 缺失 | output 含 `reasoning_content`/`<think>` 的 0 条 | 1224cf77（结构化 output + `<think>` 块合并） | ✅ 17/17：output 为 `{"content","reasoning_content"}` 分离结构 |
+| run 根 input 空 | 108/108 空（goal 在 `metadata.goal`） | e3204afb（`observe_run(input=run.goal)`） | ✅ 5/5：input 为完整 goal 文本（1319/3656 字符） |
+| 跨 run parent 无关联 | `is_app_root AND parent_span_id!=''` = 0 条 | e3204afb（trace_context 跨 trace 挂载） | ⚠️ 无场景：窗口内 5 条 run 根 span 均为独立 trigger/heartbeat run，parent 空串是正确行为。跨 run parent 只在 A2A 委派 run 出现（command payload 带 parent_trace_id），待 A2A 场景再验 |
+
+容器代码验证（4/4 特征在镜像内确认，文件 mtime 02:01:57Z 与容器重建 02:02:04Z 吻合，metadata `langfuse.release=dec47111`）：tracing.py:404 `completion_start_time` 写入、:723 `input=mask_text(goal)`、:723 `trace_context=parent_trace_context`、output 合并为 `{"content","reasoning_content"}` 字典。**另注意**：CH 里 `parent_span_id IS NOT NULL` 对空串返回 true，复检口径必须用 `parent_span_id != ''`。
 
 ## 5. 设计取舍（不改，记录在案）
 
@@ -80,19 +82,16 @@ Langfuse v4 采用双表分层：
 
 ## 9. 优先级待办（按收益/风险）
 
-**P0 部署 f-shubin-0806 的观测修复（1224cf77 + e3204afb）——唯一必须的动作**
+**P0 部署观测修复（1224cf77 + e3204afb）——✅ 已完成（2026-09-03 ~02:02Z 随 dec47111 上线，无需再部署）**
 
-- 收益：一次部署同时关闭全部 4 个实锤缺口——TTFT（0/1134 → 全量）、reasoning 记录（0 → 全量）、run 根 input（0/108 → 108，goal 从 metadata 转正为 input）、跨 run parent 关联（0 → 有）。监控能力型收益：推理行为可观测、首 token 延迟可观测、judge 输入窗口语义完整、子 run 血缘可追溯
-- 风险：
-  - 部署固有风险（杀在途 run）→ 已有 6f43d25b 账本终态复用+审计防护，按 clawith-prod-deploy 清单执行
-  - 唯一新代码风险点：e3204afb 改动 a2a_runtime 子 run 创建的 command payload + langgraph_driver 的 trace_context 解析——部署后重点验证 a2a 子 run 正常发起、父子 trace 关联出现
-  - 1224cf77 改变 generation output 结构（`{"content","reasoning_content"}`）——下游读 generation output 的只有 Langfuse 内展示/分析（judge 读 run 根 output，前端 reasoning 走 DB tool_call_log，均不受影响）
-  - 已过 165 测试 + arch-guard + ruff + pyright 基线
-- 部署后验证：§8 填充率查询复跑——TTFT 非空、output 含 reasoning_content、run 根 input=goal、app-root with parent 出现
+- 收益：一次部署同时关闭全部 4 个实锤缺口——TTFT、reasoning 记录、run 根 input、跨 run parent 关联。监控能力型收益：推理行为可观测、首 token 延迟可观测、judge 输入窗口语义完整、子 run 血缘可追溯
+- 风险回顾：已在 dec47111 部署批次内随行（并行会话 R3），部署后容器运行正常，无观测相关报错
+- 部署后验证：已完成，结果见 §4（2/4 数据性关闭，2 项结构性待场景：TTFT 待 UI 流式 run、跨 run parent 待 A2A run）
 
-**P1 数据复检（跟随部署，半小时级）**
+**P1 数据复检——✅ 已执行（2026-09-03 06:05Z，窗口 02:02Z 起）**
 
-- 复跑 §8 四条查询确认缺口关闭；顺带确认 judge 输入窗口（root output）内容未因 input 新增而变化
+- §8 查询复跑：reasoning 合并 17/17 ✅、run 根 input 5/5 ✅；TTFT 与跨 run parent 见 §4 结构性结论
+- judge 输入窗口（root output）复检：本窗口无 judge run，待下次 judge 触发时顺带确认
 
 **P2 分析口径约定（零改动，已部分落地）**
 
