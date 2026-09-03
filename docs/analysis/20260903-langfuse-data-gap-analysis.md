@@ -54,9 +54,9 @@ Langfuse v4 采用双表分层：
 
 | 缺口 | 部署前证据 | 修复 | 部署后复检 |
 |---|---|---|---|
-| TTFT 全空 | completionStartTime 0/1134 | e3204afb（首 token 标记 + `completion_start_time`） | ⚠️ 0/17，**结构性空白非 bug**：窗口内 17 条 GENERATION 全是后台 trigger/heartbeat run，走 single_step 非流式 `client.complete()` 分支（无 card_bridge_key → 无 on_chunk/on_thinking 回调 → first_token_at 不设置）。TTFT 只在流式路径（直聊/卡片模式）有意义，待 UI 场景 run 再验 |
-| reasoning_content 缺失 | output 含 `reasoning_content`/`<think>` 的 0 条 | 1224cf77（结构化 output + `<think>` 块合并） | ✅ 17/17：output 为 `{"content","reasoning_content"}` 分离结构 |
-| run 根 input 空 | 108/108 空（goal 在 `metadata.goal`） | e3204afb（`observe_run(input=run.goal)`） | ✅ 5/5：input 为完整 goal 文本（1319/3656 字符） |
+| TTFT 全空 | completionStartTime 0/1134 | e3204afb（首 token 标记 + `completion_start_time`） | ✅ **08:28Z 二次复检关闭**：foreground chat 15 条 GENERATION 中 10 条有 TTFT（5.85~30.31s，均值 15.5s，DeepSeek 思考模型正常范围）。无值的 5 条语义正确：4 条工具轮（content 为空只有 reasoning+tool_calls，on_chunk 不触发）+ 1 条 verify gate（非流式辅助调用）。background 8 条仍结构性无值（非流式分支） |
+| reasoning_content 缺失 | output 含 `reasoning_content`/`<think>` 的 0 条 | 1224cf77（结构化 output + `<think>` 块合并） | ✅ 17/17（二次复检 23/23）：output 为 `{"content","reasoning_content"}` 分离结构 |
+| run 根 input 空 | 108/108 空（goal 在 `metadata.goal`） | e3204afb（`observe_run(input=run.goal)`） | ✅ 5/5（二次复检 6/6）：input 为完整 goal 文本 |
 | 跨 run parent 无关联 | `is_app_root AND parent_span_id!=''` = 0 条 | e3204afb（trace_context 跨 trace 挂载） | ⚠️ 无场景：窗口内 5 条 run 根 span 均为独立 trigger/heartbeat run，parent 空串是正确行为。跨 run parent 只在 A2A 委派 run 出现（command payload 带 parent_trace_id），待 A2A 场景再验 |
 
 容器代码验证（4/4 特征在镜像内确认，文件 mtime 02:01:57Z 与容器重建 02:02:04Z 吻合，metadata `langfuse.release=dec47111`）：tracing.py:404 `completion_start_time` 写入、:723 `input=mask_text(goal)`、:723 `trace_context=parent_trace_context`、output 合并为 `{"content","reasoning_content"}` 字典。**另注意**：CH 里 `parent_span_id IS NOT NULL` 对空串返回 true，复检口径必须用 `parent_span_id != ''`。
@@ -92,6 +92,7 @@ Langfuse v4 采用双表分层：
 
 - §8 查询复跑：reasoning 合并 17/17 ✅、run 根 input 5/5 ✅；TTFT 与跨 run parent 见 §4 结构性结论
 - judge 输入窗口（root output）复检：本窗口无 judge run，待下次 judge 触发时顺带确认
+- **二次复检（08:28Z，窗口 06:00Z 起）**：TTFT 已由真实 chat 数据关闭（foreground 10/10 有可见内容的全有值）；全窗口无异常——ERROR 仅 2 条用户取消、input/usage 100% 填充、evaluator 52 span=26 TOOL×2 规则正常
 
 **P2 分析口径约定（零改动，已部分落地）**
 
