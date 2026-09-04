@@ -656,12 +656,19 @@ def _settlement_summary(
         ledger=ledger,
         reason=_SETTLEMENT_REASON,
     )
+    # Channel-legal shape: the messages channel reduces updates through
+    # langgraph add_messages, which converts dicts to HumanMessage — and this
+    # langchain version rejects a bare dict content with a pydantic
+    # ValidationError (2026-09-04 production crash, run ce976e4c,
+    # error_code=reconciliation_required). A JSON string survives the channel,
+    # keeps the structured facts, and stays byte-deterministic.
     synthetic: JsonObject = {
         "id": block.message_ids[-1],
         "role": "user",
-        "content": {
-            "historical_tool_exchange": cast(JsonObject, asdict(summary)),
-        },
+        "content": json.dumps(
+            {"historical_tool_exchange": cast(JsonObject, asdict(summary))},
+            ensure_ascii=False,
+        ),
     }
     return SettledExchange(
         removed_message_ids=block.message_ids,

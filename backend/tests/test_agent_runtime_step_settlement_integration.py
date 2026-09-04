@@ -187,7 +187,7 @@ def test_trajectory_cache_prefix_monotone_after_single_first_dip() -> None:
         1
         for messages in outputs
         for message in messages
-        if isinstance(message.get("content"), dict) and "historical_tool_exchange" in message["content"]
+        if isinstance(message.get("content"), str) and "historical_tool_exchange" in message["content"]
     )
     assert settled_count >= 3
     validate_tool_exchange_integrity(tuple(outputs[-1]))
@@ -239,7 +239,7 @@ async def test_settlement_and_compaction_interleave_without_double_synthesis() -
     first_synthetic_ids = {
         message["id"]
         for message in settlement.messages
-        if isinstance(message.get("content"), dict) and "historical_tool_exchange" in message["content"]
+        if isinstance(message.get("content"), str) and "historical_tool_exchange" in message["content"]
     }
     assert first_synthetic_ids
 
@@ -273,7 +273,7 @@ async def test_settlement_and_compaction_interleave_without_double_synthesis() -
     synthetic_ids = {
         message["id"]
         for message in second_settlement.messages
-        if isinstance(message.get("content"), dict) and "historical_tool_exchange" in message["content"]
+        if isinstance(message.get("content"), str) and "historical_tool_exchange" in message["content"]
     }
     # No new synthetic id was invented and none was double-wrapped: every
     # synthetic id in the final history comes from the first settlement pass.
@@ -450,6 +450,40 @@ async def test_tool_node_settlement_update_shape() -> None:
     synthetic = regular[0]
     assert synthetic["role"] == "user"
     assert "historical_tool_exchange" in synthetic["content"]
+
+
+@pytest.mark.asyncio
+async def test_settlement_update_survives_messages_channel_reducer() -> None:
+    """Regression (2026-09-04 prod crash, run ce976e4c): the synthetic message
+    must convert through the langgraph messages channel. A bare dict content
+    fails HumanMessage pydantic validation and kills the Run
+    (error_code=reconciliation_required)."""
+    from langchain_core.messages import HumanMessage, convert_to_messages
+    from langgraph.graph.message import add_messages
+
+    run_id = uuid.uuid4()
+    state = _tool_state(run_id, budget=200)
+    context = _context(run_id, state)
+    tool_service = _SettlementToolService(_ledger(range(3)))
+    executor = DeterministicRuntimeNodeExecutor(
+        cancel_source=_CancelSource(),
+        model_service=_ModelService(),
+        tool_service=tool_service,
+    )
+    update = await executor._tool(state, context)
+
+    # The exact production path: the messages channel reduces the Tool node's
+    # update over the existing thread via add_messages.
+    merged = add_messages(list(state["messages"]), update["messages"])
+    converted = convert_to_messages(
+        [message for message in update["messages"] if not isinstance(message, RemoveMessage)]
+    )
+    assert any(isinstance(message, HumanMessage) for message in converted)
+    assert merged
+    # Every surviving message must be channel-representable (no bare dict
+    # content survives conversion).
+    for message in merged:
+        assert isinstance(message.content, (str, list))
 
 
 @pytest.mark.asyncio

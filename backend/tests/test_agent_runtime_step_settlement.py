@@ -115,8 +115,10 @@ def _message_ids(messages) -> list[str]:
 
 def _synthetic_content(message: JsonObject) -> dict:
     content = message["content"]
-    assert isinstance(content, dict), "synthetic message content must be an object"
-    return content
+    assert isinstance(content, str), "synthetic message content must be a JSON string"
+    parsed = json.loads(content)
+    assert isinstance(parsed, dict) and "historical_tool_exchange" in parsed
+    return parsed
 
 
 def test_settles_window_out_completed_exchange_blockwise() -> None:
