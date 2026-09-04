@@ -207,6 +207,8 @@ _RESULT_METADATA_KEYS = frozenset(
         "original_status",
         "original_completed_at",
         "workspace_resolution_action",
+        "workspace_conflict_details",
+        "sandbox_output",
     }
 )
 _SENSITIVE_KEYS = frozenset(

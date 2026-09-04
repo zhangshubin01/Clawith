@@ -8,6 +8,7 @@ import pytest
 
 from app.services import agent_tools
 from app.services import workspace_collaboration
+from app.services.agent_runtime.tool_execution import ToolExecutionOutcome
 from app.services.sandbox.local.run_workspace import (
     RunWorkspaceIdentity,
     close_run_workspace,
@@ -522,6 +523,17 @@ async def test_flush_temp_workspace_fails_on_conflict(monkeypatch):
 
     assert result["conflicted"] == ["workspace/input.md"]
     assert storage.files[f"{agent_id}/workspace/input.md"] == b"# Remote change\n"
+    current = await storage.get_version(f"{agent_id}/workspace/input.md")
+    assert result["conflict_details"] == [
+        {
+            "path": "workspace/input.md",
+            "operation": "write",
+            "condition": "version_match",
+            "expected_version": temp_ws.manifest["workspace/input.md"].base_version_token,
+            "current_exists": True,
+            "current_version": current.token,
+        }
+    ]
 
 
 @pytest.mark.asyncio
@@ -558,6 +570,7 @@ async def test_flush_temp_workspace_accepts_stable_identical_concurrent_write(
         "conflicted": [],
         "skipped": ["workspace/output/session-id/result.md"],
         "derived_skipped_count": 0,
+        "conflict_details": [],
     }
     assert storage.files[storage_key] == b"# Identical result\n"
     manifest = temp_ws.manifest["workspace/output/session-id/result.md"]
@@ -603,6 +616,18 @@ async def test_flush_temp_workspace_rejects_identical_bytes_when_version_changes
     assert result["conflicted"] == ["workspace/output/session-id/result.md"]
     assert result["skipped"] == []
     assert storage.files[storage_key] == b"# Changed again\n"
+    details = result["conflict_details"]
+    assert len(details) == 1
+    assert details[0]["path"] == "workspace/output/session-id/result.md"
+    assert details[0]["operation"] == "write"
+    assert details[0]["condition"] == "version_match"
+    assert details[0]["expected_version"] == temp_ws.manifest[
+        "workspace/output/session-id/result.md"
+    ].base_version_token
+    assert details[0]["current_exists"] is True
+    # mutate_after_read keeps bumping the version on every read, so only assert
+    # the CAS actually diverged from the manifest base.
+    assert details[0]["current_version"] != details[0]["expected_version"]
 
 
 @pytest.mark.asyncio
@@ -1184,17 +1209,78 @@ async def test_move_file_direct_move_refreshes_run_workspace(monkeypatch, tmp_pa
 
 
 @pytest.mark.asyncio
-async def test_refresh_run_workspace_path_noop_without_run_workspace():
-    # No registered run workspace: a no-op, not an error.
-    result = await refresh_run_workspace_path(
-        str(uuid.uuid4()),
-        str(uuid.uuid4()),
-        "workspace/notes.txt",
-        data=b"new",
-        version_token="9",
-        size=3,
-    )
+async def test_refresh_run_workspace_path_noop_without_run_workspace(caplog):
+    # No registered run workspace: a no-op, not an error. A never-materialized
+    # run is the benign case and logs at info (direct chats hit this per write).
+    run_id = str(uuid.uuid4())
+    with caplog.at_level("INFO"):
+        result = await refresh_run_workspace_path(
+            run_id,
+            str(uuid.uuid4()),
+            "workspace/notes.txt",
+            data=b"new",
+            version_token="9",
+            size=3,
+        )
     assert result is None
+    assert any("never_materialized" in r.getMessage() for r in caplog.records)
+    assert not any(r.levelname == "WARNING" for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_refresh_after_close_logs_workspace_gone_warning(monkeypatch, caplog):
+    """A workspace that WAS materialized but is gone at refresh time is the
+    forensic signal (the 14:32:17 case): warn, not info."""
+    agent_id = uuid.uuid4()
+    storage = MemoryStorageBackend({f"{agent_id}/workspace/notes.txt": b"first"})
+    monkeypatch.setattr(agent_tools, "get_storage_backend", lambda: storage)
+
+    run_id, _run_ws = await _materialize_run_workspace(agent_id, ["workspace"])
+    await close_run_workspace(run_id)
+    with caplog.at_level("WARNING"):
+        await refresh_run_workspace_path(
+            run_id,
+            str(agent_id),
+            "workspace/notes.txt",
+            data=b"new",
+            version_token="9",
+            size=3,
+        )
+    assert any(
+        r.levelname == "WARNING"
+        and "workspace gone" in r.getMessage()
+        and run_id in r.getMessage()
+        for r in caplog.records
+    )
+
+
+@pytest.mark.asyncio
+async def test_refresh_after_direct_write_logs_version_invisible(monkeypatch):
+    """S5: the direct write is not yet visible as a storage version — log the
+    reason instead of silently dropping the refresh."""
+    from types import SimpleNamespace
+
+    from loguru import logger
+
+    agent_id = uuid.uuid4()
+    storage = MemoryStorageBackend({f"{agent_id}/workspace/notes.txt": b"first"})
+    monkeypatch.setattr(agent_tools, "get_storage_backend", lambda: storage)
+
+    async def invisible_version(_key):
+        return SimpleNamespace(exists=False)
+
+    monkeypatch.setattr(storage, "get_version", invisible_version)
+    captured: list[str] = []
+    sink_id = logger.add(lambda message: captured.append(str(message)), level="WARNING")
+    try:
+        await agent_tools._refresh_run_workspace_after_direct_write(
+            agent_id,
+            "workspace/notes.txt",
+            run_id=str(uuid.uuid4()),
+        )
+    finally:
+        logger.remove(sink_id)
+    assert any("version_invisible" in message for message in captured)
 
 
 @pytest.mark.asyncio
@@ -1494,3 +1580,44 @@ async def test_flush_conflict_discards_run_workspace_for_rematerialization(
     finally:
         sandbox_run_scope_id.reset(token)
         await close_run_workspace(run_id)
+
+
+@pytest.mark.asyncio
+async def test_temp_workspace_conflict_outcome_carries_forensic_metadata(monkeypatch):
+    """B/C2: a workspace_sync_conflict outcome persists the CAS details and the
+    sandbox output, so post-hoc attribution no longer depends on container logs."""
+    agent_id = uuid.uuid4()
+    storage_key = f"{agent_id}/workspace/notes.txt"
+    storage = MemoryStorageBackend({storage_key: b"first"})
+    monkeypatch.setattr(agent_tools, "get_storage_backend", lambda: storage)
+
+    async def runner(root):
+        (root / "workspace" / "notes.txt").write_bytes(b"local edit")
+        # A third party bumps storage between materialization and flush.
+        await storage.write_bytes(storage_key, b"external")
+        return ToolExecutionOutcome(
+            status="succeeded",
+            result_summary="sandbox stdout evidence",
+            result_ref=None,
+        )
+
+    outcome = await agent_tools._run_with_temp_workspace_outcome(
+        agent_id,
+        None,
+        runner,
+        paths=["workspace/notes.txt"],
+        sync_back=True,
+    )
+    assert isinstance(outcome, ToolExecutionOutcome)
+    assert outcome.error_code == "workspace_sync_conflict"
+    assert outcome.metadata["sandbox_output"] == "sandbox stdout evidence"
+    assert outcome.metadata["workspace_conflict_details"] == [
+        {
+            "path": "workspace/notes.txt",
+            "operation": "write",
+            "condition": "version_match",
+            "expected_version": "1",
+            "current_exists": True,
+            "current_version": "2",
+        }
+    ]

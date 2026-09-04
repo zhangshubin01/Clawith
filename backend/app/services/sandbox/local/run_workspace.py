@@ -58,6 +58,11 @@ class _RunWorkspaceState:
 
 
 _run_workspace_tasks: dict[str, asyncio.Task[_RunWorkspaceState]] = {}
+# Run ids that ever materialized a run-scoped workspace in this process. Purely
+# a diagnostic discriminator for refresh misses: "materialized and now gone" is
+# the forensic signal (warning), "never materialized" is benign (info). Never
+# pruned: one short string per sandbox run, and the process restarts on deploy.
+_materialized_run_ids: set[str] = set()
 
 
 async def _create_state(
@@ -80,6 +85,7 @@ async def _get_or_create_state(
     if task is None:
         task = asyncio.create_task(_create_state(identity, factory))
         _run_workspace_tasks[run_id] = task
+        _materialized_run_ids.add(run_id)
     try:
         state = await asyncio.shield(task)
     except BaseException:
@@ -157,7 +163,18 @@ async def refresh_run_workspace_path(
     """
     task = _run_workspace_tasks.get(run_id)
     if task is None:
-        logger.debug("[RunWorkspaceRefresh] no run workspace: run_id=%s", run_id)
+        if run_id in _materialized_run_ids:
+            logger.warning(
+                "[RunWorkspaceRefresh] workspace gone: run_id=%s path=%s",
+                run_id,
+                rel_path,
+            )
+        else:
+            logger.info(
+                "[RunWorkspaceRefreshSkipped] run_id=%s path=%s reason=never_materialized",
+                run_id,
+                rel_path,
+            )
         return
     try:
         state = await asyncio.shield(task)
@@ -168,6 +185,11 @@ async def refresh_run_workspace_path(
         return
     async with state.lock:
         if state.closed:
+            logger.warning(
+                "[RunWorkspaceRefreshSkipped] run_id=%s path=%s reason=closed",
+                run_id,
+                rel_path,
+            )
             return
         workspace = state.workspace
         root = workspace.root.resolve()

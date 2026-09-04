@@ -1494,3 +1494,28 @@ def test_service_never_reads_product_projection_as_execution_state():
     assert "projected_execution_status" not in source
     assert "projected_waiting" not in source
     assert "projected_result" not in source
+
+
+def test_bounded_result_metadata_keeps_workspace_conflict_forensics_keys():
+    """B/C2: the two new forensic keys survive the ledger whitelist filter,
+    while unwhitelisted keys keep being dropped."""
+    metadata = tool_execution._bounded_result_metadata(
+        {
+            "workspace_conflict_details": [
+                {
+                    "path": "workspace/notes.txt",
+                    "operation": "write",
+                    "condition": "version_match",
+                    "expected_version": "1",
+                    "current_exists": True,
+                    "current_version": "2",
+                }
+            ],
+            "sandbox_output": "tail output",
+            "not_in_whitelist": "dropped",
+        }
+    )
+    assert metadata["workspace_conflict_details"][0]["current_version"] == "2"
+    assert metadata["workspace_conflict_details"][0]["operation"] == "write"
+    assert metadata["sandbox_output"] == "tail output"
+    assert "not_in_whitelist" not in metadata

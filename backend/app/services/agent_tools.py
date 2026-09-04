@@ -137,6 +137,7 @@ from app.services.builtin_tool_definitions import (
 from app.services.agent_runtime.tool_execution import (
     SAFE_READ_MAX_ATTEMPTS,
     ToolExecutionOutcome,
+    _truncate_utf8,
     sanitize_tool_arguments,
 )
 from app.services.agent_runtime.tool_contracts import (
@@ -2027,7 +2028,7 @@ async def _sync_tasks_to_file(agent_id: uuid.UUID, ws: Path):
 async def flush_temp_workspace(
     temp_workspace: TempWorkspace,
     conflict_mode: Literal["fail", "overwrite"] = "fail",
-) -> dict[str, list[str] | int]:
+) -> dict[str, list[str] | list[dict[str, Any]] | int]:
     """Flush local changes, optionally replacing Session-isolated output."""
     storage = get_storage_backend()
     selected_paths = [normalize_workspace_path(path) for path in temp_workspace.publish_paths]
@@ -2043,6 +2044,10 @@ async def flush_temp_workspace(
     conflicted: list[str] = []
     deleted: list[str] = []
     skipped: list[str] = []
+    # Per-conflict CAS forensics (path/operation/condition/expected/current),
+    # mirroring the fields of the [WorkspaceFlushConflict] warning log so the
+    # same evidence survives in the ledger after container logs rotate.
+    conflict_details: list[dict[str, Any]] = []
 
     async def _discard_stale_run_workspace() -> None:
         # ADR-0011 fix three: a conflicted flush means the materialized run
@@ -2143,6 +2148,24 @@ async def flush_temp_workspace(
                     )
                     continue
                 conflicted.append(rel_path)
+                conflict_details.append(
+                    {
+                        "path": rel_path,
+                        "operation": "write",
+                        "condition": "version_match" if entry else "require_absent",
+                        "expected_version": entry.base_version_token if entry else None,
+                        "current_exists": (
+                            result.current_version.exists
+                            if result.current_version
+                            else None
+                        ),
+                        "current_version": (
+                            result.current_version.token
+                            if result.current_version
+                            else None
+                        ),
+                    }
+                )
                 logger.warning(
                     "[WorkspaceFlushConflict] run_id={} agent_id={} operation=write "
                     "path={} condition={} expected_version={} current_exists={} "
@@ -2164,6 +2187,7 @@ async def flush_temp_workspace(
                         "updated": updated,
                         "deleted": deleted,
                         "conflicted": conflicted,
+                        "conflict_details": conflict_details,
                         "skipped": skipped,
                         "derived_skipped_count": len(derived_paths),
                     }
@@ -2214,6 +2238,24 @@ async def flush_temp_workspace(
             )
             if not result.ok:
                 conflicted.append(rel_path)
+                conflict_details.append(
+                    {
+                        "path": rel_path,
+                        "operation": "delete",
+                        "condition": "version_match",
+                        "expected_version": entry.base_version_token,
+                        "current_exists": (
+                            result.current_version.exists
+                            if result.current_version
+                            else None
+                        ),
+                        "current_version": (
+                            result.current_version.token
+                            if result.current_version
+                            else None
+                        ),
+                    }
+                )
                 logger.warning(
                     "[WorkspaceFlushConflict] run_id={} agent_id={} operation=delete "
                     "path={} condition=version_match expected_version={} "
@@ -2234,6 +2276,7 @@ async def flush_temp_workspace(
                         "updated": updated,
                         "deleted": deleted,
                         "conflicted": conflicted,
+                        "conflict_details": conflict_details,
                         "skipped": skipped,
                         "derived_skipped_count": len(derived_paths),
                     }
@@ -2264,6 +2307,7 @@ async def flush_temp_workspace(
         "updated": updated,
         "deleted": deleted,
         "conflicted": conflicted,
+        "conflict_details": conflict_details,
         "skipped": skipped,
         "derived_skipped_count": len(derived_paths),
     }
@@ -2288,6 +2332,10 @@ async def _refresh_run_workspace_after_direct_write(
     if run_id is None:
         run_id = sandbox_run_scope_id.get().strip() or None
     if not run_id:
+        logger.info(
+            "[RunWorkspaceRefreshSkipped] path={} reason=no_run_id",
+            rel_path,
+        )
         return
     storage = get_storage_backend()
     storage_key = normalize_storage_key(f"{agent_id}/{rel_path}")
@@ -2313,6 +2361,11 @@ async def _refresh_run_workspace_after_direct_write(
                 return
             data = await storage.read_bytes(storage_key)
         elif not deleted:
+            logger.warning(
+                "[RunWorkspaceRefreshSkipped] run_id={} path={} reason=version_invisible",
+                run_id,
+                rel_path,
+            )
             return
         else:
             data = None
@@ -2860,9 +2913,17 @@ async def _run_with_temp_workspace_outcome(
                 "workspace_publication_unverifiable",
             )
         if flush_result["conflicted"]:
+            metadata: dict[str, Any] = {}
+            if flush_result.get("conflict_details"):
+                metadata["workspace_conflict_details"] = flush_result["conflict_details"]
+            if outcome.result_summary:
+                metadata["sandbox_output"] = _truncate_utf8(
+                    outcome.result_summary, max_bytes=8000
+                )
             return _typed_workspace_publication_failure(
                 _workspace_conflict_summary(flush_result["conflicted"]),
                 "workspace_sync_conflict",
+                metadata=metadata,
                 safe_remediation=_WORKSPACE_CONFLICT_SAFE_REMEDIATION,
             )
         changed_refs = tuple(
@@ -2985,7 +3046,7 @@ async def _execute_code_with_workspace_outcome(
         await lease.start_heartbeat()
 
     execution_started = False
-    gateway_flush_result: dict[str, list[str]] | None = None
+    gateway_flush_result: dict[str, list[str] | list[dict[str, Any]] | int] | None = None
     run_id = sandbox_run_scope_id.get().strip() or None
     reconciliation_service = WorkspaceReconciliationService(get_storage_backend())
     reconciliation_scope: ReconciliationScope | None = None
@@ -3101,7 +3162,7 @@ async def _execute_code_with_workspace_outcome(
 
             async def recover_publication(
                 original_outcome: ToolExecutionOutcome,
-                flush_result: dict[str, list[str]],
+                flush_result: dict[str, Any],
             ) -> ToolExecutionOutcome | None:
                 """Resolve known publication facts without replaying code."""
                 if reconciliation_scope is None or candidate_ref is None:
@@ -3228,6 +3289,7 @@ async def _execute_code_with_workspace_outcome(
                     "updated": [],
                     "deleted": [],
                     "conflicted": [],
+                    "conflict_details": [],
                     "skipped": [],
                     "derived_skipped_count": 0,
                 }
@@ -3296,6 +3358,12 @@ async def _execute_code_with_workspace_outcome(
                 recovered = await recover_publication(outcome, flush_result)
                 if recovered is not None:
                     return recovered
+                if flush_result.get("conflict_details"):
+                    metadata["workspace_conflict_details"] = flush_result["conflict_details"]
+                if outcome.result_summary:
+                    metadata["sandbox_output"] = _truncate_utf8(
+                        outcome.result_summary, max_bytes=8000
+                    )
                 return _typed_workspace_publication_failure(
                     _workspace_conflict_summary(flush_result["conflicted"]),
                     "workspace_sync_conflict",
@@ -3548,7 +3616,7 @@ def _workspace_conflict_summary(conflicted: list[str]) -> str:
     )
 
 
-def _derived_publication_note(flush_result: dict[str, list[str] | int] | None) -> str:
+def _derived_publication_note(flush_result: dict[str, list[str] | list[dict[str, Any]] | int] | None) -> str:
     """Success receipt note when derived outputs were skipped (P0.5 §4.2.2)."""
     count = (flush_result or {}).get("derived_skipped_count") or 0
     if not isinstance(count, int) or count <= 0:
