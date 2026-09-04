@@ -3388,6 +3388,21 @@ async def _execute_code_with_workspace_outcome(
     except SkillSnapshotIncompleteError as exc:
         return _typed_failure(str(exc), "skill_snapshot_incomplete")
     except Exception as exc:
+        # P0 埋点：此前此处静默吞掉 PermissionError 等未处理异常（零 traceback），
+        # 导致发布/reconciliation 阶段的精确抛出点不可定位。补带上下文的异常日志，
+        # 让下一次失败直接暴露根因（如 root 属主 build 目录 EACCES）。
+        logger.exception(
+            "[SandboxPublicationUnhandled] run_id=%s agent_id=%s session_id=%s "
+            "tenant_id=%s tool=%s error_type=%s execution_started=%s publish_paths=%s",
+            run_id,
+            agent_id,
+            session_id,
+            tenant_id,
+            tool_name,
+            type(exc).__name__,
+            execution_started,
+            list(policy.publish_paths),
+        )
         if execution_started:
             return _typed_workspace_publication_failure(
                 f"Sandbox execution outcome is unknown after {type(exc).__name__}.",
