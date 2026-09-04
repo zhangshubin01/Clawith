@@ -1942,6 +1942,7 @@ async def _prepare_temp_workspace(
         )
     _drop_incomplete_git_dirs(temp_ws, budget, manifest)
     await _restore_git_bundles(temp_ws, agent_id, git_bundles, manifest)
+    await gitlab_workspace.restore_git_metadata_from_remote(temp_ws, agent_id)
     await gitlab_workspace.inject_credentials_into_temp_workspace(temp_ws, agent_id)
     skipped_skills = [
         path

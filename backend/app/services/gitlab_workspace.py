@@ -325,9 +325,11 @@ def _iter_repo_copies(root: Path):
             yield entry
 
 
-async def _load_binding_credential(agent_id: uuid.UUID) -> tuple[str, str, str, str, str, str] | None:
-    """Load ``(pat, base_url, repo_name, agent_name, agent_email, project_path)``
-    from the agent's GitLab binding; ``None`` when there is nothing injectable.
+async def _load_binding_credential(agent_id: uuid.UUID) -> tuple[str, str, str, str, str, str, str | None] | None:
+    """Load ``(pat, base_url, repo_name, agent_name, agent_email, project_path,
+    default_branch)`` from the agent's GitLab binding; ``None`` when there is
+    nothing injectable. ``default_branch`` is the binding's work branch (may be
+    ``None`` for legacy bindings saved before the field existed).
 
     Never raises: credential injection is best-effort and must not affect the
     workspace materialization path.
@@ -354,6 +356,7 @@ async def _load_binding_credential(agent_id: uuid.UUID) -> tuple[str, str, str, 
             extra = dict(config.extra_config or {})
             project_path = (extra.get("project_path") or "").strip()
             base_url = (extra.get("base_url") or settings.GITLAB_BASE_URL or "").rstrip("/")
+            default_branch = (extra.get("default_branch") or "").strip() or None
             if not project_path or not base_url:
                 return None
             repo_name = _repo_dir_name(project_path)
@@ -364,7 +367,7 @@ async def _load_binding_credential(agent_id: uuid.UUID) -> tuple[str, str, str, 
             agent = agent_result.scalar_one_or_none()
             agent_name = (agent.name if agent else "") or str(agent_id)
             agent_email = f"agent-{agent_id.hex[:8]}@clawith.local"
-            return pat, base_url, repo_name, agent_name, agent_email, project_path
+            return pat, base_url, repo_name, agent_name, agent_email, project_path, default_branch
     except Exception:  # noqa: BLE001 — best-effort credential lookup
         logger.debug("[GitLabBinding] inject credential lookup failed agent={}", agent_id)
         return None
@@ -397,7 +400,7 @@ async def inject_credentials_into_temp_workspace(
         cred = await _load_binding_credential(agent_id)
         if cred is None:
             return False
-        pat, base_url, repo_name, agent_name, agent_email, _project_path = cred
+        pat, base_url, repo_name, agent_name, agent_email, _project_path, _default_branch = cred
         target = next((c for c in candidates if c.name == repo_name), None)
         if target is None:
             return False
@@ -478,7 +481,7 @@ async def restore_git_metadata_from_bundle(
     cred = await _load_binding_credential(agent_id)
     if cred is None:
         return False
-    pat, base_url, _repo_name, _agent_name, _agent_email, project_path = cred
+    pat, base_url, _repo_name, _agent_name, _agent_email, project_path, _default_branch = cred
     clone_url = f"{base_url}/{project_path}.git"
     rewrite = _credential_rewrite(base_url, pat)
     prefix = _base_prefix(base_url)
@@ -523,6 +526,112 @@ async def restore_git_metadata_from_bundle(
         return True
     except Exception as exc:  # noqa: BLE001 — materialization must never fail on git restore
         logger.debug("[GitLabBundle] restore skipped repo={}: {}", repo_dir, exc)
+        return False
+
+
+async def restore_git_metadata_from_remote(
+    temp_workspace_root: Path,
+    agent_id: uuid.UUID,
+) -> bool:
+    """Rebuild the bound repo's missing ``.git`` from its GitLab remote (P2 fallback).
+
+    Runs after bundle restore: when the materialized working tree exists but the
+    bundle was absent (or its restore failed), reconstruct ``.git`` by fetching
+    the binding's work branch from origin and doing a mixed reset so the
+    already-materialized edits stay as unstaged modifications. When the work
+    branch is missing on the remote, fall back to adopt mode (first commit +
+    push). Best-effort and never raises — a failure leaves the repo without
+    ``.git`` and the agent falls back to ``GITLAB_GUIDE.md`` self-init.
+    """
+    try:
+        cred = await _load_binding_credential(agent_id)
+        if cred is None:
+            return False
+        pat, base_url, repo_name, agent_name, agent_email, project_path, default_branch = cred
+        repo = temp_workspace_root / "workspace" / repo_name
+        if not repo.is_dir() or (repo / ".git").exists():
+            return False
+        rewrite = _credential_rewrite(base_url, pat)
+        prefix = _base_prefix(base_url)
+        clone_url = f"{base_url}/{project_path}.git"
+        # Resolve the work branch: binding default, else the remote's HEAD, else main.
+        branch = default_branch
+        if not branch:
+            rc, out, _ = await _run_git(
+                ["-c", f"url.{rewrite}.insteadOf={prefix}", "ls-remote", "--symref", clone_url, "HEAD"],
+                pat=pat,
+                timeout=120,
+            )
+            if rc == 0:
+                m = re.search(r"ref:\s+refs/heads/(\S+)\s+HEAD", out)
+                branch = m.group(1) if m else None
+            branch = branch or "main"
+        # Missing work branch on remote → adopt (first commit + push).
+        rc, out, _ = await _run_git(
+            ["-c", f"url.{rewrite}.insteadOf={prefix}", "ls-remote", "--heads", clone_url, branch],
+            pat=pat,
+            timeout=120,
+        )
+        if rc != 0 or not out.strip():
+            await _adopt_mode(
+                repo, clone_url, branch, rewrite, prefix, agent_name, agent_email, pat
+            )
+            logger.info(
+                "[GitLabBinding] remote restore adopted (branch missing) agent={} repo={} branch={}",
+                agent_id,
+                repo_name,
+                branch,
+            )
+            return True
+        # Rebuild .git in place, keeping working-tree edits as unstaged changes.
+        rc, _, err = await _run_git(["init", "-q", "-b", branch], cwd=repo, pat=pat)
+        if rc != 0:
+            logger.warning(
+                "[GitLabBinding] remote restore init failed agent={} repo={}: {}",
+                agent_id,
+                repo_name,
+                err.strip()[:200],
+            )
+            return False
+        rc, _, err = await _run_git(["remote", "add", "origin", clone_url], cwd=repo, pat=pat)
+        if rc != 0:
+            logger.warning(
+                "[GitLabBinding] remote restore remote add failed agent={} repo={}: {}",
+                agent_id,
+                repo_name,
+                err.strip()[:200],
+            )
+            return False
+        await _apply_repo_config(repo, rewrite, prefix, agent_name, agent_email, pat)
+        # Fetch all refs via the default remote-tracking refspec (written by
+        # `remote add`), so `origin/<branch>` exists for the mixed reset below.
+        rc, _, err = await _run_git(
+            ["-c", f"url.{rewrite}.insteadOf={prefix}", "fetch", "-q", "origin"],
+            cwd=repo,
+            pat=pat,
+            timeout=120,
+        )
+        if rc != 0:
+            logger.warning(
+                "[GitLabBinding] remote restore fetch failed agent={} repo={}: {}",
+                agent_id,
+                repo_name,
+                err.strip()[:200],
+            )
+            return False
+        await _run_git(["reset", "-q", "--mixed", f"origin/{branch}"], cwd=repo, pat=pat)
+        await _run_git(
+            ["branch", "--set-upstream-to", f"origin/{branch}", branch], cwd=repo, pat=pat
+        )
+        logger.info(
+            "[GitLabBinding] remote restore done agent={} repo={} branch={}",
+            agent_id,
+            repo_name,
+            branch,
+        )
+        return True
+    except Exception as exc:  # noqa: BLE001 — materialization must never fail on git restore
+        logger.debug("[GitLabBinding] remote restore skipped agent={}: {}", agent_id, exc)
         return False
 
 

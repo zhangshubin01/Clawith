@@ -465,7 +465,7 @@ def test_inject_temp_workspace_no_binding_noop(tmp_path, monkeypatch):
 
 def test_inject_temp_workspace_applies_repo_config(tmp_path, monkeypatch):
     async def fake_cred(agent_id):
-        return ("glpat-test123", "http://192.168.5.254", "mydome1", "Android 工程师 07", "agent-abc@clawith.local", "zhangshubin/mydome1")
+        return ("glpat-test123", "http://192.168.5.254", "mydome1", "Android 工程师 07", "agent-abc@clawith.local", "zhangshubin/mydome1", "f_android_ai")
 
     monkeypatch.setattr(gw, "_load_binding_credential", fake_cred)
     fake = FakeGit({})
@@ -481,7 +481,7 @@ def test_inject_temp_workspace_applies_repo_config(tmp_path, monkeypatch):
 
 def test_inject_temp_workspace_repo_name_mismatch_noop(tmp_path, monkeypatch):
     async def fake_cred(agent_id):
-        return ("glpat-test123", "http://192.168.5.254", "other-repo", "n", "e@x", "zhangshubin/other-repo")
+        return ("glpat-test123", "http://192.168.5.254", "other-repo", "n", "e@x", "zhangshubin/other-repo", None)
 
     monkeypatch.setattr(gw, "_load_binding_credential", fake_cred)
     fake = FakeGit({})
@@ -494,13 +494,115 @@ def test_inject_temp_workspace_repo_name_mismatch_noop(tmp_path, monkeypatch):
 
 def test_inject_temp_workspace_git_failure_returns_false(tmp_path, monkeypatch):
     async def fake_cred(agent_id):
-        return ("glpat-test123", "http://192.168.5.254", "mydome1", "n", "e@x", "zhangshubin/mydome1")
+        return ("glpat-test123", "http://192.168.5.254", "mydome1", "n", "e@x", "zhangshubin/mydome1", None)
 
     monkeypatch.setattr(gw, "_load_binding_credential", fake_cred)
     monkeypatch.setattr(gw, "_run_git", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("git broken")))
     ws = tmp_path / "ws"
     _fake_repo_copy(ws)
     assert _run(gw.inject_credentials_into_temp_workspace(ws, uuid.uuid4())) is False
+
+
+# ── restore_git_metadata_from_remote（P2 远程兜底）─────────────
+
+
+def _fake_repo_worktree(root, name="mydome1"):
+    repo = root / "workspace" / name
+    repo.mkdir(parents=True)
+    (repo / "build.gradle").write_text("x", encoding="utf-8")
+    return repo
+
+
+def _remote_cred(name="mydome1", branch="f_android_ai"):
+    async def fake_cred(agent_id):
+        return ("glpat-test123", "http://192.168.5.254", name, "Android 工程师 07", "agent-abc@clawith.local", "zhangshubin/mydome1", branch)
+
+    return fake_cred
+
+
+def test_restore_remote_no_binding_noop(tmp_path, monkeypatch):
+    async def no_cred(agent_id):
+        return None
+
+    monkeypatch.setattr(gw, "_load_binding_credential", no_cred)
+    fake = FakeGit({})
+    monkeypatch.setattr(gw, "_run_git", fake)
+    ws = tmp_path / "ws"
+    _fake_repo_worktree(ws)
+    assert _run(gw.restore_git_metadata_from_remote(ws, uuid.uuid4())) is False
+    assert fake.calls == []
+
+
+def test_restore_remote_repo_missing_skips(tmp_path, monkeypatch):
+    monkeypatch.setattr(gw, "_load_binding_credential", _remote_cred())
+    fake = FakeGit({})
+    monkeypatch.setattr(gw, "_run_git", fake)
+    ws = tmp_path / "ws"
+    (ws / "workspace").mkdir(parents=True)
+    assert _run(gw.restore_git_metadata_from_remote(ws, uuid.uuid4())) is False
+    assert fake.calls == []
+
+
+def test_restore_remote_already_has_git_skips(tmp_path, monkeypatch):
+    monkeypatch.setattr(gw, "_load_binding_credential", _remote_cred())
+    fake = FakeGit({})
+    monkeypatch.setattr(gw, "_run_git", fake)
+    ws = tmp_path / "ws"
+    _fake_repo_copy(ws)
+    assert _run(gw.restore_git_metadata_from_remote(ws, uuid.uuid4())) is False
+    assert fake.calls == []
+
+
+def test_restore_remote_branch_exists_mixed_reset(tmp_path, monkeypatch):
+    monkeypatch.setattr(gw, "_load_binding_credential", _remote_cred())
+    fake = FakeGit(
+        {
+            "ls-remote --heads": (0, "abc123\trefs/heads/f_android_ai\n", ""),
+        }
+    )
+    monkeypatch.setattr(gw, "_run_git", fake)
+    ws = tmp_path / "ws"
+    _fake_repo_worktree(ws)
+    assert _run(gw.restore_git_metadata_from_remote(ws, uuid.uuid4())) is True
+    joined = [" ".join(c) for c in fake.calls]
+    # mixed reset (not --soft/--hard), keeping uncommitted edits as unstaged
+    assert any("reset -q --mixed origin/f_android_ai" in j for j in joined)
+    assert not any("reset -q --soft" in j for j in joined)
+    # fetch authenticated via inline insteadOf rewrite (all refs, so origin/<branch> exists)
+    assert any(
+        "fetch -q origin" in j and "insteadOf=" in j for j in joined
+    )
+    assert any("init -q -b f_android_ai" in j for j in joined)
+    assert any("remote add origin http://192.168.5.254/zhangshubin/mydome1.git" in j for j in joined)
+    assert any("branch --set-upstream-to origin/f_android_ai f_android_ai" in j for j in joined)
+
+
+def test_restore_remote_branch_missing_adopts(tmp_path, monkeypatch):
+    monkeypatch.setattr(gw, "_load_binding_credential", _remote_cred())
+    fake = FakeGit({"ls-remote --heads": (0, "", "")})
+    monkeypatch.setattr(gw, "_run_git", fake)
+    ws = tmp_path / "ws"
+    _fake_repo_worktree(ws)
+    assert _run(gw.restore_git_metadata_from_remote(ws, uuid.uuid4())) is True
+    joined = [" ".join(c) for c in fake.calls]
+    assert any("add -A" in j for j in joined)
+    assert any("commit -m Initial commit" in j for j in joined)
+    assert any("push -u origin f_android_ai" in j for j in joined)
+    assert not any("reset --mixed" in j for j in joined)
+
+
+def test_restore_remote_fetch_failure_returns_false(tmp_path, monkeypatch):
+    monkeypatch.setattr(gw, "_load_binding_credential", _remote_cred())
+    fake = FakeGit(
+        {
+            "ls-remote --heads": (0, "abc123\trefs/heads/f_android_ai\n", ""),
+            "fetch -q origin": (1, "", "fatal: could not read"),
+        }
+    )
+    monkeypatch.setattr(gw, "_run_git", fake)
+    ws = tmp_path / "ws"
+    _fake_repo_worktree(ws)
+    assert _run(gw.restore_git_metadata_from_remote(ws, uuid.uuid4())) is False
 
 
 # ── _load_binding_credential（DB/解密层）──────────────────────
@@ -597,6 +699,7 @@ def test_load_binding_credential_success(monkeypatch):
         extra_config={
             "project_path": "zhangshubin/mydome1",
             "base_url": "http://192.168.5.254/",
+            "default_branch": "f_android_ai",
             "init_status": "done",
         },
     )
@@ -609,4 +712,29 @@ def test_load_binding_credential_success(monkeypatch):
         "Android 工程师 07",
         f"agent-{agent_id.hex[:8]}@clawith.local",
         "zhangshubin/mydome1",
+        "f_android_ai",
     )
+
+
+def test_load_binding_credential_legacy_no_default_branch(monkeypatch):
+    from types import SimpleNamespace
+
+    from app.models.channel_config import ChannelConfig
+
+    agent_id = uuid.uuid4()
+    config = ChannelConfig(
+        agent_id=agent_id,
+        channel_type="gitlab",
+        app_secret="cipher",
+        is_configured=True,
+        extra_config={
+            "project_path": "zhangshubin/mydome1",
+            "base_url": "http://192.168.5.254/",
+            "init_status": "done",
+        },
+    )
+    _patch_query_dao(monkeypatch, _FakeSession(config=config, agent=SimpleNamespace(name="Android 工程师 07")))
+    _patch_decrypt(monkeypatch, lambda c, k: "glpat-secret")
+    cred = _run(gw._load_binding_credential(agent_id))
+    assert cred is not None
+    assert cred[-1] is None

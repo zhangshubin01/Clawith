@@ -1,7 +1,7 @@
 # Git 元数据发布完整性修复方案（execute_code git 一直不通）
 
 - 日期：2026-09-04
-- 状态：P0-1 埋点已上线并拿到证据（`511b1a20` 已部署，5 次 `SandboxPublicationUnhandled` 命中，根因二已坐实为 `.git/objects/` 下 19 个 root 属主历史目录）；P0-2 待授权、P1/P2 待拍板。**2026-09-04 多角度评审已复核：根因/方向正确，改动清单 3 处实质缺口已补齐（§3.5）；P1 由「方案 A 唯一」扩为「方案 A vs 方案 B′ 双候选」，正式权衡见 §3.4，默认倾向 B′（git bundle 单 blob 原子发布，保留本地 commit 历史）。2026-09-04 已按授权实施 P1 方案 B′：代码落地 + 单测全绿 + arch-guard/ruff 通过（实现记录见 §3.6）；迁移与 P2 远程 restore 兜底留待后续授权**
+- 状态：P0-1 埋点已上线并拿到证据（`511b1a20` 已部署，5 次 `SandboxPublicationUnhandled` 命中，根因二已坐实为 `.git/objects/` 下 19 个 root 属主历史目录）；P0-2 待授权、P1/P2 待拍板。**2026-09-04 多角度评审已复核：根因/方向正确，改动清单 3 处实质缺口已补齐（§3.5）；P1 由「方案 A 唯一」扩为「方案 A vs 方案 B′ 双候选」，正式权衡见 §3.4，默认倾向 B′（git bundle 单 blob 原子发布，保留本地 commit 历史）。2026-09-04 已按授权实施 P1 方案 B′：代码落地 + 单测全绿 + arch-guard/ruff 通过（实现记录见 §3.6）；随后 P2 远程 restore 兜底亦已实现（§3.6）；仅迁移清理 storage 历史 `.git` 条目留待授权**
 - 分支：`f-shubin-0806`，HEAD `511b1a20`（`fix(observability): 埋点日志占位符 %s→{} 修正 loguru 格式化`；上一跳 `6dacf86b` 埋点初版、`369cc4a9` 为埋点前基线）
 - 影响面：Clawith 平台内部 agent（`Android 工程师 07`, agent_id=`950a1943-6ad6-4139-842e-8bde89ca823c`）通过 `execute_code`（language=bash）执行 `git commit/push/MR` 到内网 GitLab `http://192.168.5.254/zhangshubin/mydome1` 持续失败。
 - 关联文档：`20260903-workspace-conflict-observability-hardening.md`（观测加固，B/C2 已落地）、`20260901-sandbox-git-materialize-fix.md`、`20260901-workspace-publication-p0-fix.md`（前序 .git 三代修复史）。
@@ -245,7 +245,9 @@ except Exception as exc:
 | 8 | restore 序列 | `git init -b __clawith_restore__` → fetch bundle `+refs/heads/*` `+refs/tags/*` `HEAD:refs/clawith-bundle-head` → `_resolve_bundle_branch` 反查分支 → `symbolic-ref HEAD` + `reset --mixed` → 清临时 ref/分支 → remote add/set-url origin → 内联认证 fetch 对账。 |
 | 9 | 空仓库边界 | `create_git_bundle` 无 refs 时返回 `None`，跳过；materialize 后无 `.git`，agent 依 `GITLAB_GUIDE.md` 自 init/clone。 |
 
-**未随本次实施（留待后续授权）**：① storage 历史 `.git` 条目迁移清理（只读扫描→审批→delete）；② P2 `restore_git_metadata_from_remote` 远程兜底（当前 restore 仅靠 bundle；无 bundle 且无 `.git` 时仍走 `GITLAB_GUIDE.md` 自恢复）；③ 死代码 `_materialize_storage_workspace`(1783)/旧 `_materialize_storage_entry`(1790) 清理。
+**未随本次实施（留待后续授权）**：① storage 历史 `.git` 条目迁移清理（只读扫描→审批→delete）；② 死代码 `_materialize_storage_workspace`(1783)/旧 `_materialize_storage_entry`(1790) 清理。
+
+**P2 远程兜底落地记录（2026-09-04）**：新增 `gitlab_workspace.restore_git_metadata_from_remote(temp_workspace_root, agent_id)`，在 `_prepare_temp_workspace` 中接于 `_restore_git_bundles` 之后、`inject_credentials_into_temp_workspace` 之前。逻辑：绑定 repo 工作树存在但无 `.git` 时按 remote 重建——`git init -b <branch>` → `remote add origin <clone_url>` → `_apply_repo_config` → 内联 `-c insteadOf` 认证 `fetch origin`（走 `remote add` 写入的默认 remote-tracking refspec，确保 `origin/<branch>` 存在）→ `reset --mixed origin/<branch>`（保留未提交改动为 unstaged）→ `--set-upstream-to`；工作分支名优先取绑定 `default_branch`（`_load_binding_credential` 扩为 7 元组新增 `default_branch`，缺失时按 remote HEAD `ls-remote --symref` 推断，再退 `main`）；remote 无该分支 → `_adopt_mode`（init+首提交+push）；目录不存在或已有 `.git` → 跳过。单测新增 7 项（`test_gitlab_workspace.py`，重点断言 mixed reset 而非 soft、fetch 走内联认证），全绿；arch-guard P0 通过；ruff 通过。
 
 ---
 
@@ -254,7 +256,7 @@ except Exception as exc:
 1. **P0-1 埋点** ✅ 已上线（`511b1a20`），已命中 5 次拿到精确 traceback，根因二坐实。
 2. **P0-2 chown 止血**（独立，待用户授权）——`.git/objects` 19 目录 + 31 文件 + `build/` 转 1000:1000。
 3. **P1 方案 A**（依赖 P0-2 止血后验证）——`workspace_policy.py`（PublishClass + classify）+ `_materialize_storage_entry` + `_collect_temp_workspace_files` + 两条 delete pass（2213/2507）共七处改动。
-4. **P2 兜底**（依赖 P1-A 落地）——新增 `restore_git_metadata_from_remote()` + 在 `_prepare_temp_workspace` 接入。
+4. **P2 兜底**（依赖 P1-A 落地）✅ 已实现——新增 `restore_git_metadata_from_remote()` + 在 `_prepare_temp_workspace` 接入。
 5. **P0-3 防复发**（独立，可选）——`clone_workspace_to_staging` 后统一 chown。
 6. **迁移**：一次性清理 storage 中残留的历史 `.git` 条目（只读扫描→审批→delete）。
 
