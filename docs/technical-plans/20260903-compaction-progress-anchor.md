@@ -11,7 +11,7 @@ run dc557d91 实测：62 分钟 / 86 步 / 真实压缩 ≥6 次（每 3–7 分
 
 **根因**：摘要输入缺少「已完成动作」的事实。tool_exchange 进摘要时被替换为 ledger 一句话摘要（edit_file 仅「Replaced N occurrence(s) in path」，无内容）——摘要指令再完善（已含循环防护条文）也无法从输入变出事实，只能保守认定「未完成」→ 重建后重做 → 膨胀 → 再压缩。
 
-**参考资料对照**：deepseek-harness（确定性 pruner 先砍后摘要、裁完跳过摘要）、deepagents `_message_eviction`（head+tail 驱逐）、官方 how_to_fix_your_context 04/05（pruning/summarization 实践与小模型摘要）、mem0（ADD-only 事实累积）、LLMLingua（token 级压缩，**不采纳**：编码线程必须 preserve exact identifiers）。
+**参考资料对照**：deepseek-harness（确定性 pruner 先砍后摘要、裁完跳过摘要）、deepagents `_message_eviction`（head+tail 驱逐）、官方 how_to_fix_your_context 04/05（pruning/summarization 实践与小模型摘要）、mem0（ADD-only 事实累积）、LLMLingua（token 级压缩，**不采纳**：编码线程必须 preserve exact identifiers）。**代码级逐项对比**（2026-09-04 实读全部参考实现，含对方案的 5 条增量结论）→ `docs/analysis/2026-09-04-compaction-reference-implementation-comparison.md`。
 
 ## 2. 已定决策（访谈全按推荐）
 
