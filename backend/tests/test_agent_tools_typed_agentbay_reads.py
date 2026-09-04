@@ -1157,7 +1157,7 @@ async def test_settled_screenshot_is_resolved_after_restart_only_for_next_model_
         prompt_builder=lambda *_args, **_kwargs: None,  # type: ignore[arg-type]
         tool_result_store=restarted_store,  # type: ignore[arg-type]
     )
-    prepared = await service._prepare_messages(
+    prepared, _ = await service._prepare_messages(
         state={  # type: ignore[arg-type]
             "snapshots": RunInputSnapshots(
                 session_context={"version": 0},
@@ -1226,7 +1226,7 @@ async def test_settled_screenshot_is_resolved_after_restart_only_for_next_model_
         prompt_builder=lambda *_args, **_kwargs: None,  # type: ignore[arg-type]
         tool_result_store=SemanticPrivateStore({}),  # type: ignore[arg-type]
     )
-    unavailable = await unavailable_service._prepare_messages(
+    unavailable, _ = await unavailable_service._prepare_messages(
         state={  # type: ignore[arg-type]
             "snapshots": RunInputSnapshots(
                 session_context={"version": 0},

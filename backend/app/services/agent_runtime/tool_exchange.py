@@ -8,7 +8,7 @@ and selects recent context without emitting orphan calls or results.
 
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Any, Literal, Protocol
 
 
 BlockKind = Literal[
@@ -185,7 +185,7 @@ def _short_result(value: object) -> str | None:
     return text if len(text) <= 500 else f"{text[:497]}..."
 
 
-def _summary_for_exchange(
+def summary_for_exchange(
     *,
     assistant_message_id: str | None,
     calls: Sequence[Mapping[str, Any]],
@@ -245,7 +245,7 @@ def _summary_for_orphan_result(
         "id": call_id,
         "name": entry.get("tool_name") or message.get("name") or "unknown_tool",
     }
-    return _summary_for_exchange(
+    return summary_for_exchange(
         assistant_message_id=(
             str(entry.get("assistant_message_id"))
             if entry.get("assistant_message_id") is not None
@@ -404,7 +404,7 @@ def _resolve_incomplete_exchange(
     # forever on a reconciliation signal that will never arrive (reconcile
     # wake-ups only target in-flight executions of the current Run).
     if any(status == "failed" for status in missing_statuses.values()):
-        summary = _summary_for_exchange(
+        summary = summary_for_exchange(
             assistant_message_id=assistant_message_id,
             calls=calls,
             results=results,
@@ -446,7 +446,7 @@ def _resolve_incomplete_exchange(
         for call_id in missing_call_ids
     )
     if cancelled_before_execution:
-        summary = _summary_for_exchange(
+        summary = summary_for_exchange(
             assistant_message_id=assistant_message_id,
             calls=calls,
             results=results,
@@ -470,7 +470,7 @@ def _resolve_incomplete_exchange(
         for call_id in missing_call_ids
     )
     if ended_before_execution:
-        summary = _summary_for_exchange(
+        summary = summary_for_exchange(
             assistant_message_id=assistant_message_id,
             calls=calls,
             results=results,
@@ -503,7 +503,7 @@ def _resolve_incomplete_exchange(
             retry_model=True,
         )
 
-    summary = _summary_for_exchange(
+    summary = summary_for_exchange(
         assistant_message_id=assistant_message_id,
         calls=calls,
         results=results,
@@ -803,7 +803,7 @@ def select_recent_blocks(
                         for message in block.messages[1:]
                     }
                     summaries_reversed.append(
-                        _summary_for_exchange(
+                        summary_for_exchange(
                             assistant_message_id=block.assistant_message_id,
                             calls=calls,
                             results=results,
@@ -831,6 +831,80 @@ def select_recent_blocks(
         blocked=blocked,
         requires_confirmation=requires_confirmation,
     )
+
+
+# ---------------------------------------------------------------------------
+# Execution-ledger derivation
+# ---------------------------------------------------------------------------
+
+_EXECUTION_LEDGER_METADATA_KEY = "__clawith_tool_execution__"
+
+
+class ExecutionLedgerSource(Protocol):
+    """Duck-typed execution record (``AgentToolExecution`` satisfies this)."""
+
+    tool_call_id: str
+    tool_name: object
+    status: object
+    assistant_message_id: object
+    sanitized_arguments: object
+    result_metadata: object
+    result_summary: object
+    result_ref: object
+    request_ref: object
+
+
+def _execution_ledger_metadata(
+    execution: ExecutionLedgerSource,
+) -> tuple[str, str]:
+    stored = execution.sanitized_arguments
+    metadata = (
+        stored.get(_EXECUTION_LEDGER_METADATA_KEY)
+        if isinstance(stored, dict)
+        else None
+    )
+    if not isinstance(metadata, dict):
+        return "external_write", "never"
+    effect = metadata.get("side_effect_classification")
+    retry = metadata.get("retry_policy")
+    return (
+        str(effect)
+        if effect in {"read", "write", "external_write"}
+        else "external_write",
+        str(retry) if retry in {"safe", "conditional", "never"} else "never",
+    )
+
+
+def ledger_from_executions(
+    executions: Sequence[ExecutionLedgerSource],
+) -> dict[str, dict[str, Any]]:
+    """Derive the Tool Execution Ledger from persisted execution records.
+
+    The single authoritative mapping the whole Runtime shares: Tool Exchange
+    reconciliation, context building, and step settlement all read the same
+    key shape. Last write per ``tool_call_id`` wins (the loader orders by
+    started_at ascending, so the newest settlement overwrites earlier rows).
+    """
+    result: dict[str, dict[str, Any]] = {}
+    for execution in executions:
+        effect, retry_policy = _execution_ledger_metadata(execution)
+        metadata = execution.result_metadata
+        error_code = (
+            metadata.get("error_code") if isinstance(metadata, dict) else None
+        )
+        result[execution.tool_call_id] = {
+            "status": execution.status,
+            "tool_name": execution.tool_name,
+            "assistant_message_id": execution.assistant_message_id,
+            "side_effect_classification": effect,
+            "retry_policy": retry_policy,
+            "may_have_side_effect": effect != "read",
+            "result_summary": execution.result_summary,
+            "result_ref": execution.result_ref,
+            "request_ref": execution.request_ref,
+            "error_code": str(error_code) if error_code else None,
+        }
+    return result
 
 
 def build_recent_tool_safe_window(
@@ -862,6 +936,8 @@ __all__ = [
     "ToolExchangeIntegrityError",
     "build_message_blocks",
     "build_recent_tool_safe_window",
+    "ledger_from_executions",
     "select_recent_blocks",
+    "summary_for_exchange",
     "validate_tool_exchange_integrity",
 ]

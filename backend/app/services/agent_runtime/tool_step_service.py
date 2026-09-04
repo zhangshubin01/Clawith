@@ -75,6 +75,7 @@ from app.services.agent_runtime.tool_contracts import (
     tool_cancel_capability,
     workset_version,
 )
+from app.services.agent_runtime.tool_exchange import ledger_from_executions
 from app.services.agent_runtime.tool_execution import (
     SAFE_READ_MAX_ATTEMPTS,
     RetryableToolNodeError,
@@ -1850,6 +1851,30 @@ class RuntimeToolStepService:
                 )
             )
             return int(result.scalar_one())
+
+    async def load_run_ledger(self, context: RuntimeContext) -> dict[str, JsonObject]:
+        """Load this Run's Tool Execution Ledger for deterministic settlement.
+
+        The same persisted records the model step reads — newest settlement
+        wins per call id — so the executor's step settlement and the context
+        builder can never disagree about a call's terminal status.
+        """
+        tenant_id = uuid.UUID(context.tenant_id)
+        run_id = uuid.UUID(context.run_id)
+        async with self._session_factory() as db:
+            result = await db.execute(
+                select(AgentToolExecution)
+                .where(
+                    AgentToolExecution.tenant_id == tenant_id,
+                    AgentToolExecution.run_id == run_id,
+                )
+                .order_by(
+                    AgentToolExecution.started_at,
+                    AgentToolExecution.id,
+                )
+            )
+            executions = list(result.scalars().all())
+        return cast(dict[str, JsonObject], ledger_from_executions(executions))
 
     async def _mark_policy_blocked(
         self,

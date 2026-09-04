@@ -216,6 +216,13 @@ class Settings(BaseSettings):
     AGENT_RUNTIME_RUN_COMPACT_MESSAGE_THRESHOLD: int | None = Field(default=None, gt=0)
     AGENT_RUNTIME_RUN_COMPACT_TOOL_RESULT_BYTES: int | None = Field(default=None, gt=0)
     AGENT_RUNTIME_VERIFY_REPAIR_COMPACT_ROUNDS: int | None = Field(default=None, gt=0)
+    # Compaction-amnesia loop breaker (B): terminate the Run when the model
+    # re-observes an identical cache prefix + tool fingerprint pair after a
+    # real compaction. Off by default: alert-and-continue until the detector
+    # has production evidence. THRESHOLD = loop confirmations required before
+    # the breaker fires (>=1; terminate honors the same count).
+    AGENT_RUNTIME_COMPACTION_TERMINATE_ON_LOOP: bool = False
+    AGENT_RUNTIME_COMPACTION_LOOP_ALERT_THRESHOLD: int = Field(default=1, ge=1)
     AGENT_RUNTIME_MODEL_CAPABILITY_REFRESH_SECONDS: int = Field(default=86400, gt=0)
     AGENT_RUNTIME_WEB_STREAMING_ENABLED: bool = True
     AGENT_RUNTIME_FALLBACK_CONTEXT_WINDOW_TOKENS: int = Field(default=131072, gt=0)

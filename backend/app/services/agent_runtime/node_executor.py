@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
@@ -23,6 +24,11 @@ from app.services.agent_runtime.state import (
     runtime_messages_as_json,
 )
 from app.services.observability import observe_node, set_run_identity
+from app.services.agent_runtime.run_compactor import (
+    RunCompactResult,
+    RunCompactorError,
+    settle_step_messages,
+)
 from app.services.agent_runtime.tool_repair_budget import (
     WORKSPACE_SYNC_CONFLICT_FAILURE_MESSAGE,
     ToolRepairBudgetError,
@@ -36,6 +42,8 @@ from app.services.llm.caller import (
     WRITE_FILE_PROTOCOL_REPAIR_LIMIT,
 )
 from app.services.llm.multimodal_content import parse_multimodal_content
+
+logger = logging.getLogger(__name__)
 
 _TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled"})
 _WAITING_STATUSES = frozenset({"waiting_user", "waiting_external", "waiting_agent"})
@@ -116,6 +124,12 @@ class ModelStepResult:
     repair_tool_name: str | None = None
     repair_reset_reason: str | None = None
     error: JsonObject | None = None
+    # Frozen business-request budget profile (zero extra computation): the
+    # executor persists it for deterministic step settlement (D).
+    step_budget_profile: JsonObject | None = None
+    # Fingerprint-window advancement for compaction-amnesia loop detection (B).
+    loop_detection_update: JsonObject | None = None
+    loop_alert: JsonObject | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -148,16 +162,6 @@ class FinalizationResult:
     result_summary: JsonObject
     session_context_delta: JsonObject | None = None
     delivery_request: JsonObject | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class RunCompactResult:
-    """One optional atomic replacement of the Thread's model-visible history."""
-
-    compacted: bool = False
-    thread_summary: JsonObject | None = None
-    recent_messages: tuple[JsonObject, ...] | None = None
-    covered_through_message_id: str | None = None
 
 
 class RuntimeCancelSource(Protocol):
@@ -211,6 +215,11 @@ class RuntimeToolStepService(Protocol):
         context: RuntimeContext,
         tool_calls: tuple[JsonObject, ...],
     ) -> ToolStepResult: ...
+
+    async def load_run_ledger(
+        self,
+        context: RuntimeContext,
+    ) -> dict[str, JsonObject]: ...
 
 
 class RuntimeVerifier(Protocol):
@@ -624,6 +633,7 @@ class DeterministicRuntimeNodeExecutor:
         verifier: RuntimeVerifier | None = None,
         finalizer: RuntimeFinalizer | None = None,
         max_verification_repairs: int = 2,
+        terminate_on_compaction_loop: bool = False,
     ) -> None:
         if max_verification_repairs < 0:
             raise ValueError("Runtime verification repair limit is invalid")
@@ -634,6 +644,7 @@ class DeterministicRuntimeNodeExecutor:
         self._verifier = verifier or DeterministicRuntimeVerifier()
         self._finalizer = finalizer or DefaultRuntimeFinalizer()
         self._max_verification_repairs = max_verification_repairs
+        self._terminate_on_compaction_loop = terminate_on_compaction_loop
 
     async def _control_guard(
         self,
@@ -707,6 +718,13 @@ class DeterministicRuntimeNodeExecutor:
                     ],
                 }
             )
+            # Real compaction ran: arm the loop-detection marker so the next
+            # model step's fingerprint event reports "compaction since the
+            # previous prefix observation" (B).
+            loop_detection = lifecycle.get("loop_detection")
+            loop_detection = dict(loop_detection) if isinstance(loop_detection, Mapping) else {}
+            loop_detection["compaction_since_last_prefix"] = True
+            lifecycle["loop_detection"] = cast(JsonObject, loop_detection)
             # Compaction ran: clear the compact-first gate. When it did NOT run
             # (still below watermark), keep the guard so the model step falls
             # back to budget truncation instead of looping on compact requests.
@@ -745,6 +763,36 @@ class DeterministicRuntimeNodeExecutor:
 
         result = await self._model_service.complete_once(state, context)
         lifecycle["model_step_count"] = step_count
+        # Persist the frozen business-request budget profile for deterministic
+        # step settlement (D) and the fingerprint-window advancement for
+        # compaction-amnesia loop detection (B).
+        if result.step_budget_profile is not None:
+            lifecycle["step_budget_profile"] = dict(result.step_budget_profile)
+        if result.loop_detection_update is not None:
+            lifecycle["loop_detection"] = dict(result.loop_detection_update)
+        if result.loop_alert is not None and self._terminate_on_compaction_loop and result.intent == "tool_calls":
+            # Compaction-amnesia loop confirmed AND the model is about to spin
+            # the same tool pattern again: terminate instead of burning the
+            # turn budget. Non-spinning intents (finish/text/wait) leave the
+            # loop on their own and are never killed here.
+            lifecycle.pop("pending_group_at", None)
+            lifecycle.update(
+                {
+                    "status": "failed",
+                    "next_route": "terminal",
+                    "reason": "compaction_loop_detected",
+                    "pending_tool_calls": [],
+                    "error": _error(
+                        "compaction_loop_detected",
+                        (
+                            "检测到压缩失忆循环：压缩后上下文前缀与工具调用模式完全复原，"
+                            "模型即将重复同样的工具操作，运行已终止。"
+                            "请发送新的消息明确下一步目标。"
+                        ),
+                    ),
+                }
+            )
+            return {"lifecycle": cast(RuntimeLifecycle, lifecycle)}
         if result.repair_reset_reason is not None:
             if result.repair_reset_reason != "explicit_user_correction":
                 raise RuntimeNodeTransitionError(
@@ -1217,6 +1265,51 @@ class DeterministicRuntimeNodeExecutor:
             update["messages"] = [
                 *output_messages,
             ]
+        # Deterministic step settlement (D): when the batch finished cleanly
+        # and the model step published a budget profile, fold every completed
+        # exchange outside the retained window into a deterministic synthetic
+        # message — atomically, at the sliding-window boundary. Fail-soft:
+        # a budget-only error (profile drift) skips settlement for this step.
+        if (
+            repair_pause_reason is None
+            and result.cancel_signal is None
+            and result.waiting_request is None
+            and result.error is None
+            and not pending_calls
+        ):
+            profile = lifecycle.get("step_budget_profile")
+            if isinstance(profile, Mapping):
+                effective_input_budget = profile.get("effective_input_budget")
+                if isinstance(effective_input_budget, int) and effective_input_budget > 0:
+                    try:
+                        ledger = await self._tool_service.load_run_ledger(context)
+                        raw_initial_id = state["snapshots"].initial_input.get("message_id")
+                        settlement = settle_step_messages(
+                            _messages(state),
+                            ledger,
+                            effective_input_budget=effective_input_budget,
+                            current_input_id=(
+                                raw_initial_id if isinstance(raw_initial_id, str) and raw_initial_id else None
+                            ),
+                            current_run_id=context.run_id,
+                        )
+                    except RunCompactorError as exc:
+                        logger.warning(
+                            "[RuntimeStepSettlement] skipped run_id=%s code=%s",
+                            context.run_id,
+                            exc.code,
+                        )
+                    else:
+                        removed_message_ids = [
+                            message_id for exchange in settlement.settled for message_id in exchange.removed_message_ids
+                        ]
+                        synthetic_messages = [exchange.synthetic_message for exchange in settlement.settled]
+                        if removed_message_ids:
+                            update["messages"] = [
+                                *[RemoveMessage(id=message_id) for message_id in removed_message_ids],
+                                *[_message_for_channel(dict(message)) for message in synthetic_messages],
+                                *output_messages,
+                            ]
         return update
 
     async def _verify(

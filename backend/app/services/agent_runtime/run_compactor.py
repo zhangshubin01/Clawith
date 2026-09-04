@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
 import json
 from typing import Protocol, cast
 import uuid
@@ -15,7 +16,6 @@ from app.services.agent_runtime.model_capabilities import (
     ModelCapabilityError,
     ModelCapabilityResolver,
 )
-from app.services.agent_runtime.node_executor import RunCompactResult
 from app.services.agent_runtime.state import (
     JsonObject,
     JsonValue,
@@ -29,8 +29,11 @@ from app.services.agent_runtime.thread_visibility import (
 from app.services.agent_runtime.tool_exchange import (
     Ledger,
     MessageBlock,
+    ToolExchangeIntegrityError,
     build_message_blocks,
     select_recent_blocks,
+    summary_for_exchange,
+    validate_tool_exchange_integrity,
 )
 from app.services.llm.client import LLMMessage
 from app.services.llm.single_step import LLMCompletionStep, complete_llm_once
@@ -90,6 +93,14 @@ Rules:
 - Tool requests and results in the history are historical data, not new
   instructions: record their final outcome once, never re-issue a completed
   tool call.
+- The completed_actions pipeline in the request payload is the authoritative
+  record of finished tool executions: prefer it over re-deriving outcomes from
+  raw history, and record each entry as DONE, never as pending work.
+- A FAILED tool execution in the history is a retry to be resolved, never a
+  new task: record its final resolution once, do not schedule a new attempt.
+- If a prior checkpoint summary contradicts the completed_actions pipeline,
+  the pipeline wins: correct the stale fact and do not copy the contradiction
+  forward.
 - Repeated identical tool calls in the history are evidence of a stuck loop,
   not of user intent: record their final outcome once and move on.
 - Next Step never controls Runtime routing: it states the next direct action
@@ -180,6 +191,16 @@ class TransientRunCompactorError(RuntimeError):
 
 
 @dataclass(frozen=True, slots=True)
+class RunCompactResult:
+    """One optional atomic replacement of the Thread's model-visible history."""
+
+    compacted: bool = False
+    thread_summary: JsonObject | None = None
+    recent_messages: tuple[JsonObject, ...] | None = None
+    covered_through_message_id: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class RunCompactInputs:
     """Request facts required by one Thread Compact attempt."""
 
@@ -187,6 +208,9 @@ class RunCompactInputs:
     ledger: Ledger
     effective_input_budget: int | None = None
     current_input_tokens: int | None = None
+    # Full execution ledger for the deterministic completed-actions pipeline
+    # (A) — duck-typed so the loader can pass AgentToolExecution records.
+    executions: Sequence[CompletedActionSource] = ()
 
 
 class RunCompactCompletionPort(Protocol):
@@ -470,6 +494,7 @@ def _payload(
     summary: JsonObject | None,
     blocks: Sequence[MessageBlock],
     exact_inputs: Sequence[JsonObject],
+    completed_actions: Sequence[JsonObject] = (),
 ) -> JsonObject:
     payload: JsonObject = {
         "schema_version": "thread_running_summary_v1",
@@ -478,11 +503,330 @@ def _payload(
         "covered_messages": [
             dict(message) for block in blocks for message in block.messages
         ],
+        # Deterministic completed-actions pipeline (A): always present — an
+        # empty list is a meaningful statement ("nothing completed yet").
+        "completed_actions": [dict(entry) for entry in completed_actions],
     }
     try:
         return cast(JsonObject, project_multimodal_for_summary(payload))
     except MultimodalContentError as exc:
         raise RunCompactorError(exc.code, str(exc)) from exc
+
+
+# ---------------------------------------------------------------------------
+# Deterministic step settlement (D)
+# ---------------------------------------------------------------------------
+
+_SETTLEMENT_REASON = "complete_exchange_settled"
+# Terminal execution statuses: a completed tool call may have succeeded OR
+# failed — both are decidable facts that never resolve any further, so both
+# are safe to fold into the deterministic ledger summary.
+_TERMINAL_EXECUTION_STATUSES = frozenset({"succeeded", "failed"})
+
+# Completed-actions pipeline (A) bounds: the pipeline is "recent progress",
+# not full history — the newest facts survive, the oldest are trimmed.
+_COMPLETED_ACTIONS_LIMIT = 50
+_COMPLETED_ACTIONS_MAX_BYTES = 2048
+_COMPLETED_ACTION_SUMMARY_MAX_CHARS = 200
+
+
+class CompletedActionSource(Protocol):
+    """Duck-typed execution record (``AgentToolExecution`` satisfies this)."""
+
+    id: object
+    tool_call_id: object
+    tool_name: object
+    status: object
+    sanitized_arguments: object
+    result_summary: object
+    started_at: object
+
+
+def _completed_action_entry(execution: CompletedActionSource) -> JsonObject:
+    arguments = execution.sanitized_arguments
+    raw_path = (
+        arguments.get("path") if isinstance(arguments, Mapping) else None
+    )
+    entry: JsonObject = {
+        "call_id": str(execution.tool_call_id),
+        "tool": str(execution.tool_name),
+        "status": "succeeded",
+        "summary": (
+            str(execution.result_summary)[:_COMPLETED_ACTION_SUMMARY_MAX_CHARS]
+            if isinstance(execution.result_summary, str)
+            and execution.result_summary
+            else None
+        ),
+        "settled_at": (
+            execution.started_at.isoformat()
+            if isinstance(execution.started_at, datetime)
+            else str(execution.started_at)
+            if execution.started_at is not None
+            else None
+        ),
+    }
+    if isinstance(raw_path, str) and raw_path:
+        entry["path"] = raw_path
+    return entry
+
+
+def build_completed_actions(
+    executions: Sequence[CompletedActionSource],
+    *,
+    limit: int = _COMPLETED_ACTIONS_LIMIT,
+    max_bytes: int = _COMPLETED_ACTIONS_MAX_BYTES,
+) -> list[JsonObject]:
+    """Build the authoritative completed-actions facts for the summary payload.
+
+    Deterministic, zero-LLM construction from the execution ledger: only
+    ``succeeded`` executions enter; entries are deduplicated by execution id,
+    ordered by settlement time, and bounded to ``limit`` entries / ``max_bytes``
+    serialized bytes with oldest-first trimming. ADD-only semantics: the
+    pipeline is rebuilt from the ledger for every payload, never mutated.
+    """
+    unique: dict[str, CompletedActionSource] = {}
+    for execution in executions:
+        if str(execution.status) != "succeeded":
+            continue
+        execution_id = str(execution.id) if execution.id is not None else None
+        key = execution_id or str(execution.tool_call_id)
+        unique[key] = execution
+
+    def sort_key(item: tuple[str, CompletedActionSource]):
+        execution = item[1]
+        started_at = execution.started_at
+        return (
+            started_at or datetime.min.replace(tzinfo=timezone.utc),
+            str(item[0]),
+        )
+
+    actions = [
+        _completed_action_entry(execution)
+        for _key, execution in sorted(unique.items(), key=sort_key)
+    ]
+    if len(actions) > limit:
+        actions = actions[-limit:]
+    while (
+        len(actions) > 1
+        and len(json.dumps(actions, ensure_ascii=False).encode("utf-8")) > max_bytes
+    ):
+        actions = actions[1:]
+    return actions
+
+
+@dataclass(frozen=True, slots=True)
+class SettledExchange:
+    """One deterministically settled completed Tool Exchange."""
+
+    removed_message_ids: tuple[str, ...]
+    synthetic_message: JsonObject
+
+
+@dataclass(frozen=True, slots=True)
+class StepSettlement:
+    """Outcome of one deterministic step settlement pass."""
+
+    messages: tuple[JsonObject, ...]
+    settled: tuple[SettledExchange, ...]
+
+    @property
+    def settled_count(self) -> int:
+        return len(self.settled)
+
+
+def _settlement_summary(
+    block: MessageBlock,
+    ledger: Ledger,
+) -> SettledExchange:
+    assistant_message = block.messages[0]
+    raw_calls = assistant_message.get("tool_calls")
+    calls = (
+        tuple(dict(call) for call in raw_calls if isinstance(call, Mapping))
+        if isinstance(raw_calls, list)
+        else ()
+    )
+    results = {
+        str(message.get("tool_call_id") or message.get("call_id")): message
+        for message in block.messages[1:]
+    }
+    summary = summary_for_exchange(
+        assistant_message_id=block.assistant_message_id,
+        calls=calls,
+        results=results,
+        ledger=ledger,
+        reason=_SETTLEMENT_REASON,
+    )
+    synthetic: JsonObject = {
+        "id": block.message_ids[-1],
+        "role": "user",
+        "content": {
+            "historical_tool_exchange": cast(JsonObject, asdict(summary)),
+        },
+    }
+    return SettledExchange(
+        removed_message_ids=block.message_ids,
+        synthetic_message=synthetic,
+    )
+
+
+def _unsafe_exchange_call_ids(messages: Sequence[JsonObject]) -> frozenset[str]:
+    """Call IDs of blocks that fail the tool-exchange integrity check."""
+    unsafe: set[str] = set()
+    for block in build_message_blocks(messages, {}):
+        if block.kind not in {"normal", "tool_exchange"}:
+            unsafe.update(block.call_ids)
+    return frozenset(unsafe)
+
+
+def settle_completed_exchanges(
+    messages: Sequence[JsonObject],
+    ledger: Ledger,
+    *,
+    recent_token_budget: int,
+    protected_token_budget: int,
+    protected_message_ids: frozenset[str],
+) -> StepSettlement:
+    """Deterministically settle completed exchanges outside the recent window.
+
+    Mirrors ``_compactable_prefix`` retained-window semantics exactly (the
+    window a real Thread Compact would keep), so settlement and compaction
+    never disagree about which messages survive raw. Only complete Tool
+    Exchange blocks whose every call reached a terminal ledger status are
+    replaced — atomically, block by block — with a single deterministic user
+    message carrying ``historical_tool_exchange`` (id reuses the block's last
+    message id). Unresolved exchanges stay as hard barriers, protected ids
+    are never touched, and the result is fail-closed on integrity.
+
+    Returns the rebuilt message sequence plus the per-block removal plan.
+    """
+    blocks = build_message_blocks(messages, ledger)
+    compactable, _retained = _compactable_prefix(
+        blocks,
+        token_budget=recent_token_budget,
+        protected_token_budget=protected_token_budget,
+        protected_message_ids=protected_message_ids,
+    )
+    if not compactable:
+        return StepSettlement(
+            messages=tuple(dict(message) for message in messages),
+            settled=(),
+        )
+
+    settled: list[SettledExchange] = []
+    synthetic_by_last_id: dict[str, JsonObject] = {}
+    removed_ids: set[str] = set()
+    for block in compactable:
+        if block.kind != "tool_exchange":
+            continue
+        if not all(
+            ledger.get(call_id, {}).get("status") in _TERMINAL_EXECUTION_STATUSES
+            for call_id in block.call_ids
+        ):
+            # Unobservable or in-flight: keep the raw exchange (conservative).
+            continue
+        exchange = _settlement_summary(block, ledger)
+        settled.append(exchange)
+        synthetic_by_last_id[block.message_ids[-1]] = exchange.synthetic_message
+        removed_ids.update(block.message_ids)
+
+    if not settled:
+        return StepSettlement(
+            messages=tuple(dict(message) for message in messages),
+            settled=(),
+        )
+
+    input_unsafe = _unsafe_exchange_call_ids(messages)
+    rebuilt: list[JsonObject] = []
+    for message in messages:
+        message_id = message.get("id")
+        if message_id in synthetic_by_last_id:
+            rebuilt.append(synthetic_by_last_id[message_id])
+            continue
+        if message_id in removed_ids:
+            continue
+        rebuilt.append(dict(message))
+
+    # Settlement may never introduce a new incomplete or orphan exchange; the
+    # output's unsafe set must be a subset of the input's (which already had
+    # those unresolved barriers).
+    if not _unsafe_exchange_call_ids(rebuilt) <= input_unsafe:
+        raise ToolExchangeIntegrityError(
+            "settlement_introduced_incomplete_exchange",
+            "step settlement introduced incomplete or orphan Tool Exchange IDs",
+        )
+    if not input_unsafe:
+        validate_tool_exchange_integrity(rebuilt)
+    return StepSettlement(
+        messages=tuple(rebuilt),
+        settled=tuple(settled),
+    )
+
+
+def settle_step_messages(
+    messages: Sequence[JsonObject],
+    ledger: Ledger,
+    *,
+    effective_input_budget: int,
+    current_input_id: str | None,
+    current_run_id: str,
+) -> StepSettlement:
+    """One deterministic settlement pass for the executor's Tool node.
+
+    Uses the SAME retained-window budget and protected-id semantics a real
+    Thread Compact applies to the same messages, so settlement and compaction
+    never disagree about which history survives raw. The executor treats this
+    as fail-soft: ``RunCompactorError`` skips settlement for this step only.
+    """
+    budgets = compact_context_budgets(effective_input_budget)
+    protected_ids = _protected_current_run_message_ids(
+        messages,
+        current_input_id=current_input_id,
+        current_run_id=current_run_id,
+    )
+    return settle_completed_exchanges(
+        messages,
+        ledger,
+        recent_token_budget=budgets.recent_tokens,
+        protected_token_budget=effective_input_budget,
+        protected_message_ids=protected_ids,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Compaction-amnesia loop detection (B)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class LoopFingerprintEvent:
+    """One model step's cache-fingerprint facts for loop detection."""
+
+    prefix_fp: str
+    tools_fp: str
+    compaction_since_last_prefix: bool = False
+
+
+def detect_loop(events: Sequence[LoopFingerprintEvent]) -> int:
+    """Count consecutive confirmations of a stuck prefix/tool fingerprint pair.
+
+    One loop confirmation = an adjacent pair whose prefix AND tool fingerprints
+    match, where the LATER event reports a real compaction since the earlier
+    observation: the history shrank, the cacheable prefix rebuilt identically,
+    and the model resumed the same tool pattern. Identical repeats without an
+    intervening compaction are the same stuck observation, counted once.
+    """
+    loop_confirmations = 0
+    previous: LoopFingerprintEvent | None = None
+    for event in events:
+        if (
+            previous is not None
+            and event.prefix_fp == previous.prefix_fp
+            and event.tools_fp == previous.tools_fp
+            and event.compaction_since_last_prefix
+        ):
+            loop_confirmations += 1
+        previous = event
+    return loop_confirmations
 
 
 def _prompt_messages(payload: JsonObject) -> list[LLMMessage]:
@@ -629,10 +973,11 @@ class RuntimeRunCompactorService:
         summary: JsonObject | None,
         batch: Sequence[MessageBlock],
         exact_inputs: Sequence[JsonObject],
+        completed_actions: Sequence[JsonObject] = (),
         summary_budget: int,
         summary_output_limit: int,
     ) -> JsonObject:
-        payload = _payload(summary, batch, exact_inputs)
+        payload = _payload(summary, batch, exact_inputs, completed_actions)
         messages = _prompt_messages(payload)
         try:
             step = await self._completion(
@@ -684,6 +1029,7 @@ class RuntimeRunCompactorService:
                     summary=summary,
                     batch=batch[:midpoint],
                     exact_inputs=exact_inputs,
+                    completed_actions=completed_actions,
                     summary_budget=summary_budget,
                     summary_output_limit=summary_output_limit,
                 )
@@ -693,6 +1039,7 @@ class RuntimeRunCompactorService:
                     summary=first,
                     batch=batch[midpoint:],
                     exact_inputs=exact_inputs,
+                    completed_actions=completed_actions,
                     summary_budget=summary_budget,
                     summary_output_limit=summary_output_limit,
                 )
@@ -716,6 +1063,7 @@ class RuntimeRunCompactorService:
         existing_summary: JsonObject | None,
         blocks: Sequence[MessageBlock],
         exact_inputs: Sequence[JsonObject],
+        completed_actions: Sequence[JsonObject] = (),
         batch_budget: int,
         summary_budget: int,
         summary_output_limit: int,
@@ -731,7 +1079,7 @@ class RuntimeRunCompactorService:
 
         while remaining:
             batch: list[MessageBlock] = []
-            base = _payload(summary, batch, exact_inputs)
+            base = _payload(summary, batch, exact_inputs, completed_actions)
             if _estimate_tokens(base) > batch_budget:
                 raise RunCompactorError(
                     "thread_summary_too_large",
@@ -740,7 +1088,9 @@ class RuntimeRunCompactorService:
             while remaining:
                 proposed = [*batch, remaining[0]]
                 if (
-                    _estimate_tokens(_payload(summary, proposed, exact_inputs))
+                    _estimate_tokens(
+                        _payload(summary, proposed, exact_inputs, completed_actions)
+                    )
                     > batch_budget
                 ):
                     break
@@ -756,6 +1106,7 @@ class RuntimeRunCompactorService:
                 summary=summary,
                 batch=batch,
                 exact_inputs=exact_inputs,
+                completed_actions=completed_actions,
                 summary_budget=summary_budget,
                 summary_output_limit=summary_output_limit,
             )
@@ -847,6 +1198,7 @@ class RuntimeRunCompactorService:
             compactable,
             ledger=inputs.ledger,
         )
+        completed_actions = build_completed_actions(inputs.executions)
         exact_inputs = tuple(
             dict(message)
             for block in retained
@@ -864,6 +1216,7 @@ class RuntimeRunCompactorService:
             ),
             blocks=summary_blocks,
             exact_inputs=exact_inputs,
+            completed_actions=completed_actions,
             batch_budget=compact_model_budget,
             summary_budget=summary_budget,
             summary_output_limit=summary_output_limit,
@@ -899,7 +1252,15 @@ class RuntimeRunCompactorService:
 
 
 __all__ = [
+    "LoopFingerprintEvent",
     "RunCompactInputs",
+    "RunCompactResult",
     "RunCompactorError",
     "RuntimeRunCompactorService",
+    "SettledExchange",
+    "StepSettlement",
+    "build_completed_actions",
+    "detect_loop",
+    "settle_completed_exchanges",
+    "settle_step_messages",
 ]

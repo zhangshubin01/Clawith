@@ -54,7 +54,11 @@ from app.services.agent_runtime.model_capabilities import (
     ModelCapabilityResolver,
 )
 from app.services.agent_runtime.node_executor import ModelStepResult
-from app.services.agent_runtime.run_compactor import RunCompactInputs
+from app.services.agent_runtime.run_compactor import (
+    LoopFingerprintEvent,
+    RunCompactInputs,
+    detect_loop,
+)
 from app.services.agent_runtime.state import (
     JsonObject,
     JsonValue,
@@ -77,6 +81,7 @@ from app.services.agent_runtime.tool_contracts import (
     deadline_policy_for_tool,
     workset_version,
 )
+from app.services.agent_runtime.tool_exchange import ledger_from_executions
 from app.services.agent_runtime.tool_result_store import (
     ToolResultStore,
     ToolResultStoreError,
@@ -115,7 +120,6 @@ from app.services.storage import get_storage_backend, normalize_storage_key
 from app.services.vision_inject import compress_bytes_to_base64
 
 _ACTIVE_AGENT_STATUSES = frozenset({"creating", "running", "idle"})
-_LEDGER_METADATA_KEY = "__clawith_tool_execution__"
 _RUNTIME_WAIT_TOOL_NAME = "wait"
 _DEFAULT_MODEL_RETRY_ATTEMPTS = 3
 _DEFAULT_MODEL_RETRY_BASE_DELAY_SECONDS = 1.0
@@ -377,6 +381,69 @@ async def _audit_breaker_event(
         detail=detail,
         related_id=run_id,
     )
+
+
+# Rolling window of fingerprint events kept on the lifecycle for the
+# compaction-amnesia loop detector (B). Bounded: the checkpoint must not grow
+# with every model step.
+_FINGERPRINT_EVENT_WINDOW_LIMIT = 16
+
+
+def _advance_loop_detection(
+    lifecycle: Mapping[str, object],
+    *,
+    prefix_fp: str,
+    tools_fp: str,
+    alert_threshold: int,
+) -> tuple[JsonObject, JsonObject | None]:
+    """Advance the fingerprint window and detect compaction-amnesia loops.
+
+    The executor's Compact node arms ``compaction_since_last_prefix`` after a
+    REAL compaction; the next model step consumes it into its fingerprint
+    event, so an adjacent identical (prefix_fp, tools_fp) pair with the flag
+    proves the history shrank and rebuilt identically — the loop signature.
+    """
+    current = lifecycle.get("loop_detection")
+    current_map = current if isinstance(current, Mapping) else {}
+    events_raw = current_map.get("fingerprint_events")
+    events: list[JsonObject] = (
+        [dict(event) for event in events_raw if isinstance(event, Mapping)]
+        if isinstance(events_raw, list)
+        else []
+    )
+    compaction_flag = current_map.get("compaction_since_last_prefix") is True
+    events.append(
+        {
+            "prefix_fp": prefix_fp,
+            "tools_fp": tools_fp,
+            "compaction_since_last_prefix": compaction_flag,
+        }
+    )
+    events = events[-_FINGERPRINT_EVENT_WINDOW_LIMIT:]
+    fingerprint_events = [
+        LoopFingerprintEvent(
+            prefix_fp=str(event.get("prefix_fp") or ""),
+            tools_fp=str(event.get("tools_fp") or ""),
+            compaction_since_last_prefix=(
+                event.get("compaction_since_last_prefix") is True
+            ),
+        )
+        for event in events
+    ]
+    loop_count = detect_loop(fingerprint_events)
+    update: JsonObject = {
+        "fingerprint_events": cast(JsonValue, events),
+        "compaction_since_last_prefix": False,
+        "loop_count": loop_count,
+    }
+    alert: JsonObject | None = None
+    if loop_count >= alert_threshold:
+        alert = {
+            "loop_count": loop_count,
+            "prefix_fp": prefix_fp,
+            "tools_fp": tools_fp,
+        }
+    return update, alert
 
 
 # Tool failure codes whose cause is configuration (permissions, credentials,
@@ -986,44 +1053,6 @@ def _application_tools_enabled(state: RuntimeGraphState) -> bool:
             "application_tools_enabled must be a boolean",
         )
     return value
-
-
-def _ledger_metadata(execution: AgentToolExecution) -> tuple[str, str]:
-    stored = execution.sanitized_arguments
-    metadata = stored.get(_LEDGER_METADATA_KEY) if isinstance(stored, dict) else None
-    if not isinstance(metadata, dict):
-        return "external_write", "never"
-    effect = metadata.get("side_effect_classification")
-    retry = metadata.get("retry_policy")
-    return (
-        str(effect) if effect in {"read", "write", "external_write"} else "external_write",
-        str(retry) if retry in {"safe", "conditional", "never"} else "never",
-    )
-
-
-def _ledger(executions: Sequence[AgentToolExecution]) -> dict[str, JsonObject]:
-    result: dict[str, JsonObject] = {}
-    for execution in executions:
-        effect, retry_policy = _ledger_metadata(execution)
-        metadata = execution.result_metadata
-        error_code = (
-            metadata.get("error_code")
-            if isinstance(metadata, dict)
-            else None
-        )
-        result[execution.tool_call_id] = {
-            "status": execution.status,
-            "tool_name": execution.tool_name,
-            "assistant_message_id": execution.assistant_message_id,
-            "side_effect_classification": effect,
-            "retry_policy": retry_policy,
-            "may_have_side_effect": effect != "read",
-            "result_summary": execution.result_summary,
-            "result_ref": execution.result_ref,
-            "request_ref": execution.request_ref,
-            "error_code": str(error_code) if error_code else None,
-        }
-    return result
 
 
 def _complete_skill_read(execution: AgentToolExecution) -> tuple[str, str] | None:
@@ -1945,6 +1974,7 @@ class RuntimeModelStepService:
         retry_sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         activity_logger: Callable[..., Awaitable[None]] = log_activity,
         answer_stream_enabled: bool = False,
+        compaction_loop_alert_threshold: int = 1,
     ) -> None:
         self._session_factory = session_factory
         self._context_builder = context_builder
@@ -1971,6 +2001,7 @@ class RuntimeModelStepService:
         )
         self._retry_sleep = retry_sleep
         self._answer_stream_enabled = answer_stream_enabled
+        self._compaction_loop_alert_threshold = max(1, compaction_loop_alert_threshold)
 
     async def _load(
         self,
@@ -2058,7 +2089,7 @@ class RuntimeModelStepService:
                 "agent_unavailable",
                 "Runtime Agent is unavailable in the requested tenant",
             )
-        ledger = _ledger(executions)
+        ledger = ledger_from_executions(executions)
         for cancelled_run_id in cancelled_run_ids:
             for call in prior_incomplete.get(cancelled_run_id, ()):
                 call_id = call.get("id")
@@ -2272,6 +2303,7 @@ class RuntimeModelStepService:
             ledger=ledger,
             effective_input_budget=budget.effective_runtime_budget,
             current_input_tokens=current_input_tokens,
+            executions=executions,
         )
 
     async def _prepare_messages(
@@ -2286,7 +2318,12 @@ class RuntimeModelStepService:
         static_prompt: str,
         dynamic_prompt: str,
         turn_local_dynamic_prompt: str = "",
-    ) -> list[LLMMessage] | ModelStepResult:
+    ) -> tuple[list[LLMMessage] | ModelStepResult, JsonObject | None]:
+        """Prepare the outbound messages plus the frozen budget profile.
+
+        The budget profile is computed exactly once here (zero extra work) and
+        rides back to the executor for deterministic step settlement (D).
+        """
         # Config-failure circuit breaker: a tool whose recent calls all fail
         # with the same configuration-class error (permission denied etc.)
         # cannot succeed through model retries — stop the loop early with an
@@ -2323,12 +2360,15 @@ class RuntimeModelStepService:
                     "count": count,
                 },
             )
-            return _error(
-                "tool_config_failure_loop",
-                f"工具 {tool_name} 因配置错误连续失败 {count} 次"
-                f"（{error_code}），已停止自动重试。这类错误需要人工修复"
-                "（例如在飞书开放平台控制台为应用开通相应 API 权限）"
-                "后才能继续使用该工具。",
+            return (
+                _error(
+                    "tool_config_failure_loop",
+                    f"工具 {tool_name} 因配置错误连续失败 {count} 次"
+                    f"（{error_code}），已停止自动重试。这类错误需要人工修复"
+                    "（例如在飞书开放平台控制台为应用开通相应 API 权限）"
+                    "后才能继续使用该工具。",
+                ),
+                None,
             )
         # Identical-tool-call loop breaker: the same tool+arguments being
         # issued repeatedly means the model is spinning (e.g. recompiling a
@@ -2374,12 +2414,15 @@ class RuntimeModelStepService:
                 summary=f"工具 {tool_name} 连续重复执行 {count} 次，运行已终止",
                 detail={"tool_name": tool_name, "count": count},
             )
-            return _error(
-                "tool_success_loop",
-                f"工具 {tool_name} 已连续执行 {count} 次（参数完全相同）且没有其他进展，"
-                f"判定为重复执行死循环，已停止本轮运行。{outcome_line}"
-                "如需再次执行，请发送新的消息，并说明这次与之前有何不同、"
-                "需要变更什么。",
+            return (
+                _error(
+                    "tool_success_loop",
+                    f"工具 {tool_name} 已连续执行 {count} 次（参数完全相同）且没有其他进展，"
+                    f"判定为重复执行死循环，已停止本轮运行。{outcome_line}"
+                    "如需再次执行，请发送新的消息，并说明这次与之前有何不同、"
+                    "需要变更什么。",
+                ),
+                None,
             )
         # L2 soft reminder: fires at 3 identical trailing calls (before the
         # hard breaker's 5). Pure prompt guidance appended absolutely last —
@@ -2420,6 +2463,10 @@ class RuntimeModelStepService:
             safety_margin_tokens=256,
             compact_threshold_ratio=0.80,
         )
+        budget_profile: JsonObject = {
+            "effective_input_budget": budget.effective_runtime_budget,
+            "compact_threshold": budget.compact_threshold,
+        }
         # Compact-first gate: when the uncut history already reached the
         # compaction watermark, route to Thread Compact instead of letting the
         # budget truncation below rewrite the cache-stable prefix every turn.
@@ -2436,7 +2483,7 @@ class RuntimeModelStepService:
                 }
             )
             if history_tokens >= budget.compact_threshold:
-                return ModelStepResult(intent="compact")
+                return ModelStepResult(intent="compact"), budget_profile
         build = await self._context_builder.build(
             state,
             context,
@@ -2446,22 +2493,28 @@ class RuntimeModelStepService:
         )
         confirmation_instruction: str | None = None
         if build.requires_confirmation:
-            return ModelStepResult(
-                intent="wait",
-                waiting_request={
-                    "waiting_type": "user",
-                    "correlation_id": f"tool-confirm:{context.run_id}",
-                    "reason": "A prior tool outcome is unknown and requires confirmation.",
-                },
+            return (
+                ModelStepResult(
+                    intent="wait",
+                    waiting_request={
+                        "waiting_type": "user",
+                        "correlation_id": f"tool-confirm:{context.run_id}",
+                        "reason": "A prior tool outcome is unknown and requires confirmation.",
+                    },
+                ),
+                budget_profile,
             )
         if build.blocked:
-            return ModelStepResult(
-                intent="wait",
-                waiting_request={
-                    "waiting_type": "external",
-                    "correlation_id": f"tool-reconcile:{context.run_id}",
-                    "reason": "Tool execution reconciliation is required.",
-                },
+            return (
+                ModelStepResult(
+                    intent="wait",
+                    waiting_request={
+                        "waiting_type": "external",
+                        "correlation_id": f"tool-reconcile:{context.run_id}",
+                        "reason": "Tool execution reconciliation is required.",
+                    },
+                ),
+                budget_profile,
             )
         messages = _prompt_messages(
             static_prompt=static_prompt,
@@ -2482,18 +2535,24 @@ class RuntimeModelStepService:
             # highest-priority position.
             messages.append(_soft_loop_reminder_message(soft_loop))
         if not model.supports_vision:
-            return messages
+            return messages, budget_profile
         try:
-            return await self._inject_private_screenshot_evidence(
-                messages,
-                build=build,
-                context=context,
+            return (
+                await self._inject_private_screenshot_evidence(
+                    messages,
+                    build=build,
+                    context=context,
+                ),
+                budget_profile,
             )
         except (ToolResultStoreError, ValueError) as exc:
-            return _error(
-                "agentbay_screenshot_evidence_unavailable",
-                "AgentBay screenshot evidence could not be verified for this model step: "
-                f"{type(exc).__name__}",
+            return (
+                _error(
+                    "agentbay_screenshot_evidence_unavailable",
+                    "AgentBay screenshot evidence could not be verified for this model step: "
+                    f"{type(exc).__name__}",
+                ),
+                budget_profile,
             )
 
     async def _inject_private_screenshot_evidence(
@@ -2871,7 +2930,7 @@ class RuntimeModelStepService:
             active_skill_prompt = await self._active_skill_prompt(context, executions)
             if active_skill_prompt:
                 static_prompt = f"{static_prompt}\n\n{active_skill_prompt}"
-            prepared = await self._prepare_messages(
+            prepared, budget_profile = await self._prepare_messages(
                 state=state,
                 context=context,
                 model=model,
@@ -2897,6 +2956,31 @@ class RuntimeModelStepService:
                 tools_fp,
                 msg_chain,
             )
+            loop_detection_update, loop_alert = _advance_loop_detection(
+                state["lifecycle"],
+                prefix_fp=prefix_fp,
+                tools_fp=tools_fp,
+                alert_threshold=self._compaction_loop_alert_threshold,
+            )
+            if loop_alert is not None:
+                logger.warning(
+                    "[RuntimeCompactionLoop] run_id={} loop_count={} "
+                    "prefix={} tools={}",
+                    context.run_id,
+                    loop_alert["loop_count"],
+                    prefix_fp,
+                    tools_fp,
+                )
+                await _audit_breaker_event(
+                    context,
+                    self._activity_logger,
+                    action_type="runtime_compaction_loop",
+                    summary=(
+                        "检测到压缩失忆循环：压缩后上下文前缀与工具调用模式完全复原"
+                        f"（第 {loop_alert['loop_count']} 次确认）"
+                    ),
+                    detail=dict(loop_alert),
+                )
 
             actual_model = model
             failed_over_from: LLMModel | None = None
@@ -2996,7 +3080,7 @@ class RuntimeModelStepService:
                     fallback_static_prompt = (
                         f"{fallback_static_prompt}\n\n{active_skill_prompt}"
                     )
-                fallback_prepared = await self._prepare_messages(
+                fallback_prepared, fallback_budget_profile = await self._prepare_messages(
                     state=state,
                     context=context,
                     model=fallback,
@@ -3059,6 +3143,7 @@ class RuntimeModelStepService:
                 failed_over_from = model
                 active_allowed_names = fallback_allowed_names
                 active_tools = fallback_tools
+                budget_profile = fallback_budget_profile
 
             result = _parse_step(
                 state,
@@ -3206,7 +3291,12 @@ class RuntimeModelStepService:
                     )
                 finally:
                     _flush.dispose()
-            return result
+            return replace(
+                result,
+                step_budget_profile=budget_profile,
+                loop_detection_update=loop_detection_update,
+                loop_alert=loop_alert,
+            )
         except LLMVisibleStreamInterrupted as exc:
             # A provider stream broke AFTER user-visible output was published.
             # Retrying or failing over would duplicate the published partial

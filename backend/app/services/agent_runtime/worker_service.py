@@ -257,6 +257,9 @@ def build_runtime_worker_components(
         session_factory=session_factory,
         context_builder=context_builder,
         answer_stream_enabled=runtime_settings.AGENT_RUNTIME_WEB_STREAMING_ENABLED,
+        compaction_loop_alert_threshold=(
+            runtime_settings.AGENT_RUNTIME_COMPACTION_LOOP_ALERT_THRESHOLD
+        ),
     )
     tool_result_reconciler = ToolResultReconciler(
         session_factory=session_factory,
@@ -295,6 +298,9 @@ def build_runtime_worker_components(
             ),
         ),
         max_verification_repairs=10,
+        terminate_on_compaction_loop=(
+            runtime_settings.AGENT_RUNTIME_COMPACTION_TERMINATE_ON_LOOP
+        ),
     )
     graph = build_agent_runtime_graph(
         checkpointer=checkpointer,
