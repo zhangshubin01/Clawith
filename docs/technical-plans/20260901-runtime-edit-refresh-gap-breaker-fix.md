@@ -1,6 +1,7 @@
 # 2026-09-01 runtime 直写不刷新 + 熔断失效修复方案（缺陷 A/B）
 
-状态：v5（二轮复审（v4 增量）完成，发现全部合入，定稿进入 TDD 实施）
+状态：v6（三轮复审完成；与并行方案完成合并裁决——熔断/传参以本方案为准，吸收
+run_id 加固、P2 安全网（修正版，D8 待确认）、ADR-0011 勘误；行号已按 HEAD 96535129 复核）
 关联事故：2026-09-01 run `be39c1ad`（thread 61c27271，agent 950a1943「Android 工程师 07」，
 mydome1 计算器项目）。12:19:21→12:21:59 死循环，8 次 `workspace_sync_conflict`，
 P0.5 熔断（上限 3）未触发，最终被用户 cancel 截断后 delivered。
@@ -39,7 +40,6 @@ P0.5 熔断（上限 3）未触发，最终被用户 cancel 截断后 delivered�
      workspace_sync_conflict，A2/C2 双确认）；
   2. D7 修订：删除「write 6000 上限」漂移项（legacy `3292-3296` 早已有同常量同文案，
      委托前后行为相同，A2 P2-1/C2 H1 双确认）；补列 DB 异常漂移（`_execute_tool_direct
-     `_execute_tool_direct
      :5697-5698` 现状返回含原始异常文本，委托后变 `_typed_unknown`）与文案下游面
      （execute_tool→llm/caller.py 回灌模型+流式前端，C2 M2）；
   3. 适配器复用既有 `_legacy_tool_outcome_text`（`3563-3575`，unknown→`⚠️` 而非 `❌`，
@@ -50,6 +50,22 @@ P0.5 熔断（上限 3）未触发，最终被用户 cancel 截断后 delivered�
   6. §4.3 测试清单扩为 7 类（含审批后 write/edit 必做用例，A2 P3-4/C2 双确认零覆盖）；
   7. §5 审批冒烟补盲写并发断言 + legacy 直连 write_file 冒烟；
   8. §3 两条 L1 引用精化（deepagents 两原语派生/gptme 单目录模型机制，B2 取证修正）。
+- v6（本版）：三轮复审（基于 HEAD 96535129 + 并行方案
+  `20260901-workspace-publication-runtime-seam-fix.md` 对比）后修订：
+  1. 熔断机制裁决：维持本方案 model-step budget v2（并行方案「持久化进展谓词」存在
+     ping-pong 洞、指纹依赖 content 文本失稳、需改写既有测试；指纹熔断改为「监控触发
+     后按结构化路径字段补做」，D2 监控口径不变）；
+  2. refresh 传参加固：采纳并行方案低成本项——hook 增加 `run_id` 显式参数
+     （显式优先、None 回退 contextvar），四 outcome 传 `run_id=runtime_run_id`；
+  3. 新增 §2.4：P2 安全网（修正版：锁内置 stale 标志、identity 门控、锁内重建、
+     feature flag 默认关；D8 待确认）+ ADR-0011 勘误（批1 随实施落库）；
+  4. §5 改为两批部署（批1=缺陷修复主体，批2=P2+勘误隔离）；验收口径统一
+     （合成能触发熔断 + 生产健康 run limit_reached=0）；补 rematerialize_count 指标；
+  5. 行号按 HEAD 96535129 复核：仅 3 处轻微失准已修（2228-2244、4463-4468、4606-4611）；
+     §3 新增「冲突后自动重建」对照行（ADR-0011:66 否决记录 + OpenHands/gptme 单视图）；
+  6. §7 决策表新增 D8 行（P2 安全网采纳与否，推荐采纳修正版：批2 独立部署 +
+     feature flag 默认关，三处修正缺一即否决）；§8 checklist 补三轮评审完成项与
+     D8 待裁决项；v5 条目一处文字重复瑕疵修正。
 
 ---
 
@@ -139,9 +155,18 @@ step 内逐条排空。`_tool` 已把 `model_step` 传入 `apply_workspace_sync_
 | move 成功 | `_move_file_outcome` `4320-4334` discard 后、`4335` return 前 | 目标侧 `result.path` + 源侧 `normalize_workspace_path(source_path), deleted=True`（与 legacy `3348-3351` 同式） |
 | move recovered 分支 | `4301-4306` 返回前 | 仅源侧 deleted=True（目标侧规范路径依赖服务端解析，异常路径不可得；窄反例见 §6 R3） |
 | delete 成功 | `_delete_file_outcome` `4482-4486` discard 后、`4487` return 前 | `result.path, deleted=True` |
-| delete recovered 分支 | `4464-4468` 返回前 | `normalized_path, deleted=True` |
+| delete recovered 分支 | `4463-4468` 返回前 | `normalized_path, deleted=True` |
 | edit 成功 | `_edit_file_outcome` `4625-4629` discard 后、`4630-4633` return 前 | `result.path` |
-| edit recovered 分支 | `4607-4611` 返回前 | `normalized_path` |
+| edit recovered 分支 | `4606-4611` 返回前 | `normalized_path` |
+
+**传参加固（三轮复审 A3 采纳，来自并行方案低成本项）**：
+`_refresh_run_workspace_after_direct_write` 增加 `run_id: str | None = None` 参数——
+显式传入时优先于 contextvar、`None` 回退 contextvar；上表全部挂点显式传
+`run_id=runtime_run_id`（四个 outcome 签名已携带，零新增溯源）。legacy 委托路径传
+`None`（回退 contextvar，审批路径 no-op 行为不变）。contextvar 主路径可靠性已实证
+（`command_worker.py:1008` 唯一 set 点包住整个图执行、`tool_step_service.py:1575`
+create_task 继承、android_compile 同路径生产已触发 `[RunWorkspaceRefresh]`），
+显式传参仅作防御加固。
 
 **实现要求（评审 C HIGH-1 增补）**：`_refresh_run_workspace_after_direct_write` 当前先
 `get_version`+`read_bytes`（`2226/2245`）**之后**才在 `refresh_run_workspace_path` 里判断
@@ -154,8 +179,8 @@ run workspace 是否物化（`run_workspace.py:152-155`）——未物化 run（
 - `result.path` 与 legacy 同源（`write_workspace_file`/`move_workspace_path`/
   `delete_workspace_file` 返回值携带服务端解析后的规范路径），edit 的成功消息已引用
   `result.path`（`4632`），无需自行重算目标路径。
-- 目录 move/delete：钩子对 is_dir 目标自动 skip（`2228-2234`）；delete 的
-  deleted=True 分支会移除 manifest 前缀条目（`run_workspace.py:177-192`）。
+- 目录 move/delete：钩子对 is_dir 目标自动 skip（`2228-2244`，is_dir 早退 + 大小上限）；
+  delete 的 deleted=True 分支会移除 manifest 前缀条目（`run_workspace.py:177-192`）。
   与 legacy 行为一致，不扩大语义。
 - `_typed_unknown` 分支不挂：不确定 outcome 不应提交 manifest 基线变更（尤其
   deleted=True 会抹掉 manifest 条目）；下轮 flush 的 CAS 保护仍是兜底安全网。
@@ -276,6 +301,37 @@ outcome（本方案 §2.1 补挂）。「漏挂即回归」是结构性风险：
 after-commit 钩子，事务时序与 hidden coupling 风险大于收益；「新增路径漏挂」已由
 守卫测试确定性覆盖。L2 出局，不留待办。
 
+### 2.4 可选 P2 安全网（修正版，D8 待确认）+ ADR-0011 勘误
+
+**P2：flush 冲突后 mark_stale → 下次 execute_code 重新物化（来自并行方案，按 A3/C3
+修正实现，三处修正缺一即否决）**：
+
+- 定位：损失限幅器而非根治——ADR-0011:66 已否决「冲突后自动重新物化」（7 连败变 1 败，
+  但该次产出仍丢、视图不一致不治）；本修复闭环主事故后，P2 仅覆盖 `_typed_unknown`/
+  move-recovered/未来漏网路径，边际收益小。**feature flag 默认关**，独立成批部署。
+- 修正 1（防死锁，A3/C3 致命发现）：flush 发生在 `use_run_workspace` 的 `state.lock`
+  锁内（`agent_tools.py:2951` 开块、`:3130`/`:3205` flush；`run_workspace.py:110-112`
+  yield 于锁内；`state.lock` 为 asyncio.Lock 不可重入，`:70`）。mark_stale **禁止
+  重新 acquire state.lock**：在 `_RunWorkspaceState` 加 `stale: bool` 标志，由 flush
+  冲突分支在已持锁上下文直接 set（不加锁、不 pop `_run_workspace_tasks` entry）。
+- 修正 2（防误标，C3 高）：`flush_temp_workspace` 是共享函数，per-call workspace
+  （e2b `:2850-2851`、convert 等）也走它。mark_stale 前必须 identity 门控：
+  `state.workspace is temp_workspace`（对标 `run_workspace.py:161` 判等）。
+- 修正 3（防竞态，C3 中）：重建走「`use_run_workspace` 取锁后检测 `stale` → cleanup +
+  factory 重建」——不 pop entry、不留已持旧引用的并发任务双写（`run_workspace.py:79-91`
+  identity 校验继续兜底并行 run 不误杀）。
+- 可观测：`[RunWorkspaceRestale]`/`[RunWorkspaceRematerialize]` 日志 + `rematerialize_count`
+  指标（区分「refresh 根治」与「P2 吞残余冲突」）。
+
+**ADR-0011 勘误（批1 随实施落库，A3 裁决应采纳）**：对
+`docs/adr/0011-workspace-direct-write-run-refresh.md` 追加勘误段——
+1. 「Mutation 工具族（`_execute_workspace_mutation`）」接缝前提已过时：Runtime 自
+   typed-outcome 迁移后经 `execute_builtin_tool_outcome:5168` 分发给四 outcome，原钩子
+   对真实 run 从未生效；
+2. 修正后的接缝清单 = 本方案 §2.1 挂点 + §2.3 L1 收敛；
+3. 经验条款：接缝类修复必须配「路径级回归测试」（断言刷新生效），防止迁移改道后钩子
+   死亡无人知晓。
+
 ---
 
 ## 3. 参考资料对照（经本地仓库取证 + 来源分级）
@@ -292,6 +348,7 @@ after-commit 钩子，事务时序与 hidden coupling 风险大于收益；「�
 | 文件工具与执行环境一致性 | gptme 单 workspace 目录 | 无沙箱单目录模型：文件工具走 `os.chdir`/`Path.cwd()`（save.py:137、read.py:183、patch.py:336），shell 走 `_workspace_cwd` ContextVar（shell.py:1084，仅驱动 shell cwd；gptme 自注文件工具迁移未完成）——从根上杜绝双视图漂移，贴合缺陷 A | 本地核实：gptme `tools/save.py:137`、`shell.py:1084`、`session_step.py:736-739` |
 | 工具接口统一（ACI） | SWE-agent | ACI 是「模型侧接口统一」（docs/background/aci.md、`tools.py` ToolHandler），非「存储/执行单视图」——仅限此层面借鉴；其文件编辑=沙箱内专用工具（`str_replace_editor` 脚本）是「全部经沙箱执行」的极端范例，恰为 L1 否决的备选方向，留作对照 | 本地核实：SWE-agent 仓库 docs/background/aci.md、`tools/edit_anthropic/bin/str_replace_editor` |
 | 运行期护栏（tripwire） | openai-agents-python guardrails | `guardrail.py` tripwire_triggered→halt 属实，但它是语义护栏一次性判定非连续计数——仅在「halt-rather-than-retry 定位」层类比成立 | 本地核实：openai-agents-python `src/agents/guardrail.py:31` |
+| 冲突后自动重建/重新物化 | ADR-0011:66 既有否决 + OpenHands/gptme 单视图 | ADR-0011 已否决「冲突后自动重新物化」（7 连败变 1 败，但**该次产出仍丢、视图不一致不治**）；OpenHands/gptme 走单视图挂载根本无此问题，死循环靠 StuckDetector 熔断而非重建。为 §2.1「不做 flush 侧兜底」补来源级锚点；并行方案的 P2 安全网定位是「损失限幅器」而非根治，三条否决理由仍成立（是否采纳见 §9 A3/C3 裁决） | 本地核实：`docs/adr/0011-workspace-direct-write-run-refresh.md:60-67`、OpenHands `stuck.py` |
 | （删除 E2B/CubeSandbox 行） | — | E2B 是单文件系统直写（无第二视图），CubeSandbox statesync 是 VM 生命周期状态——均无「工作区双视图同步」同构机制，类比空泛 | 本地核实后判定不适用 |
 
 **最佳方案对比（缺陷 A，评审 B）**：
@@ -365,6 +422,11 @@ after-commit 钩子，事务时序与 hidden coupling 风险大于收益；「�
      autonomy/approval 测试文件对委托路径**零覆盖**（评审 A2/C2 双确认），此项必做。
 - 守卫测试：`test_write_path_guard.py` AST 断言（白名单按函数名 + import 绑定解析；
   含自身反例——临时插入违例调用点断言必须失败，防止守卫测试写成恒真）。
+- P2 测试（若 D8 采纳，批2）：(1) 死锁回归——持锁上下文 mark_stale 直接 set 标志、
+  全程无二次 acquire（测试断言无 await lock）；(2) identity 门控——per-call workspace
+  的 flush 冲突不触发 stale；(3) stale 后下一次 use_run_workspace 锁内重建、manifest
+  取新基线，同路径再 execute_code 不再冲突；(4) feature flag 关闭时冲突行为与现状一致
+  （无 stale 无重建）。
 
 ### 4.4 不做的测试
 
@@ -374,13 +436,17 @@ after-commit 钩子，事务时序与 hidden coupling 风险大于收益；「�
 
 ---
 
-## 5. 部署与验证
+## 5. 部署与验证（两批部署，评审 C3）
 
 1. `scripts/arch-guard.sh` 过检；只 `ruff check` 改动文件（**禁止对 agent_tools.py 跑
    ruff format**，避免整文件重排噪音）。
 2. 测试环境红线：不灰度、一步全量；`scripts/deploy.sh --commit <ref> --require-idle`。
    部署前 `git status` 核对剥离他人改动（多会话并行）。
-3. 部署后验证：
+3. **批1 = 缺陷修复主体**（§2.1 refresh+run_id、§2.2 熔断、§2.3 L1 收敛、ADR-0011
+   勘误）：可独立验证「冲突=0」。
+   **批2 = P2 + feature flag**（若 D8 采纳）：默认关部署，观测后按 flag 开启——P2 是
+   合并态唯一带并发新状态机的组件，隔离它避免死锁/误标类问题拖累批1全量回滚。
+4. 批1 部署后验证：
    - **主账本**：`SELECT count(*) FROM agent_tool_executions WHERE
      result_metadata->>'error_code'='workspace_sync_conflict' AND started_at>部署时刻`
      → 应 0；若 >0，检查同 run 是否在 3 次内熔断 terminal（`agent_runs.delivery_status`
@@ -389,12 +455,13 @@ after-commit 钩子，事务时序与 hidden coupling 风险大于收益；「�
      "RunWorkspaceRefresh|WorkspaceFlushConflict"` → 应看到 runtime edit_file/write_file
      后的 `[RunWorkspaceRefresh] refreshed path`，且不再出现恒定 expected_version 的
      flush 冲突。
-   - **正向压测信号（评审 C MED-4）**：统计部署后「同 run 内先 edit_file/write_file、
-     后 execute_code」的 run 数，其 execute_code 冲突须为 0——这是修复生效的直接证据，
-     「总数 0」无法区分「生效」与「恰好没走该路径」。
-   - **负向信号**：`workspace_sync_conflict_limit_reached` 的 terminal run 监控
-     （0 = 熔断未被误触发；>0 需立即检查是否误杀健康 run）。
-   - **观察时长**：至少覆盖与 be39c1ad 同形态的 Android 编码任务 2-3 个 run 或 24h。
+   - **正向压测信号**：统计部署后「同 run 内先 edit_file/write_file、后 execute_code」
+     的 run 数，其 execute_code 冲突须为 0——「总数 0」无法区分「生效」与「恰好没走
+     该路径」。
+   - **熔断验收口径（C3 发现 5 统一）**：合成验证（构造同路径冲突）能触发
+     `workspace_sync_conflict_limit_reached` terminal；生产健康 run 的 limit_reached=0。
+     二者方向不同但必须同时成立——前者证熔断活着，后者证无误杀。
+   - **观察时长**：至少覆盖与 be39c1ad 同形态的 Android 编码任务 2-3 个 run 或 24-48h。
    - **冲突来源分布监控（D2 兜底）**：若部署后出现 conflict，按 tool_name/路径分布
      区分「模型重试死循环（应被熔断截断）」与「真人并发/并行会话改写（健康 run 不应
      被误杀）」；出现后者即启动 D2 的结构化路径改造。
@@ -406,8 +473,12 @@ after-commit 钩子，事务时序与 hidden coupling 风险大于收益；「�
      不被 CAS 拒）；同时对 legacy 直连路径（execute_tool）冒烟 write_file 一次。
    - **守卫测试进 CI**：`test_write_path_guard.py` 随 pytest 全量自动运行，红灯 =
      新写路径未收敛（部署前本地全量测试必须含它）。
-4. 回滚：标签 `clawith-agent-backend:pre-63b70e91-2ab25eb38c8c` 保留；本次部署前由
-   deploy.sh 打新 pre 标签（`pre-<新commit>`）作为回滚点。
+5. 批2 部署后验证（若采纳）：`rematerialize_count` 指标与 `[RunWorkspaceRestale]`/
+   `[RunWorkspaceRematerialize]` 日志——预期生产中极少触发（refresh 已闭环主路径）；
+   开启 flag 前后 conflict 分布无恶化；「1 次冲突即自愈」信号出现即 P2 生效。
+6. 回滚：标签 `clawith-agent-backend:pre-63b70e91-2ab25eb38c8c` 保留；每批部署前由
+   deploy.sh 打新 pre 标签作为回滚点。P2 的 stale 标志在进程内存（`_run_workspace_tasks`），
+   随 run 结束 pop、进程重启即清——零持久化残留，回滚安全（C3 核实）。
 
 ---
 
@@ -433,7 +504,7 @@ after-commit 钩子，事务时序与 hidden coupling 风险大于收益；「�
 
 ---
 
-## 7. 决策点记录（v4 已全部按推荐项确认并合入对应章节）
+## 7. 决策点记录（三轮评审后 D1–D7 已确认；D8 待用户裁决）
 
 | # | 决策 | 确认结论 | 依据 |
 |---|---|---|---|
@@ -444,6 +515,7 @@ after-commit 钩子，事务时序与 hidden coupling 风险大于收益；「�
 | D5 | refresh 读取前 early-exit | **已定为实现要求**（§2.1） | 评审 C HIGH-1：未物化 run 每次直写白付一次整文件读 |
 | D6 | legacy 委托后的写语义 | **保留审批盲写**：`cas_guard=False`（§2.3） | 审批语义「批准即执行」与 CAS 拒写冲突；保盲写=零回归 |
 | D7 | 接受 §2.3 行为漂移（文案措辞 / DB 异常信息降级 / edit 双读） | **接受** | 逐项还原会重新引入分支分叉，与收敛目标相悖；漂移面窄且低频（审批通道） |
+| D8 | P2 安全网（flush 冲突后 mark_stale→下次物化重建）采纳与否 | **推荐：采纳修正版**——批2 独立部署 + feature flag 默认关；三处修正缺一即否决（§2.4） | 并行方案 A3/C3 三轮裁决：修正后死锁/误标/竞态三洞已封；定位=损失限幅器非根治，边际收益小故默认关，观测 `rematerialize_count` 后再决定开旗 |
 
 ---
 
@@ -453,6 +525,9 @@ after-commit 钩子，事务时序与 hidden coupling 风险大于收益；「�
 - [x] 根治路线确认（L1 写路径收敛纳入，§2.3 设计落笔）
 - [x] 决策点 D1/D2/D4/D6/D7 按推荐确认 → v4
 - [x] v4 增量二轮复审（A2/B2/C2）→ 发现全部合入 → v5 定稿
-- [ ] TDD 实施（先红后绿：§4.2 生产模式用例 + §4.3 守卫测试先行；§2.3 L1 委托 + §2.1 挂点 + §2.2 状态机）
+- [x] 基于最新代码（96535129）三轮复审（A3/B3/C3，含并行方案对比裁决）→ v6 定稿；§7 D8 已入表待用户裁决
+- [ ] D8 用户确认（推荐采纳修正版 P2，批2 + flag 默认关）
+- [ ] TDD 实施（先红后绿：§4.2 生产模式用例 + §4.3 守卫测试先行；§2.3 L1 委托 + §2.1 挂点 + §2.2 状态机；若 D8 采纳另含 P2 四例）
 - [ ] arch-guard + ruff check + 全量相关测试
-- [ ] 提交推送 → `deploy.sh --commit <ref> --require-idle` → §5 验证（含审批流冒烟）
+- [ ] 提交推送 → 批1 `deploy.sh --commit <ref> --require-idle` → §5 验证（含审批流冒烟）
+- [ ] （若 D8 采纳）批2 独立部署 P2 + flag → 观测 24-48h 后决定开旗
