@@ -1783,27 +1783,6 @@ class TempWorkspace:
         self.temp_dir.cleanup()
 
 
-async def _materialize_storage_workspace(storage, storage_key: str, local_root: Path) -> None:
-    if not await storage.is_dir(storage_key):
-        return
-    for entry in await storage.list_dir(storage_key):
-        await _materialize_storage_entry(storage, entry.key, storage_key, local_root)
-
-
-async def _materialize_storage_entry(storage, entry_key: str, root_key: str, local_root: Path) -> None:
-    rel = entry_key.removeprefix(root_key.rstrip("/") + "/")
-    target = (local_root / rel).resolve()
-    if not target.is_relative_to(local_root.resolve()):
-        return
-    if await storage.is_dir(entry_key):
-        target.mkdir(parents=True, exist_ok=True)
-        for child in await storage.list_dir(entry_key):
-            await _materialize_storage_entry(storage, child.key, root_key, local_root)
-        return
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_bytes(await storage.read_bytes(entry_key))
-
-
 def _drop_incomplete_git_dirs(
     root: Path,
     budget: dict,

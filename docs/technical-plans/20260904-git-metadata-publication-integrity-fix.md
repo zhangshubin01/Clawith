@@ -245,7 +245,7 @@ except Exception as exc:
 | 8 | restore 序列 | `git init -b __clawith_restore__` → fetch bundle `+refs/heads/*` `+refs/tags/*` `HEAD:refs/clawith-bundle-head` → `_resolve_bundle_branch` 反查分支 → `symbolic-ref HEAD` + `reset --mixed` → 清临时 ref/分支 → remote add/set-url origin → 内联认证 fetch 对账。 |
 | 9 | 空仓库边界 | `create_git_bundle` 无 refs 时返回 `None`，跳过；materialize 后无 `.git`，agent 依 `GITLAB_GUIDE.md` 自 init/clone。 |
 
-**未随本次实施（留待后续授权）**：① storage 历史 `.git` 条目迁移清理（只读扫描→审批→delete）；② 死代码 `_materialize_storage_workspace`(1783)/旧 `_materialize_storage_entry`(1790) 清理。
+**未随本次实施（留待后续授权）**：① storage 历史 `.git` 条目迁移清理（只读扫描→审批→delete，写操作，需用户明确授权）。死代码 `_materialize_storage_workspace`/旧 `_materialize_storage_entry`（4 参版，已被 6 参版遮蔽）已随 P2 一并删除（2026-09-04，零调用方验证）。
 
 **P2 远程兜底落地记录（2026-09-04）**：新增 `gitlab_workspace.restore_git_metadata_from_remote(temp_workspace_root, agent_id)`，在 `_prepare_temp_workspace` 中接于 `_restore_git_bundles` 之后、`inject_credentials_into_temp_workspace` 之前。逻辑：绑定 repo 工作树存在但无 `.git` 时按 remote 重建——`git init -b <branch>` → `remote add origin <clone_url>` → `_apply_repo_config` → 内联 `-c insteadOf` 认证 `fetch origin`（走 `remote add` 写入的默认 remote-tracking refspec，确保 `origin/<branch>` 存在）→ `reset --mixed origin/<branch>`（保留未提交改动为 unstaged）→ `--set-upstream-to`；工作分支名优先取绑定 `default_branch`（`_load_binding_credential` 扩为 7 元组新增 `default_branch`，缺失时按 remote HEAD `ls-remote --symref` 推断，再退 `main`）；remote 无该分支 → `_adopt_mode`（init+首提交+push）；目录不存在或已有 `.git` → 跳过。单测新增 7 项（`test_gitlab_workspace.py`，重点断言 mixed reset 而非 soft、fetch 走内联认证），全绿；arch-guard P0 通过；ruff 通过。
 
