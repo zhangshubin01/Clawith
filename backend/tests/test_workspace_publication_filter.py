@@ -178,7 +178,7 @@ async def test_derived_paths_are_not_collected_for_publication(monkeypatch, tmp_
     (tmp_path / "workspace" / "dist" / "bundle.js").write_bytes(b"bundle")
     (tmp_path / "workspace" / "build.tar.gz").write_bytes(b"tarball")
 
-    cas_files, overwrite_files, derived_paths = agent_tools._collect_temp_workspace_files(
+    cas_files, overwrite_files, derived_paths, git_repos = agent_tools._collect_temp_workspace_files(
         temp_ws.root,
         ["workspace"],
     )
@@ -195,6 +195,7 @@ async def test_derived_paths_are_not_collected_for_publication(monkeypatch, tmp_
         "workspace/dist/bundle.js",
         "workspace/node_modules/pkg/index.js",
     ]
+    assert git_repos == []  # no .git dir → no bundle to create
 
     result = await agent_tools.flush_temp_workspace(temp_ws)
     assert result["conflicted"] == []
@@ -397,9 +398,10 @@ def test_isolated_output_mode_unchanged():
         ("workspace/src/main.kt", "source"),
         ("_exec_tmp_run.py", "derived"),
         ("workspace/_exec_tmp_123.sh", "derived"),
-        (".git/HEAD", "source"),
-        (".git/objects/ab/cdef1234", "source"),
-        ("workspace/proj/.git/config", "source"),
+        (".git/HEAD", "git_metadata"),
+        (".git/objects/ab/cdef1234", "git_metadata"),
+        ("workspace/proj/.git/config", "git_metadata"),
+        ("workspace/proj/.git.bundle", "source"),
         (".git-credentials", "derived"),
         ("workspace/pkg/.netrc", "derived"),
         (".gradle/8.0/registry.bin", "derived"),
@@ -469,12 +471,12 @@ async def test_materialize_skips_derived(monkeypatch, tmp_path):
         assert (temp_ws.root / "workspace" / "build" / "outputs" / "apk" / "x.apk").is_file()
         assert not (temp_ws.root / "workspace" / "build" / "classes" / "x.class").exists()
         assert not (temp_ws.root / "workspace" / "node_modules" / "m" / "index.js").exists()
-        # .git is source-grade on the materialize side (sandbox-git fix §3.1).
-        assert (temp_ws.root / "workspace" / ".git" / "HEAD").is_file()
+        # .git metadata never materializes per-file (git-metadata-integrity fix):
+        # it is restored whole from a bundle, never as a loose .git tree.
+        assert not (temp_ws.root / "workspace" / ".git" / "HEAD").exists()
         assert set(temp_ws.manifest) == {
             "workspace/src/Main.kt",
             "workspace/build/outputs/apk/x.apk",
-            "workspace/.git/HEAD",
         }
     finally:
         temp_ws.cleanup()
@@ -482,10 +484,13 @@ async def test_materialize_skips_derived(monkeypatch, tmp_path):
 
 @pytest.mark.asyncio
 async def test_materialize_drops_incomplete_git_dir(monkeypatch, tmp_path):
-    """Budget-skipped .git files must remove the whole .git dir (sandbox-git fix §3.3).
+    """Git metadata never materializes per-file (git-metadata-integrity fix).
 
-    A half-materialized .git (HEAD present, objects missing) is worse than no
-    .git at all: keep the invariant ".git is either complete or absent".
+    Historical storage may still hold a ``.git`` tree (HEAD + objects); the
+    materialize side skips every ``.git`` path outright, so the sandbox copy
+    never carries a loose ``.git`` — a half-materialized ``.git`` (HEAD present,
+    objects missing) is worse than no ``.git`` at all, and a bundle restore
+    rebuilds it whole instead.
     """
     agent_id = uuid.uuid4()
     storage = MemoryStorageBackend(
@@ -799,34 +804,58 @@ def test_redact_git_secrets_leaves_non_git_and_binary_untouched():
 
 
 @pytest.mark.asyncio
-async def test_flush_redacts_git_credentials_before_publish(monkeypatch, tmp_path):
+async def test_flush_publishes_git_bundle_not_git_metadata(monkeypatch, tmp_path):
+    """`.git/**` never materializes nor publishes; only a single bundle blob does.
+
+    Replaces the old ``.git/config`` materialize-and-redact semantics: git
+    metadata is packed into one bundle (credential-free by construction) and
+    published atomically instead of per-file.
+    """
     agent_id = uuid.uuid4()
     storage = MemoryStorageBackend(
         {
             f"{agent_id}/workspace/mydome1/.git/config": (
-                b"[remote \"origin\"]\n"
-                b"\turl = https://user:glpat-tok@git.example.com/a/b.git\n"
-                b"[http \"https://git.example.com/\"]\n"
-                b"\textraheader = PRIVATE-TOKEN: glpat-tok\n"
+                b"[remote \"origin\"]\n\turl = https://user:glpat-tok@git.example.com/a/b.git\n"
             ),
+            f"{agent_id}/workspace/mydome1/src/Main.kt": b"fun main() {}",
         }
     )
     monkeypatch.setattr(agent_tools, "get_storage_backend", lambda: storage)
 
+    async def _fake_bundle(repo_dir):
+        return b"fake-bundle-bytes"
+
+    monkeypatch.setattr(agent_tools.gitlab_workspace, "create_git_bundle", _fake_bundle)
+
     temp_ws = await agent_tools._prepare_temp_workspace(agent_id, paths=["workspace"])
     try:
+        # .git/config was skipped on materialize (git metadata never loads).
+        assert not (temp_ws.root / "workspace" / "mydome1" / ".git" / "config").exists()
+        # A repo appears in the sandbox: flush packs it into a bundle and must
+        # never publish any .git/** file.
+        (temp_ws.root / "workspace" / "mydome1" / ".git").mkdir(parents=True)
+        (temp_ws.root / "workspace" / "mydome1" / ".git" / "HEAD").write_bytes(b"ref: refs/heads/main\n")
         result = await agent_tools.flush_temp_workspace(temp_ws)
         assert result["conflicted"] == []
-        published = storage.files[f"{agent_id}/workspace/mydome1/.git/config"]
-        assert b"glpat-tok" not in published
-        assert b"https://git.example.com/a/b.git" in published
-        assert b"extraheader = <redacted>\n" in published
+        # Source file unchanged → skipped; only the bundle is published.
+        assert result["updated"] == ["workspace/mydome1/.git.bundle"]
+        assert storage.files[f"{agent_id}/workspace/mydome1/.git.bundle"] == b"fake-bundle-bytes"
+        # The sandbox's loose .git/HEAD was pruned, never published per-file.
+        assert f"{agent_id}/workspace/mydome1/.git/HEAD" not in storage.files
+        # Historical .git/config in storage is left untouched (migration concern).
+        assert b"glpat-tok" in storage.files[f"{agent_id}/workspace/mydome1/.git/config"]
     finally:
         temp_ws.cleanup()
 
 
 @pytest.mark.asyncio
-async def test_candidate_changes_redact_git_credentials(monkeypatch, tmp_path):
+async def test_candidate_changes_publish_bundle_not_git_metadata(monkeypatch, tmp_path):
+    """The reconciliation path emits a bundle create, never a .git/** candidate.
+
+    This is the exact path where the historical PermissionError surfaced
+    (recover_publication → apply_candidate); the old redact-then-CAS semantics
+    are gone.
+    """
     agent_id = uuid.uuid4()
     storage = MemoryStorageBackend(
         {
@@ -837,17 +866,21 @@ async def test_candidate_changes_redact_git_credentials(monkeypatch, tmp_path):
     )
     monkeypatch.setattr(agent_tools, "get_storage_backend", lambda: storage)
 
-    temp_ws = await agent_tools._prepare_temp_workspace(agent_id, paths=["workspace"])
-    try:
-        (temp_ws.root / "workspace" / "mydome1" / ".git" / "config").write_bytes(
-            b"[remote \"origin\"]\n\turl = https://user:glpat-tok@git.example.com/a/b.git\n"
-            b"[remote \"upstream\"]\n\turl = https://git.example.com/a/b.git\n"
-        )
-        changes = await agent_tools._workspace_candidate_changes(temp_ws)
-        config_changes = [c for c in changes if c.path == "workspace/mydome1/.git/config"]
-        assert len(config_changes) == 1
-        assert config_changes[0].data is not None
-        assert b"glpat-tok" not in config_changes[0].data
-        assert b"url = https://git.example.com/a/b.git" in config_changes[0].data
-    finally:
-        temp_ws.cleanup()
+    async def _fake_bundle(repo_dir):
+        return b"candidate-bundle-bytes"
+
+    monkeypatch.setattr(agent_tools.gitlab_workspace, "create_git_bundle", _fake_bundle)
+
+    # Historical manifest still carries a .git entry (pre-fix residue); the
+    # sandbox has a live repo whose .git must be packed, not CAS'd per-file.
+    manifest = {
+        "workspace/mydome1/.git/config": _manifest_entry(agent_id, "workspace/mydome1/.git/config"),
+    }
+    temp_ws = _temp_workspace(tmp_path, agent_id, manifest=manifest)
+    (tmp_path / "workspace" / "mydome1" / ".git").mkdir(parents=True)
+    (tmp_path / "workspace" / "mydome1" / ".git" / "HEAD").write_bytes(b"ref: refs/heads/main\n")
+
+    changes = await agent_tools._workspace_candidate_changes(temp_ws)
+    assert [c.path for c in changes] == ["workspace/mydome1/.git.bundle"]
+    assert changes[0].operation == "create"
+    assert changes[0].data == b"candidate-bundle-bytes"

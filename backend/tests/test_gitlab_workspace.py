@@ -465,7 +465,7 @@ def test_inject_temp_workspace_no_binding_noop(tmp_path, monkeypatch):
 
 def test_inject_temp_workspace_applies_repo_config(tmp_path, monkeypatch):
     async def fake_cred(agent_id):
-        return ("glpat-test123", "http://192.168.5.254", "mydome1", "Android 工程师 07", "agent-abc@clawith.local")
+        return ("glpat-test123", "http://192.168.5.254", "mydome1", "Android 工程师 07", "agent-abc@clawith.local", "zhangshubin/mydome1")
 
     monkeypatch.setattr(gw, "_load_binding_credential", fake_cred)
     fake = FakeGit({})
@@ -481,7 +481,7 @@ def test_inject_temp_workspace_applies_repo_config(tmp_path, monkeypatch):
 
 def test_inject_temp_workspace_repo_name_mismatch_noop(tmp_path, monkeypatch):
     async def fake_cred(agent_id):
-        return ("glpat-test123", "http://192.168.5.254", "other-repo", "n", "e@x")
+        return ("glpat-test123", "http://192.168.5.254", "other-repo", "n", "e@x", "zhangshubin/other-repo")
 
     monkeypatch.setattr(gw, "_load_binding_credential", fake_cred)
     fake = FakeGit({})
@@ -494,7 +494,7 @@ def test_inject_temp_workspace_repo_name_mismatch_noop(tmp_path, monkeypatch):
 
 def test_inject_temp_workspace_git_failure_returns_false(tmp_path, monkeypatch):
     async def fake_cred(agent_id):
-        return ("glpat-test123", "http://192.168.5.254", "mydome1", "n", "e@x")
+        return ("glpat-test123", "http://192.168.5.254", "mydome1", "n", "e@x", "zhangshubin/mydome1")
 
     monkeypatch.setattr(gw, "_load_binding_credential", fake_cred)
     monkeypatch.setattr(gw, "_run_git", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("git broken")))
@@ -608,4 +608,5 @@ def test_load_binding_credential_success(monkeypatch):
         "mydome1",
         "Android 工程师 07",
         f"agent-{agent_id.hex[:8]}@clawith.local",
+        "zhangshubin/mydome1",
     )

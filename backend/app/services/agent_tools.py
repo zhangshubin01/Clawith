@@ -163,6 +163,9 @@ _settings = get_settings()
 WORKSPACE_ROOT = Path(_settings.STORAGE_LOCAL_ROOT or _settings.AGENT_DATA_DIR)
 TOOL_MATERIALIZE_MAX_FILE_BYTES = 50 * 1024 * 1024
 TOOL_MATERIALIZE_MAX_TOTAL_BYTES = 500 * 1024 * 1024
+# Git bundles hold a whole repo's refs + objects in one file, so they get an
+# independent (larger) budget than regular per-file materialization.
+TOOL_MATERIALIZE_GIT_BUNDLE_MAX_BYTES = 200 * 1024 * 1024
 FEISHU_APPROVAL_ATTACHMENT_MAX_BYTES = 50 * 1024 * 1024
 FEISHU_APPROVAL_IMAGE_MAX_BYTES = 10 * 1024 * 1024
 FEISHU_APPROVAL_CODE_MAX_CHARS = 256
@@ -1837,6 +1840,75 @@ def _drop_incomplete_git_dirs(
         )
 
 
+async def _restore_git_bundles(
+    root: Path,
+    agent_id: uuid.UUID,
+    git_bundles: dict[str, str],
+    manifest: dict[str, TempWorkspaceManifestEntry],
+) -> None:
+    """Rebuild each repo's ``.git`` from its published git bundle.
+
+    A bundle is a single CAS blob (refs + objects, no ``.git/config``); this
+    reconstructs ``.git`` in-place without touching the already-materialized
+    working tree, then records a manifest entry so the publish delete pass
+    treats the bundle as present. Best-effort: a failure leaves the repo
+    without ``.git`` and the agent falls back to ``GITLAB_GUIDE.md`` self-init.
+    """
+    if not git_bundles:
+        return
+    storage = get_storage_backend()
+    root_resolved = root.resolve()
+    with tempfile.TemporaryDirectory(prefix="clawith-restore-bundle-") as tmp:
+        bundle_path = Path(tmp) / "repo.bundle"
+        for bundle_rel, storage_key in git_bundles.items():
+            try:
+                version = await storage.get_version(storage_key)
+                if not version.exists or version.is_dir:
+                    continue
+                if version.size > TOOL_MATERIALIZE_GIT_BUNDLE_MAX_BYTES:
+                    logger.warning(
+                        "[GitLabBundle] restore skipped oversize rel={} size={}",
+                        bundle_rel,
+                        version.size,
+                    )
+                    continue
+                data = await storage.read_bytes(storage_key)
+                if not data:
+                    continue
+                repo_rel = (
+                    bundle_rel.removesuffix("/.git.bundle")
+                    if bundle_rel.endswith("/.git.bundle")
+                    else bundle_rel
+                )
+                repo_dir = root_resolved / repo_rel
+                if not repo_dir.is_dir():
+                    continue
+                bundle_path.write_bytes(data)
+                restored = await gitlab_workspace.restore_git_metadata_from_bundle(
+                    repo_dir, bundle_path, agent_id
+                )
+                if not restored:
+                    logger.warning(
+                        "[GitLabBundle] restore failed rel={} repo={}",
+                        bundle_rel,
+                        repo_rel,
+                    )
+                    continue
+                manifest[bundle_rel] = TempWorkspaceManifestEntry(
+                    rel_path=bundle_rel,
+                    storage_key=storage_key,
+                    base_version_token=version.token,
+                    base_hash=content_hash_bytes(data),
+                    size=version.size,
+                )
+            except Exception as exc:  # noqa: BLE001 — restore is best-effort
+                logger.warning(
+                    "[GitLabBundle] restore error rel={} error_type={}",
+                    bundle_rel,
+                    type(exc).__name__,
+                )
+
+
 async def _prepare_temp_workspace(
     agent_id: uuid.UUID,
     tenant_id: str | None = None,
@@ -1853,6 +1925,7 @@ async def _prepare_temp_workspace(
     budget = {"total": 0, "skipped": []}
     selected = TEMP_WORKSPACE_DEFAULT_PATHS if paths is None else [path for path in paths if path]
     manifest: dict[str, TempWorkspaceManifestEntry] = {}
+    git_bundles: dict[str, str] = {}
     for rel_path in selected:
         storage_key, normalized, is_enterprise = _tool_storage_key(agent_id, rel_path, tenant_id)
         if is_enterprise:
@@ -1865,8 +1938,10 @@ async def _prepare_temp_workspace(
             budget,
             manifest,
             max_file_bytes=max_file_bytes,
+            git_bundles=git_bundles,
         )
     _drop_incomplete_git_dirs(temp_ws, budget, manifest)
+    await _restore_git_bundles(temp_ws, agent_id, git_bundles, manifest)
     await gitlab_workspace.inject_credentials_into_temp_workspace(temp_ws, agent_id)
     skipped_skills = [
         path
@@ -1899,7 +1974,19 @@ async def _materialize_storage_path_with_budget(
     manifest: dict[str, TempWorkspaceManifestEntry],
     *,
     max_file_bytes: int = TOOL_MATERIALIZE_MAX_FILE_BYTES,
+    git_bundles: dict[str, str] | None = None,
 ) -> None:
+    if classify_publish_path(rel_path) == "git_metadata":
+        # ``.git/**`` never materializes per-file: it is restored whole from a
+        # git bundle, so per-file CAS corruption and credential leakage into
+        # the durable layer are both impossible by construction.
+        return
+    if Path(rel_path).name == ".git.bundle":
+        # A published bundle is a single CAS blob, not a working-tree file:
+        # record its key and restore it later (never materialize as a file).
+        if git_bundles is not None:
+            git_bundles[normalize_workspace_path(rel_path)] = storage_key
+        return
     try:
         await _materialize_storage_entry(
             storage,
@@ -1909,6 +1996,7 @@ async def _materialize_storage_path_with_budget(
             budget,
             manifest,
             max_file_bytes=max_file_bytes,
+            git_bundles=git_bundles,
         )
     except FileNotFoundError:
         logger.warning(
@@ -1929,6 +2017,7 @@ async def _materialize_storage_entry(
     manifest: dict[str, TempWorkspaceManifestEntry],
     *,
     max_file_bytes: int = TOOL_MATERIALIZE_MAX_FILE_BYTES,
+    git_bundles: dict[str, str] | None = None,
 ) -> None:
     if await storage.is_file(storage_key):
         if classify_publish_path(rel_path) == "derived":
@@ -1990,6 +2079,7 @@ async def _materialize_storage_entry(
                 budget,
                 manifest,
                 max_file_bytes=max_file_bytes,
+                git_bundles=git_bundles,
             )
 
 
@@ -2033,10 +2123,11 @@ async def flush_temp_workspace(
     storage = get_storage_backend()
     selected_paths = [normalize_workspace_path(path) for path in temp_workspace.publish_paths]
     manifest = temp_workspace.manifest
-    cas_files, overwrite_files, derived_paths = _collect_temp_workspace_files(
+    cas_files, overwrite_files, derived_paths, git_repos = _collect_temp_workspace_files(
         temp_workspace.root,
         selected_paths,
     )
+    cas_files.update(await _create_git_bundles(temp_workspace.root, git_repos))
     local_files = {**cas_files, **overwrite_files}
     run_id = sandbox_run_scope_id.get().strip() or None
 
@@ -2211,8 +2302,9 @@ async def flush_temp_workspace(
             if rel_path in local_files:
                 continue
             publish_class = classify_publish_path(rel_path)
-            if publish_class == "derived":
-                # Derived history must never be reverse-deleted from storage.
+            if publish_class in ("derived", "git_metadata"):
+                # Derived history and git metadata must never be reverse-deleted
+                # from storage (git metadata is restored from a single bundle).
                 logger.info(
                     "[WorkspaceFlushDerivedSkipped] run_id={} agent_id={} path={} "
                     "operation=delete",
@@ -2434,10 +2526,11 @@ async def _workspace_candidate_changes(
     """Freeze the publishable Sandbox delta before the temporary copy is released."""
     storage = get_storage_backend()
     selected_paths = [normalize_workspace_path(path) for path in temp_workspace.publish_paths]
-    cas_files, overwrite_files, _derived_paths = _collect_temp_workspace_files(
+    cas_files, overwrite_files, _derived_paths, git_repos = _collect_temp_workspace_files(
         temp_workspace.root,
         selected_paths,
     )
+    cas_files.update(await _create_git_bundles(temp_workspace.root, git_repos))
     local_files = {**cas_files, **overwrite_files}
     changes: list[CandidateChange] = []
 
@@ -2505,8 +2598,8 @@ async def _workspace_candidate_changes(
             continue
         if rel_path not in local_files:
             publish_class = classify_publish_path(rel_path)
-            if publish_class == "derived":
-                # Derived history is never reverse-deleted from storage.
+            if publish_class in ("derived", "git_metadata"):
+                # Derived history and git metadata are never reverse-deleted.
                 continue
             if publish_class == "artifact":
                 # LWW symmetric: an unconditional delete candidate.
@@ -2608,24 +2701,29 @@ async def _recover_workspace_candidate(
 def _collect_temp_workspace_files(
     root: Path,
     selected_paths: list[str],
-) -> tuple[dict[str, Path], dict[str, Path], list[str]]:
+) -> tuple[dict[str, Path], dict[str, Path], list[str], list[Path]]:
     """Collect publishable files split by write semantics.
 
-    Returns ``(cas_files, overwrite_files, derived_paths)``:
+    Returns ``(cas_files, overwrite_files, derived_paths, git_repos)``:
     - ``cas_files``: L1 sources, published with CAS conditions;
     - ``overwrite_files``: L3 ``build/outputs`` artifacts, published
       last-write-wins;
     - ``derived_paths``: L2 derived outputs, excluded from both enumerations
-      (never written and never deleted — storage history stays as-is).
+      (never written and never deleted — storage history stays as-is);
+    - ``git_repos``: repo roots whose ``.git`` subtree is pruned here and
+      packed into a single git bundle on publish instead of per-file CAS.
     """
     cas_files: dict[str, Path] = {}
     overwrite_files: dict[str, Path] = {}
     derived_paths: list[str] = []
+    git_repos: list[Path] = []
     root_resolved = root.resolve()
 
     def classify_and_put(rel: str, local_path: Path) -> None:
         publish_class = classify_publish_path(rel)
-        if publish_class == "derived":
+        if publish_class in ("derived", "git_metadata"):
+            # git_metadata is only reachable for a ``.git`` *file* (gitdir
+            # pointer); real ``.git`` dirs are pruned by os.walk below.
             derived_paths.append(rel)
         elif publish_class == "artifact":
             overwrite_files[rel] = local_path
@@ -2635,25 +2733,84 @@ def _collect_temp_workspace_files(
     for selected in selected_paths:
         if not selected:
             continue
-        target = (root_resolved / selected).resolve()
-        if not target.is_relative_to(root_resolved):
+        selected_path = root_resolved / selected
+        if selected_path.is_symlink():
             continue
-        if (root_resolved / selected).is_symlink():
+        if not selected_path.exists():
             continue
-        if target.is_file():
-            classify_and_put(normalize_workspace_path(selected), target)
+        if selected_path.is_file():
+            classify_and_put(normalize_workspace_path(selected), selected_path)
             continue
-        if not target.exists() or not target.is_dir():
+        # os.walk (followlinks=False) prunes ``.git`` subtrees from descent and
+        # records the enclosing repo root, so ``.git/**`` is never published
+        # per-file and the repo is packed into a bundle instead.
+        for dirpath, dirnames, filenames in os.walk(selected_path):
+            if ".git" in dirnames:
+                dirnames.remove(".git")
+                repo_root = (Path(dirpath) / ".git").parent
+                if repo_root not in git_repos:
+                    git_repos.append(repo_root)
+            for name in filenames:
+                if name == ".git.bundle":
+                    continue  # regenerated fresh on every publish
+                local_path = Path(dirpath) / name
+                if local_path.is_symlink():
+                    continue
+                resolved = local_path.resolve()
+                if not resolved.is_relative_to(selected_path):
+                    continue
+                rel = resolved.relative_to(root_resolved).as_posix()
+                classify_and_put(normalize_workspace_path(rel), local_path)
+    return cas_files, overwrite_files, derived_paths, git_repos
+
+
+async def _create_git_bundles(
+    root: Path,
+    git_repos: list[Path],
+) -> dict[str, Path]:
+    """Pack each repo's ``.git`` into one git bundle (storage path → local file).
+
+    Returns a dict the flush/CAS loop merges into ``cas_files``. The bundle
+    lives in a scratch dir outside the repo working tree (so it never shows up
+    in ``git status``) and is regenerated fresh on every publish; it holds refs
+    + objects only — never ``.git/config`` — so credentials stay out of durable
+    storage by construction.
+    """
+    bundle_files: dict[str, Path] = {}
+    if not git_repos:
+        return bundle_files
+    bundle_dir = root / ".clawith-git-bundles"
+    bundle_dir.mkdir(parents=True, exist_ok=True)
+    root_resolved = root.resolve()
+    for repo in git_repos:
+        try:
+            repo_rel = repo.resolve().relative_to(root_resolved).as_posix()
+        except ValueError:
             continue
-        for path in target.rglob("*"):
-            if path.is_symlink() or not path.is_file():
-                continue
-            resolved = path.resolve()
-            if not resolved.is_relative_to(target):
-                continue
-            rel = resolved.relative_to(root_resolved).as_posix()
-            classify_and_put(normalize_workspace_path(rel), path)
-    return cas_files, overwrite_files, derived_paths
+        try:
+            data = await gitlab_workspace.create_git_bundle(repo)
+        except Exception as exc:  # noqa: BLE001 — bundling must not fail a flush
+            logger.warning(
+                "[GitLabBundle] create failed repo={} error_type={}",
+                repo_rel,
+                type(exc).__name__,
+            )
+            continue
+        if data is None:
+            continue
+        if len(data) > TOOL_MATERIALIZE_GIT_BUNDLE_MAX_BYTES:
+            logger.warning(
+                "[GitLabBundle] create skipped oversize repo={} size={}",
+                repo_rel,
+                len(data),
+            )
+            continue
+        bundle_rel = f"{repo_rel}/.git.bundle"
+        local = bundle_dir / bundle_rel
+        local.parent.mkdir(parents=True, exist_ok=True)
+        local.write_bytes(data)
+        bundle_files[normalize_workspace_path(bundle_rel)] = local
+    return bundle_files
 
 
 # ─── Tool Executors ─────────────────────────────────────────────

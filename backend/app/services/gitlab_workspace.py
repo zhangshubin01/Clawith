@@ -25,6 +25,7 @@ from __future__ import annotations
 import asyncio
 import re
 import shutil
+import tempfile
 import uuid
 from pathlib import Path
 from urllib.parse import urlparse
@@ -324,9 +325,9 @@ def _iter_repo_copies(root: Path):
             yield entry
 
 
-async def _load_binding_credential(agent_id: uuid.UUID) -> tuple[str, str, str, str, str] | None:
-    """Load ``(pat, base_url, repo_name, agent_name, agent_email)`` from the
-    agent's GitLab binding; ``None`` when there is nothing injectable.
+async def _load_binding_credential(agent_id: uuid.UUID) -> tuple[str, str, str, str, str, str] | None:
+    """Load ``(pat, base_url, repo_name, agent_name, agent_email, project_path)``
+    from the agent's GitLab binding; ``None`` when there is nothing injectable.
 
     Never raises: credential injection is best-effort and must not affect the
     workspace materialization path.
@@ -363,7 +364,7 @@ async def _load_binding_credential(agent_id: uuid.UUID) -> tuple[str, str, str, 
             agent = agent_result.scalar_one_or_none()
             agent_name = (agent.name if agent else "") or str(agent_id)
             agent_email = f"agent-{agent_id.hex[:8]}@clawith.local"
-            return pat, base_url, repo_name, agent_name, agent_email
+            return pat, base_url, repo_name, agent_name, agent_email, project_path
     except Exception:  # noqa: BLE001 — best-effort credential lookup
         logger.debug("[GitLabBinding] inject credential lookup failed agent={}", agent_id)
         return None
@@ -396,7 +397,7 @@ async def inject_credentials_into_temp_workspace(
         cred = await _load_binding_credential(agent_id)
         if cred is None:
             return False
-        pat, base_url, repo_name, agent_name, agent_email = cred
+        pat, base_url, repo_name, agent_name, agent_email, _project_path = cred
         target = next((c for c in candidates if c.name == repo_name), None)
         if target is None:
             return False
@@ -407,6 +408,121 @@ async def inject_credentials_into_temp_workspace(
         return True
     except Exception as exc:  # noqa: BLE001 — materialization must never fail on creds
         logger.debug("[GitLabBinding] inject skipped agent={}: {}", agent_id, exc)
+        return False
+
+
+async def create_git_bundle(repo_dir: Path) -> bytes | None:
+    """Pack a repo's refs + objects into a single git bundle (atomic publish unit).
+
+    Returns the bundle bytes, or ``None`` when the repo has no refs (empty repo,
+    nothing to persist). A bundle holds refs + objects only — never
+    ``.git/config`` — so credentials stay out of durable storage by construction
+    (no per-file redaction needed).
+    """
+    tmpdir = tempfile.mkdtemp(prefix="clawith-bundle-")
+    out = Path(tmpdir) / "repo.bundle"
+    try:
+        rc, _, err = await _run_git(
+            ["bundle", "create", str(out), "--all"],
+            cwd=repo_dir,
+            timeout=_DEFAULT_GIT_TIMEOUT_S,
+        )
+        if rc != 0:
+            # "Refusing to create empty bundle" — an empty repo has nothing to
+            # persist; it is re-initialized / cloned from remote on restore.
+            logger.debug(
+                "[GitLabBundle] bundle create skipped repo={}: {}",
+                repo_dir,
+                err.strip()[:200],
+            )
+            return None
+        return out.read_bytes()
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+async def _resolve_bundle_branch(repo_dir: Path) -> str | None:
+    """Map the bundle's captured HEAD commit back to a local branch name."""
+    rc, out, _ = await _run_git(["rev-parse", "refs/clawith-bundle-head"], cwd=repo_dir)
+    if rc != 0:
+        return None
+    head_commit = out.strip()
+    rc, out, _ = await _run_git(
+        ["for-each-ref", "--format=%(refname:short)", "--points-at", head_commit, "refs/heads/*"],
+        cwd=repo_dir,
+    )
+    if rc != 0:
+        return None
+    for line in out.splitlines():
+        if line.strip():
+            return line.strip()
+    return None
+
+
+async def restore_git_metadata_from_bundle(
+    repo_dir: Path,
+    bundle_path: Path,
+    agent_id: uuid.UUID,
+) -> bool:
+    """Restore a repo's ``.git`` from a git bundle, then point origin at the real
+    remote and best-effort reconcile.
+
+    The bundle carries refs + objects but no config, so this rebuilds ``.git``
+    in-place without touching the already-materialized working tree (a mixed
+    reset keeps uncommitted edits as unstaged modifications). Best-effort and
+    never raises — a failure leaves the repo without ``.git`` and the agent
+    falls back to ``GITLAB_GUIDE.md`` self-init.
+    """
+    if not bundle_path.is_file():
+        return False
+    cred = await _load_binding_credential(agent_id)
+    if cred is None:
+        return False
+    pat, base_url, _repo_name, _agent_name, _agent_email, project_path = cred
+    clone_url = f"{base_url}/{project_path}.git"
+    rewrite = _credential_rewrite(base_url, pat)
+    prefix = _base_prefix(base_url)
+    try:
+        # 1) import objects + local branches/tags; capture the checked-out HEAD.
+        rc, _, err = await _run_git(["init", "-q", "-b", "__clawith_restore__"], cwd=repo_dir)
+        if rc != 0:
+            logger.warning("[GitLabBundle] restore init failed repo={}: {}", repo_dir, err.strip()[:200])
+            return False
+        rc, _, err = await _run_git(
+            [
+                "fetch", "-q", str(bundle_path),
+                "+refs/heads/*:refs/heads/*",
+                "+refs/tags/*:refs/tags/*",
+                "HEAD:refs/clawith-bundle-head",
+            ],
+            cwd=repo_dir,
+        )
+        if rc != 0:
+            logger.warning("[GitLabBundle] restore fetch failed repo={}: {}", repo_dir, err.strip()[:200])
+            return False
+        branch = await _resolve_bundle_branch(repo_dir)
+        if branch:
+            await _run_git(["symbolic-ref", "HEAD", f"refs/heads/{branch}"], cwd=repo_dir)
+            await _run_git(["reset", "-q", "--mixed", branch], cwd=repo_dir)
+        await _run_git(["update-ref", "-d", "refs/clawith-bundle-head"], cwd=repo_dir)
+        await _run_git(["branch", "-q", "-D", "__clawith_restore__"], cwd=repo_dir)
+        # 2) point origin at the real remote (the bundle carries no config).
+        rc, _, _ = await _run_git(["remote", "get-url", "origin"], cwd=repo_dir, pat=pat)
+        if rc != 0:
+            await _run_git(["remote", "add", "origin", clone_url], cwd=repo_dir, pat=pat)
+        else:
+            await _run_git(["remote", "set-url", "origin", clone_url], cwd=repo_dir, pat=pat)
+        # 3) best-effort reconcile remote-tracking refs (bundle is a cold cache;
+        #    the inline rewrite authenticates before the persistent one exists).
+        await _run_git(
+            ["-c", f"url.{rewrite}.insteadOf={prefix}", "fetch", "origin"],
+            cwd=repo_dir,
+            pat=pat,
+            timeout=120,
+        )
+        return True
+    except Exception as exc:  # noqa: BLE001 — materialization must never fail on git restore
+        logger.debug("[GitLabBundle] restore skipped repo={}: {}", repo_dir, exc)
         return False
 
 

@@ -12,13 +12,15 @@ from app.services.workspace_collaboration import normalize_workspace_path
 WorkspaceMode = Literal["merge", "isolated_output"]
 PublicationOwner = Literal["gateway", "workspace_cas"]
 PublicationConflictMode = Literal["fail", "overwrite"]
-PublishClass = Literal["source", "derived", "artifact"]
+PublishClass = Literal["source", "derived", "artifact", "git_metadata"]
 
 # Derived outputs never published (segment-level, case-sensitive blacklist).
-# ``.git`` is deliberately absent: git metadata is source-grade on both the
-# materialize and publish sides (credential redaction applies on publish, see
-# ``redact_git_secrets``). ``_exec_tmp`` also matches a ``_exec_tmp``-prefixed
-# file basename, keeping the legacy temp-file exclusion semantics.
+# ``.git`` is deliberately absent: git metadata is classified ``git_metadata``
+# and published as a single git bundle (see ``classify_publish_path``), never
+# per-file — so per-file CAS corruption and credential leakage into the durable
+# layer are both impossible by construction. ``_exec_tmp`` also matches a
+# ``_exec_tmp``-prefixed file basename, keeping the legacy temp-file exclusion
+# semantics.
 DERIVED_SEGMENTS = frozenset({"build", ".gradle", "node_modules", "target", "dist", "__pycache__", "_exec_tmp"})
 _EXEC_TMP_PREFIX = "_exec_tmp"
 # Pure credential files never enter CAS (basename-level, case-sensitive).
@@ -56,15 +58,21 @@ def classify_publish_path(rel_path: str) -> PublishClass:
     """Classify one workspace-relative publish path (pure segment blacklist).
 
     Segment-level, case-sensitive matching:
-    - any segment in ``DERIVED_SEGMENTS`` (or an ``_exec_tmp``-prefixed
-      basename) marks the path derived;
+    - any ``.git`` segment marks the path ``git_metadata`` — git metadata is
+      never published per-file; it is packed into a single git bundle instead
+      (credential-free by construction, since a bundle holds refs + objects
+      but no ``.git/config``);
     - a ``build`` segment immediately followed by an ``outputs`` segment marks
       the ``**/build/outputs/**`` artifact exception, which wins over derived;
+    - any segment in ``DERIVED_SEGMENTS`` (or an ``_exec_tmp``-prefixed
+      basename) marks the path derived;
     - a basename in ``_GIT_CREDENTIAL_FILES`` (``.git-credentials``/``.netrc``)
       marks the path derived, keeping pure credential files out of CAS.
-    Everything else is a CAS-protected source path, including ``.git`` metadata.
+    Everything else is a CAS-protected source path.
     """
     parts = [part for part in str(rel_path).replace("\\", "/").split("/") if part not in {"", "."}]
+    if ".git" in parts:
+        return "git_metadata"
     for index, part in enumerate(parts):
         if part == "build" and index + 1 < len(parts) and parts[index + 1] == "outputs":
             return "artifact"
