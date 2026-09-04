@@ -3392,8 +3392,8 @@ async def _execute_code_with_workspace_outcome(
         # 导致发布/reconciliation 阶段的精确抛出点不可定位。补带上下文的异常日志，
         # 让下一次失败直接暴露根因（如 root 属主 build 目录 EACCES）。
         logger.exception(
-            "[SandboxPublicationUnhandled] run_id=%s agent_id=%s session_id=%s "
-            "tenant_id=%s tool=%s error_type=%s execution_started=%s publish_paths=%s",
+            "[SandboxPublicationUnhandled] run_id={} agent_id={} session_id={} "
+            "tenant_id={} tool={} error_type={} execution_started={} publish_paths={}",
             run_id,
             agent_id,
             session_id,
