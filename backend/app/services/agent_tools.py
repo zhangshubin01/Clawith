@@ -106,6 +106,7 @@ from app.services.sandbox.local.run_workspace import (
     refresh_run_workspace_path,
     use_run_workspace,
 )
+from app.services.sandbox.local.shared import refresh_sandbox_staging_path
 from app.services.sandbox.run_scope import sandbox_run_scope_id
 from app.services.sandbox.config import (
     ANDROID_BUILD_MAX_TIMEOUT_SECONDS,
@@ -2462,6 +2463,20 @@ async def _refresh_run_workspace_after_direct_write(
     except Exception as exc:
         logger.warning(
             "[RunWorkspaceRefreshFailed] run_id={} path={} error_type={}",
+            run_id,
+            rel_path,
+            type(exc).__name__,
+        )
+    # Direction 3a: reflect the source write into the live sandbox staging tree
+    # (B), which execute_code's one-shot clone never sees again. Narrow sync —
+    # source-class paths only; derived/artifact/git_metadata stay out of B.
+    if classify_publish_path(rel_path) != "source":
+        return
+    try:
+        await refresh_sandbox_staging_path(run_id, rel_path, data)
+    except Exception as exc:
+        logger.warning(
+            "[SandboxStagingRefreshFailed] run_id={} path={} error_type={}",
             run_id,
             rel_path,
             type(exc).__name__,

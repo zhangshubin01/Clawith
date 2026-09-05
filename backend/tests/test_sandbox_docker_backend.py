@@ -187,6 +187,37 @@ async def test_persistent_session_reused_for_same_run(backend, fake_client, tmp_
 
 
 @pytest.mark.asyncio
+async def test_persistent_session_registers_and_close_unregisters_staging(
+    backend, fake_client, tmp_path: Path
+) -> None:
+    """§7.1: the docker backend exposes its live staging tree to the direct-write
+    sync primitive (register on start, unregister on close)."""
+    from app.services.sandbox.local.shared import refresh_sandbox_staging_path
+
+    run_id = "run-reg"
+    kwargs = {
+        "run_id": run_id,
+        "agent_id": None,
+        "session_id": None,
+        "workspace_mode": "merge",
+        "publish_paths": None,
+    }
+    r = await backend.execute("print('x')", "python", timeout=30, work_dir=str(tmp_path), **kwargs)
+    assert r.success, r.error
+    session = DockerSessionBackend._run_sessions[run_id]
+
+    # The session exposed its staging tree: a direct write reflects into it.
+    await refresh_sandbox_staging_path(run_id, "workspace/newfile.txt", b"hello")
+    assert (session.staging_path / "workspace" / "newfile.txt").read_bytes() == b"hello"
+
+    await DockerSessionBackend.close_run(run_id)
+    # Unregistered on close: a post-close refresh is a no-op and must not
+    # recreate the already-cleaned staging directory.
+    await refresh_sandbox_staging_path(run_id, "workspace/newfile.txt", b"ignored")
+    assert not session.staging_path.exists()
+
+
+@pytest.mark.asyncio
 async def test_dead_container_triggers_session_rebuild(backend, fake_client, tmp_path: Path) -> None:
     kwargs = {
         "run_id": "run-dead",

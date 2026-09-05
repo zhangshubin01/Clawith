@@ -32,7 +32,9 @@ from app.services.sandbox.security import check_code_safety
 from app.services.sandbox.local.shared import (
     clone_workspace_to_staging,
     ensure_workspace_venv,
+    register_sandbox_staging,
     resolve_proxy_env,
+    unregister_sandbox_staging,
     verify_and_merge_outputs,
     watch_pip_requests,
 )
@@ -181,6 +183,7 @@ class DockerSessionBackend(BaseSandboxBackend):
         container behind when the surrounding task is cancelled.
         """
         session = cls._run_sessions.pop(run_id, None)
+        unregister_sandbox_staging(run_id)
         if session is None:
             return
         session.pip_stop_event.set()
@@ -392,6 +395,13 @@ class DockerSessionBackend(BaseSandboxBackend):
             lock=asyncio.Lock(),
         )
         DockerSessionBackend._run_sessions[run_id] = persistent
+        register_sandbox_staging(
+            run_id,
+            persistent.staging_path,
+            persistent.lock,
+            workspace_mode=persistent.workspace_mode,
+            publish_paths=persistent.publish_paths,
+        )
         return persistent
 
     async def _container_alive(self, session: _PersistentDockerSession) -> bool:

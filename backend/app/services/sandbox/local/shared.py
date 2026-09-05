@@ -8,6 +8,7 @@ them directly.
 """
 
 import asyncio
+from dataclasses import dataclass
 import os
 import signal
 import shutil
@@ -565,3 +566,115 @@ def clone_workspace_to_staging(source: Path, dest: Path) -> None:
             shutil.copy2(item, dest / item.name)
         elif item.is_dir():
             shutil.copytree(item, dest / item.name, symlinks=True, dirs_exist_ok=True)
+
+
+# ── Run-scoped staging sync (direction 3a) ──────────────────────────────────
+#
+# The sandbox staging tree (B) is a one-shot clone of the run workspace (A) at
+# the first execute_code; direct-write tools (edit_file / write_file / ...)
+# update storage + A but never B, so the sandbox's git view stays stale-clean.
+# This registry lets the local backends expose their live staging tree so a
+# direct write can be reflected into B synchronously, keeping B a live derived
+# view of storage (single authority).
+
+
+@dataclass(frozen=True, slots=True)
+class _StagingRegistryEntry:
+    """One run's live staging tree as exposed for direct-write refresh.
+
+    Lifecycle is tied 1:1 to the owning backend session: registered at
+    ``_start_persistent_session`` and forgotten at ``close_run`` (both keep it
+    in lockstep with ``_run_sessions``). The registry is in-memory, so it dies
+    with the process — an orphaned entry from a crashed process never outlives
+    it, and within a live process an entry is only ever removed by the same
+    owner that added it. ``workspace_mode`` + ``publish_paths`` carry the
+    sandbox's write scope so isolated_output runs sync only their single
+    publish path (never the read-only remainder of the staging tree).
+    """
+
+    staging_path: Path
+    lock: asyncio.Lock
+    workspace_mode: str
+    publish_paths: tuple[str, ...]
+
+
+_sandbox_staging_registry: dict[str, _StagingRegistryEntry] = {}
+
+
+def register_sandbox_staging(
+    run_id: str,
+    staging_path: Path,
+    lock: asyncio.Lock,
+    *,
+    workspace_mode: str = "merge",
+    publish_paths: tuple[str, ...] = (),
+) -> None:
+    """Expose one run's live staging tree for direct-write refresh."""
+    _sandbox_staging_registry[run_id] = _StagingRegistryEntry(
+        staging_path=staging_path,
+        lock=lock,
+        workspace_mode=workspace_mode,
+        publish_paths=tuple(publish_paths),
+    )
+
+
+def unregister_sandbox_staging(run_id: str) -> None:
+    """Forget a run's staging tree (close_run teardown)."""
+    _sandbox_staging_registry.pop(run_id, None)
+
+
+def _rel_path_within_any(rel_path: str, roots: tuple[str, ...]) -> bool:
+    """Segment-level prefix match against the publish paths (no restriction
+    when ``roots`` is empty, mirroring ``classify_publish_path``'s normalization)."""
+    if not roots:
+        return True
+    norm = [p for p in str(rel_path).replace("\\", "/").split("/") if p not in {"", "."}]
+    for root in roots:
+        root_parts = [p for p in str(root).replace("\\", "/").split("/") if p not in {"", "."}]
+        if norm[: len(root_parts)] == root_parts:
+            return True
+    return False
+
+
+async def refresh_sandbox_staging_path(run_id: str, rel_path: str, data: bytes | None) -> None:
+    """Reflect one direct storage write into the run's sandbox staging tree.
+
+    Best-effort by design (mirrors ``refresh_run_workspace_path``): a missing
+    run (sandbox not started, or already closed) is a no-op — the next
+    ``clone_workspace_to_staging`` re-materializes A, which already carries the
+    write. ``data=None`` marks a deletion. Paths that escape the staging root
+    (``..`` or a sandbox-planted symlink) are refused. In ``isolated_output``
+    mode only the run's single publish path is written — the read-only
+    remainder of the staging tree is left untouched.
+    """
+    entry = _sandbox_staging_registry.get(run_id)
+    if entry is None:
+        logger.info("[SandboxStagingRefresh] skipped run_id={} path={}", run_id, rel_path)
+        return
+    if entry.workspace_mode == "isolated_output" and not _rel_path_within_any(
+        rel_path, entry.publish_paths
+    ):
+        logger.info(
+            "[SandboxStagingRefresh] skipped non-publish path run_id={} path={} mode={}",
+            run_id,
+            rel_path,
+            entry.workspace_mode,
+        )
+        return
+    async with entry.lock:
+        target = entry.staging_path / rel_path
+        if _has_symlink_component(target, entry.staging_path):
+            logger.warning(
+                "[SandboxStagingRefresh] traversal rejected run_id={} path={}",
+                run_id,
+                rel_path,
+            )
+            return
+        if data is None:
+            if target.is_dir():
+                shutil.rmtree(target)
+            elif target.exists():
+                target.unlink()
+        else:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(data)

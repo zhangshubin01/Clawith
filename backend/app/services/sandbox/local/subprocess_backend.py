@@ -23,7 +23,9 @@ from app.services.sandbox.local.shared import (
     clone_workspace_to_staging,
     ensure_workspace_venv,
     fix_pip_shebangs,
+    register_sandbox_staging,
     terminate_and_reap_process,
+    unregister_sandbox_staging,
     verify_and_merge_outputs,
     watch_pip_requests,
 )
@@ -71,6 +73,7 @@ class SubprocessBackend(BaseSandboxBackend):
     async def close_run(cls, run_id: str) -> None:
         """Stop and remove the bubblewrap process owned by one Agent loop."""
         session = cls._run_sessions.pop(run_id, None)
+        unregister_sandbox_staging(run_id)
         if session is None:
             return
         session.pip_stop_event.set()
@@ -466,6 +469,13 @@ class SubprocessBackend(BaseSandboxBackend):
             lock=asyncio.Lock(),
         )
         SubprocessBackend._run_sessions[run_id] = persistent
+        register_sandbox_staging(
+            run_id,
+            persistent.staging_path,
+            persistent.lock,
+            workspace_mode=persistent.workspace_mode,
+            publish_paths=persistent.publish_paths,
+        )
         return persistent
 
     async def _persistent_session(

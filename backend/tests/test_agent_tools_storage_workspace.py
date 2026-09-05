@@ -1,5 +1,6 @@
 import asyncio
 from contextlib import asynccontextmanager
+import subprocess
 from typing import cast
 from unittest.mock import AsyncMock, Mock
 import uuid
@@ -1661,3 +1662,165 @@ async def test_temp_workspace_conflict_outcome_carries_forensic_metadata(monkeyp
             "current_version": "2",
         }
     ]
+
+
+# --- Direction 3a: direct source write → sandbox staging sync (Seams B & C) ---
+
+
+@pytest.mark.asyncio
+async def test_edit_file_direct_write_refreshes_sandbox_staging(monkeypatch, tmp_path):
+    """Seam B: a source-class direct write reflects into the sandbox staging tree.
+
+    The registry primitive (Seam A) is already covered in
+    tests/test_sandbox_staging_refresh.py; here we assert the agent_tools wiring
+    calls it with the run id, source path and the post-edit bytes.
+    """
+    agent_id = uuid.uuid4()
+    storage_key = f"{agent_id}/workspace/notes.txt"
+    storage = MemoryStorageBackend({storage_key: b"# Notes\nline one\n"})
+    _patch_storage(monkeypatch, storage)
+    _patch_workspace_db(monkeypatch)
+
+    run_id, run_ws = await _materialize_run_workspace(agent_id, ["workspace"])
+    token = sandbox_run_scope_id.set(run_id)
+    staging_sync = AsyncMock()
+    monkeypatch.setattr(agent_tools, "refresh_sandbox_staging_path", staging_sync)
+    try:
+        result = await agent_tools._execute_workspace_mutation(
+            "edit_file",
+            {"path": "workspace/notes.txt", "old_string": "line one", "new_string": "line ONE"},
+            agent_id=agent_id,
+            base_dir=tmp_path / str(agent_id),
+            session_id=None,
+        )
+        assert "Replaced 1 occurrence(s)" in result
+        staging_sync.assert_awaited_once_with(
+            run_id, "workspace/notes.txt", b"# Notes\nline ONE\n"
+        )
+    finally:
+        sandbox_run_scope_id.reset(token)
+        await close_run_workspace(run_id)
+
+
+@pytest.mark.asyncio
+async def test_delete_file_direct_delete_refreshes_sandbox_staging_with_none(monkeypatch, tmp_path):
+    """Seam B deletion: a direct delete reaches the staging tree as ``data=None``."""
+    agent_id = uuid.uuid4()
+    storage_key = f"{agent_id}/workspace/notes.txt"
+    storage = MemoryStorageBackend({storage_key: b"# Notes\n"})
+    _patch_storage(monkeypatch, storage)
+    _patch_workspace_db(monkeypatch)
+
+    run_id, run_ws = await _materialize_run_workspace(agent_id, ["workspace"])
+    token = sandbox_run_scope_id.set(run_id)
+    staging_sync = AsyncMock()
+    monkeypatch.setattr(agent_tools, "refresh_sandbox_staging_path", staging_sync)
+    try:
+        result = await agent_tools._execute_workspace_mutation(
+            "delete_file",
+            {"path": "workspace/notes.txt"},
+            agent_id=agent_id,
+            base_dir=tmp_path / str(agent_id),
+            session_id=None,
+        )
+        assert "Deleted" in result
+        staging_sync.assert_awaited_once_with(run_id, "workspace/notes.txt", None)
+    finally:
+        sandbox_run_scope_id.reset(token)
+        await close_run_workspace(run_id)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "rel_path",
+    [
+        "workspace/build/outputs/app.apk",  # artifact
+        "workspace/__pycache__/x.pyc",      # derived
+        "workspace/.git/config",            # git_metadata
+    ],
+)
+async def test_direct_write_skips_sandbox_staging_for_non_source_paths(monkeypatch, rel_path):
+    """Seam B (narrow sync): only source-class writes reach the staging tree.
+
+    artifact/derived/git_metadata paths still refresh the run workspace (A) as
+    before, but never the sandbox staging tree (B).
+    """
+    agent_id = uuid.uuid4()
+    storage = MemoryStorageBackend({f"{agent_id}/{rel_path}": b"content"})
+    _patch_storage(monkeypatch, storage)
+    staging_sync = AsyncMock()
+    monkeypatch.setattr(agent_tools, "refresh_sandbox_staging_path", staging_sync)
+
+    await agent_tools._refresh_run_workspace_after_direct_write(
+        agent_id,
+        rel_path,
+        run_id=str(uuid.uuid4()),
+    )
+    staging_sync.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_edit_file_propagates_to_sandbox_staging_git_view(monkeypatch, tmp_path):
+    """Seam C (end-to-end): an edit lands in the staging tree so the sandbox's
+    git view stops being clean — the 764eb591 branch-switch loop root cause.
+
+    Simulates the backend's one-shot clone A → B, then edits through the full
+    direct-write path and asserts ``git status --porcelain`` in B shows `` M``.
+    """
+    from app.services.sandbox.local.shared import (
+        clone_workspace_to_staging,
+        register_sandbox_staging,
+        unregister_sandbox_staging,
+    )
+
+    agent_id = uuid.uuid4()
+    storage_key = f"{agent_id}/workspace/notes.txt"
+    storage = MemoryStorageBackend({storage_key: b"# Notes\nline one\n"})
+    _patch_storage(monkeypatch, storage)
+    _patch_workspace_db(monkeypatch)
+
+    run_id, run_ws = await _materialize_run_workspace(agent_id, ["workspace"])
+    token = sandbox_run_scope_id.set(run_id)
+    try:
+        # A real git repo committed in the run workspace (the agent's git ops).
+        repo = run_ws.root / "workspace"
+        for args in (
+            ["git", "init", "-q"],
+            ["git", "-C", str(repo), "config", "user.email", "test@example.com"],
+            ["git", "-C", str(repo), "config", "user.name", "test"],
+            ["git", "-C", str(repo), "add", "-A"],
+            ["git", "-C", str(repo), "commit", "-qm", "init"],
+        ):
+            subprocess.run(args, cwd=repo, check=True, capture_output=True)
+
+        # Backend one-shot clone A → B, then expose B via the registry.
+        staging = tmp_path / "staging"
+        clone_workspace_to_staging(run_ws.root, staging)
+        lock = asyncio.Lock()
+        register_sandbox_staging(run_id, staging, lock)
+        try:
+            assert subprocess.run(
+                ["git", "-C", str(staging / "workspace"), "status", "--porcelain"],
+                capture_output=True, text=True, check=True,
+            ).stdout.strip() == ""  # clean before the edit
+
+            result = await agent_tools._execute_workspace_mutation(
+                "edit_file",
+                {"path": "workspace/notes.txt", "old_string": "line one", "new_string": "line ONE"},
+                agent_id=agent_id,
+                base_dir=tmp_path / str(agent_id),
+                session_id=None,
+            )
+            assert "Replaced 1 occurrence(s)" in result
+
+            assert (staging / "workspace" / "notes.txt").read_bytes() == b"# Notes\nline ONE\n"
+            status = subprocess.run(
+                ["git", "-C", str(staging / "workspace"), "status", "--porcelain"],
+                capture_output=True, text=True, check=True,
+            ).stdout
+            assert " M notes.txt" in status
+        finally:
+            unregister_sandbox_staging(run_id)
+    finally:
+        sandbox_run_scope_id.reset(token)
+        await close_run_workspace(run_id)

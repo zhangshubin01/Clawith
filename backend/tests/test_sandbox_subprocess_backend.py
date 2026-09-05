@@ -225,6 +225,52 @@ def test_isolated_bwrap_uses_workspace_tool_paths_and_writable_copy(monkeypatch,
 
 
 @pytest.mark.asyncio
+async def test_start_persistent_session_registers_staging(monkeypatch, tmp_path: Path) -> None:
+    """§7.1: the subprocess backend exposes its staging tree to the direct-write
+    sync primitive (register on start)."""
+    from app.services.sandbox.local.shared import (
+        _sandbox_staging_registry,
+        refresh_sandbox_staging_path,
+        unregister_sandbox_staging,
+    )
+
+    backend = SubprocessBackend(SandboxConfig())
+    run_id = str(uuid.uuid4())
+
+    class _FakeProc:
+        returncode = None
+
+    async def _fake_exec(*args, **kwargs):
+        return _FakeProc()
+
+    async def _fake_watch(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _fake_exec)
+    monkeypatch.setattr(backend, "_watch_pip_requests", _fake_watch)
+    monkeypatch.setattr(backend, "_build_bwrap_command", lambda *a, **k: ["/bin/echo"])
+
+    session = await backend._start_persistent_session(
+        run_id=run_id,
+        work_path=tmp_path / "work",
+        venv_path=tmp_path / "venv",
+        agent_id=None,
+        session_id=None,
+        workspace_mode="merge",
+        publish_paths=None,
+    )
+    try:
+        assert session is not None
+        assert run_id in _sandbox_staging_registry
+        await refresh_sandbox_staging_path(run_id, "workspace/newfile.txt", b"hello")
+        assert (session.staging_path / "workspace" / "newfile.txt").read_bytes() == b"hello"
+    finally:
+        unregister_sandbox_staging(run_id)
+        SubprocessBackend._run_sessions.pop(run_id, None)
+        session.temp_dir.cleanup()
+
+
+@pytest.mark.asyncio
 async def test_persistent_bwrap_session_is_reused_for_same_agent_loop(
     monkeypatch,
     tmp_path: Path,
