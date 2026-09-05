@@ -1012,6 +1012,49 @@ def test_compaction_instruction_forbids_corrective_rewrite_of_authorized_inputs(
     assert "未获授权" in instruction
 
 
+def test_compaction_instruction_treats_completed_actions_as_settled_ledger_facts() -> None:
+    """completed_actions entries are settled ledger facts, not speculation.
+
+    Regression contract for run 764eb591: the summary/resume model opposed a
+    "DONE" entry (a settled ledger fact) against a later read showing old
+    content and declared its own completed work "maybe not done", then redid it
+    from scratch 19 times. The instruction must hard-require the triple
+    semantics: DONE = settled ledger fact; read does not contradict a settled
+    DONE; and a conflict is annotated for verification — never claimed as
+    not-done / hallucination / from-scratch, never silently sided with either.
+    """
+    instruction = _COMPACTION_INSTRUCTION
+
+    # DONE = settled ledger fact, not a guess or hallucination.
+    assert "DONE = settled ledger fact" in instruction
+    # read of old content is a current-disk-state fact, not a contradiction.
+    assert "read does not contradict a settled DONE" in instruction
+    # a conflict is annotated for verification, never re-done from scratch.
+    assert "annotate" in instruction
+    assert "not-done" in instruction
+    assert "hallucination" in instruction
+    assert "from-scratch" in instruction
+
+
+def test_compaction_instruction_does_not_silently_side_with_done_or_read() -> None:
+    """The instruction must not re-introduce a silent taking-sides clause.
+
+    The corrected frame is "annotate the conflict, never claim not-done /
+    hallucination / from-scratch" — neither "believe DONE over read" nor
+    "believe read over DONE". Guard against the read-vs-pipeline taking-sides
+    sentence sneaking back in.
+    """
+    instruction = _COMPACTION_INSTRUCTION
+
+    # No silent "pipeline wins over read" (read-vs-pipeline taking sides).
+    assert "pipeline wins over read" not in instruction
+    # No silent "believe completed_actions" (以 completed_actions 为准).
+    assert "以 completed_actions 为准" not in instruction
+    # The old "prefer it over re-deriving outcomes from raw history" framing is
+    # gone — that was the read-vs-pipeline taking-sides sentence.
+    assert "prefer it over re-deriving" not in instruction
+
+
 @pytest.mark.asyncio
 async def test_shrink_failure_splits_batch_instead_of_repeating_same_prompt() -> None:
     state, context, tenant_id = _state(

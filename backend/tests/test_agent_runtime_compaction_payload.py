@@ -44,11 +44,11 @@ _COMPACTION_SECTION_HEADINGS = (
 )
 
 _PIPELINE_PRECEDENCE_SENTINELS = (
-    # completed_actions is the authoritative record
-    "The completed_actions pipeline in the request payload is the authoritative",
+    # completed_actions entries are settled ledger facts (DONE = settled fact)
+    "completed_actions lists settled ledger facts",
     # failed executions are retries, never new tasks
     "A FAILED tool execution in the history is a retry to be resolved, never a",
-    # stale summaries lose against the pipeline
+    # stale summaries lose against the pipeline (summary-vs-pipeline, kept)
     "the pipeline wins: correct the stale fact",
 )
 
