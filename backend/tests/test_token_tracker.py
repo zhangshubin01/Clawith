@@ -73,6 +73,22 @@ class TestExtractDeepSeekUsage:
         assert usage.cache_read_tokens == 6656
         assert usage.cache_miss_tokens == 41
 
+    def test_reasoning_tokens_from_completion_details(self) -> None:
+        """DeepSeek reasoning models report completion_tokens_details.reasoning_tokens;
+        it is captured separately while output_tokens keeps its inclusive meaning."""
+        usage = extract_token_usage(
+            {
+                "prompt_tokens": 100,
+                "completion_tokens": 200,
+                "total_tokens": 300,
+                "completion_tokens_details": {"reasoning_tokens": 150},
+            }
+        )
+        assert usage is not None
+        assert usage.reasoning_tokens == 150
+        # output_tokens unchanged — reasoning still counted for quota/billing.
+        assert usage.output_tokens == 200
+
 
 class TestExtractOpenAICompatibleUsage:
     def test_miss_derived_from_uncached_remainder(self) -> None:

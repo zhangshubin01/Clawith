@@ -312,6 +312,15 @@ def _map_usage(
             usage.input_tokens - usage.cache_read_tokens - usage.cache_creation_tokens,
             0,
         )
+    output_tokens = usage.output_tokens
+    reasoning_tokens = usage.reasoning_tokens
+    # DeepSeek reports reasoning inside completion_tokens (inclusive count). Split
+    # it into Langfuse's output_reasoning_tokens bucket so reasoning cost is
+    # attributable instead of lumped into plain output. Only DeepSeek's inclusive
+    # semantics are verified; other reasoning providers keep output unsplit.
+    split_reasoning = reasoning_tokens > 0 and provider == "deepseek"
+    if split_reasoning:
+        output_tokens = max(output_tokens - reasoning_tokens, 0)
     # Langfuse requires `total` to equal the sum of the detail buckets (it
     # validates this and warns "Sum of provided non-total usage_details buckets
     # exceeds provided total" otherwise). Provider totals are not usable for
@@ -319,16 +328,24 @@ def _map_usage(
     # (miss + completion + cache_hit/2), and Anthropic/Gemini totals exclude
     # cache read/write. The detail buckets are the real token counts, so sum
     # them instead of forwarding the provider total.
-    total_tokens = input_tokens + usage.output_tokens + usage.cache_read_tokens + usage.cache_creation_tokens
+    total_tokens = (
+        input_tokens
+        + output_tokens
+        + (reasoning_tokens if split_reasoning else 0)
+        + usage.cache_read_tokens
+        + usage.cache_creation_tokens
+    )
     details: dict[str, int] = {
         "input": input_tokens,
-        "output": usage.output_tokens,
+        "output": output_tokens,
         "total": total_tokens,
     }
     if usage.cache_read_tokens:
         details["input_cache_read"] = usage.cache_read_tokens
     if usage.cache_creation_tokens:
         details["input_cache_write"] = usage.cache_creation_tokens
+    if split_reasoning:
+        details["output_reasoning_tokens"] = reasoning_tokens
     return details
 
 

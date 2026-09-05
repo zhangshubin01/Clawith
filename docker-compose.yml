@@ -108,6 +108,8 @@ services:
       LANGFUSE_TENANT_KEYS: ${LANGFUSE_TENANT_KEYS:-}
       # Deployment version tag for traces (git commit hash, injected by scripts/deploy.sh)
       LANGFUSE_RELEASE: ${LANGFUSE_RELEASE:-}
+      # Deployment environment tag for traces (production/staging; injected by scripts/deploy.sh)
+      LANGFUSE_ENVIRONMENT: ${LANGFUSE_ENVIRONMENT:-}
       # OTel service identity for Langfuse/OTel exporters (UI grouping; defaults to unknown_service)
       OTEL_SERVICE_NAME: ${OTEL_SERVICE_NAME:-clawith-backend}
     ports:

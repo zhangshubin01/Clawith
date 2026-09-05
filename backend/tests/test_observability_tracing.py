@@ -787,6 +787,31 @@ def test_map_usage_no_cache_keeps_input_as_is() -> None:
     assert usage == {"input": 10, "output": 5, "total": 15}
 
 
+def test_map_usage_deepseek_reasoning_split_to_output_reasoning() -> None:
+    """DeepSeek folds reasoning into completion_tokens; it is split into the
+    output_reasoning_tokens bucket so reasoning cost is attributable."""
+    usage = tracing._map_usage(
+        TokenUsage(total_tokens=30, input_tokens=10, output_tokens=20, reasoning_tokens=15),
+        provider="deepseek",
+    )
+    assert usage == {
+        "input": 10,
+        "output": 5,
+        "total": 30,
+        "output_reasoning_tokens": 15,
+    }
+
+
+def test_map_usage_non_deepseek_reasoning_kept_unsplit() -> None:
+    """Unknown inclusive/exclusive semantics for non-DeepSeek providers: keep
+    output unsplit and emit no reasoning bucket (avoids double-count)."""
+    usage = tracing._map_usage(
+        TokenUsage(total_tokens=30, input_tokens=10, output_tokens=20, reasoning_tokens=15),
+        provider="qwen",
+    )
+    assert usage == {"input": 10, "output": 20, "total": 30}
+
+
 def test_build_client_passes_release_when_configured(monkeypatch: pytest.MonkeyPatch) -> None:
     """LANGFUSE_RELEASE 非空时，client 构造 kwargs 必须含 release=部署 commit。"""
     captured: dict[str, Any] = {}

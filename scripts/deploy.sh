@@ -99,6 +99,13 @@ WORKTREE="/tmp/clawith-deploy-${SHORT}"
 export LANGFUSE_RELEASE="$(git rev-parse "$COMMIT")"
 echo "→ LANGFUSE_RELEASE=${LANGFUSE_RELEASE}"
 
+# trace environment 标签：默认 production（本脚本即生产部署路径）。如需部署
+# staging，调用前以 LANGFUSE_ENVIRONMENT=staging 环境变量覆盖——与 release 同处
+# exec 重入链之后，export 后由 docker-compose ${LANGFUSE_ENVIRONMENT:-} 注入，
+# 链上无缺口。
+export LANGFUSE_ENVIRONMENT="${LANGFUSE_ENVIRONMENT:-production}"
+echo "→ LANGFUSE_ENVIRONMENT=${LANGFUSE_ENVIRONMENT}"
+
 # ── 1.5) tip 对比（ADR 0003）：展示将随本次部署上线的提交 ────
 set +e
 "$PY" "$REPO_ROOT/scripts/deploy_guard.py" check "$STATE_DIR" "$SHORT"

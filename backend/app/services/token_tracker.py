@@ -20,6 +20,7 @@ class TokenUsage:
     total_tokens: int = 0
     input_tokens: int = 0
     output_tokens: int = 0
+    reasoning_tokens: int = 0
     cache_read_tokens: int = 0
     cache_creation_tokens: int = 0
     cache_miss_tokens: int = 0
@@ -29,6 +30,7 @@ class TokenUsage:
         self.total_tokens += other.total_tokens
         self.input_tokens += other.input_tokens
         self.output_tokens += other.output_tokens
+        self.reasoning_tokens += other.reasoning_tokens
         self.cache_read_tokens += other.cache_read_tokens
         self.cache_creation_tokens += other.cache_creation_tokens
         self.cache_miss_tokens += other.cache_miss_tokens
@@ -183,10 +185,19 @@ def extract_token_usage(usage: dict | None) -> TokenUsage | None:
         input_tokens = _int_token(usage.get("prompt_tokens", usage.get("input_tokens", 0)))
         output_tokens = _int_token(usage.get("completion_tokens", usage.get("output_tokens", 0)))
         total_tokens = _int_token(usage.get("total_tokens", input_tokens + output_tokens))
+        # Reasoning/thinking tokens (DeepSeek completion_tokens_details.reasoning_tokens,
+        # Qwen top-level reasoning_tokens). Recorded separately so Langfuse can
+        # attribute reasoning cost; output_tokens keeps its inclusive meaning for
+        # quota/billing (unchanged).
+        reasoning_tokens = _token_counter(usage, "reasoning_tokens")
+        completion_details = usage.get("completion_tokens_details")
+        if isinstance(completion_details, dict):
+            reasoning_tokens += _token_counter(completion_details, "reasoning_tokens")
         return TokenUsage(
             total_tokens=total_tokens,
             input_tokens=input_tokens,
             output_tokens=output_tokens,
+            reasoning_tokens=reasoning_tokens,
             cache_read_tokens=cached,
             cache_creation_tokens=cache_creation,
             cache_miss_tokens=cache_miss,
