@@ -552,6 +552,7 @@ class CompletedActionSource(Protocol):
     tool_call_id: object
     tool_name: object
     status: object
+    effect: object
     sanitized_arguments: object
     result_summary: object
     started_at: object
@@ -566,6 +567,7 @@ def _completed_action_entry(execution: CompletedActionSource) -> JsonObject:
         "call_id": str(execution.tool_call_id),
         "tool": str(execution.tool_name),
         "status": "succeeded",
+        "effect": str(getattr(execution, "effect", None)),
         "summary": (
             str(execution.result_summary)[:_COMPLETED_ACTION_SUMMARY_MAX_CHARS]
             if isinstance(execution.result_summary, str)
@@ -585,6 +587,21 @@ def _completed_action_entry(execution: CompletedActionSource) -> JsonObject:
     return entry
 
 
+def _trim_oldest_prefer_read(actions: list[JsonObject]) -> None:
+    """Remove the oldest ``read`` entry, else the oldest entry of any class.
+
+    Write facts (``effect != "read"``) are never evicted while any ``read``
+    entry can still absorb the budget. The fallback (oldest of any class) is
+    what bounds write growth once reads are exhausted — no separate write cap
+    is needed.
+    """
+    for index, action in enumerate(actions):
+        if action.get("effect") == "read":
+            del actions[index]
+            return
+    del actions[0]
+
+
 def build_completed_actions(
     executions: Sequence[CompletedActionSource],
     *,
@@ -596,8 +613,10 @@ def build_completed_actions(
     Deterministic, zero-LLM construction from the execution ledger: only
     ``succeeded`` executions enter; entries are deduplicated by execution id,
     ordered by settlement time, and bounded to ``limit`` entries / ``max_bytes``
-    serialized bytes with oldest-first trimming. ADD-only semantics: the
-    pipeline is rebuilt from the ledger for every payload, never mutated.
+    serialized bytes. Trimming evicts the oldest ``read`` entry first so write
+    facts survive a trailing read flood; only once reads are exhausted does it
+    evict the oldest entry of any class. ADD-only semantics: the pipeline is
+    rebuilt from the ledger for every payload, never mutated.
     """
     unique: dict[str, CompletedActionSource] = {}
     for execution in executions:
@@ -619,13 +638,13 @@ def build_completed_actions(
         _completed_action_entry(execution)
         for _key, execution in sorted(unique.items(), key=sort_key)
     ]
-    if len(actions) > limit:
-        actions = actions[-limit:]
+    while len(actions) > limit:
+        _trim_oldest_prefer_read(actions)
     while (
         len(actions) > 1
         and len(json.dumps(actions, ensure_ascii=False).encode("utf-8")) > max_bytes
     ):
-        actions = actions[1:]
+        _trim_oldest_prefer_read(actions)
     return actions
 
 

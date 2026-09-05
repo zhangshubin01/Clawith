@@ -21,6 +21,7 @@ def _execution(
     call_id: str,
     tool_name: str = "edit_file",
     status: str = "succeeded",
+    effect: str = "read",
     path: str | None = "src/app.py",
     summary: str | None = "Replaced 1 occurrence(s).",
     started_at: datetime | str = datetime(2026, 9, 4, 12, 0, 0, tzinfo=UTC),
@@ -31,6 +32,7 @@ def _execution(
         tool_call_id=call_id,
         tool_name=tool_name,
         status=status,
+        effect=effect,
         sanitized_arguments=arguments,
         result_summary=summary,
         started_at=started_at,
@@ -114,7 +116,8 @@ def test_entry_shape_and_path_extraction() -> None:
 
     # Ascending settlement order: e1 (with path) first, e2 (no path) second.
     first, second = actions
-    assert set(first) == {"call_id", "tool", "status", "summary", "settled_at", "path"}
+    assert set(first) == {"call_id", "tool", "status", "effect", "summary", "settled_at", "path"}
+    assert first["effect"] == "read"
     assert first["tool"] == "edit_file"
     assert first["path"] == "src/app.py"
     assert first["settled_at"] == "2026-09-04T12:00:00+00:00"
@@ -146,3 +149,94 @@ def test_ignores_non_string_path_and_preserves_string_timestamps() -> None:
 
 def test_empty_input_returns_empty_list() -> None:
     assert build_completed_actions([]) == []
+
+
+def test_write_entries_survive_read_flood_under_byte_budget() -> None:
+    base = datetime(2026, 9, 4, 12, 0, 0, tzinfo=UTC)
+    executions = [
+        _execution(
+            execution_id="edit",
+            call_id="edit-1",
+            tool_name="edit_file",
+            effect="write",
+            summary="Replaced 1 occurrence(s).",
+            started_at=base,
+        ),
+    ]
+    # A read flood follows the edit: heavy summaries push the pipeline over its
+    # byte budget, so the oldest-first trim would previously evict the edit.
+    executions += [
+        _execution(
+            execution_id=f"r{i}",
+            call_id=f"read-{i}",
+            tool_name="read_file",
+            effect="read",
+            summary="read " + ("x" * 120),
+            started_at=base + timedelta(minutes=1 + i),
+        )
+        for i in range(50)
+    ]
+
+    actions = build_completed_actions(executions)
+
+    call_ids = [action["call_id"] for action in actions]
+    # The write fact survives: reads, not the edit, absorbed the budget.
+    assert "edit-1" in call_ids
+    assert call_ids[0] == "edit-1"
+    # Reads are still trimmed oldest-first: the earliest read did not survive,
+    # while the most recent read still does.
+    assert "read-0" not in call_ids
+    assert "read-49" in call_ids
+    assert _serialized_bytes(actions) <= 2048
+
+
+def test_external_write_entries_also_survive() -> None:
+    base = datetime(2026, 9, 4, 12, 0, 0, tzinfo=UTC)
+    executions = [
+        _execution(
+            execution_id="deploy",
+            call_id="deploy-1",
+            tool_name="execute_code",
+            effect="external_write",
+            summary="Deployed to production.",
+            started_at=base,
+        ),
+        *[
+            _execution(
+                execution_id=f"r{i}",
+                call_id=f"read-{i}",
+                tool_name="read_file",
+                effect="read",
+                summary="read " + ("x" * 120),
+                started_at=base + timedelta(minutes=1 + i),
+            )
+            for i in range(50)
+        ],
+    ]
+
+    actions = build_completed_actions(executions)
+
+    # effect != "read" (write OR external_write) is never evicted by read flood.
+    assert "deploy-1" in [action["call_id"] for action in actions]
+
+
+def test_write_entries_trimmed_oldest_first_when_no_reads_remain() -> None:
+    base = datetime(2026, 9, 4, 12, 0, 0, tzinfo=UTC)
+    executions = [
+        _execution(
+            execution_id=f"w{i}",
+            call_id=f"w{i}",
+            effect="write",
+            summary="write " + ("x" * 150),
+            started_at=base + timedelta(minutes=i),
+        )
+        for i in range(30)
+    ]
+
+    actions = build_completed_actions(executions)
+
+    assert _serialized_bytes(actions) <= 2048
+    assert actions  # never trims everything
+    # No reads to prefer: the fallback evicts the oldest write first.
+    assert actions[-1]["call_id"] == "w29"
+    assert actions[0]["call_id"] != "w0"
