@@ -1,9 +1,11 @@
 """Compaction-amnesia loop breaker (B) — detector, threshold, terminate.
 
-Ticket B / S5: ``detect_loop`` counts adjacent identical (prefix, tools)
-fingerprint pairs separated by a REAL compaction; the model step alerts when
-the count reaches the threshold; the executor terminates the Run only when the
-terminate switch is on and the model is about to spin the same tools again.
+Ticket B / S5: ``detect_loop`` counts adjacent identical prefix fingerprint
+pairs separated by a REAL compaction; the model step alerts when the count
+reaches the threshold; the executor terminates the Run only when the terminate
+switch is on and the model is about to spin again. The ``tools_fp`` dimension
+was retired (ADR-0016) — a tool-schema summary is constant and carries no
+loop signal.
 """
 
 from __future__ import annotations
@@ -33,25 +35,21 @@ from app.services.agent_runtime.state import (
 
 def _event(
     prefix: str = "a",
-    tools: str = "t",
     *,
     compacted: bool = False,
 ) -> LoopFingerprintEvent:
     return LoopFingerprintEvent(
         prefix_fp=prefix,
-        tools_fp=tools,
         compaction_since_last_prefix=compacted,
     )
 
 
 def test_detect_loop_cross_table() -> None:
-    """Compaction-between × tool-fingerprint-match cross table."""
-    # Real compaction between identical (prefix, tools) pairs: one loop.
+    """Compaction-between × prefix-fingerprint-match cross table."""
+    # Real compaction between identical prefix pairs: one loop.
     assert detect_loop([_event(), _event(compacted=True)]) == 1
     # No compaction between identical pairs: the same stuck observation, 0.
     assert detect_loop([_event(), _event(compacted=False)]) == 0
-    # Compaction but the tool pattern changed: not the amnesia signature.
-    assert detect_loop([_event(), _event(tools="t2", compacted=True)]) == 0
     # Compaction but the prefix changed: not the amnesia signature.
     assert detect_loop([_event(), _event(prefix="b", compacted=True)]) == 0
     # Empty and single-event windows never count.
@@ -86,7 +84,6 @@ def test_advance_loop_detection_alerts_at_threshold() -> None:
     update, alert = _advance_loop_detection(
         lifecycle,
         prefix_fp="a",
-        tools_fp="t",
         alert_threshold=1,
     )
     assert alert is None
@@ -97,10 +94,9 @@ def test_advance_loop_detection_alerts_at_threshold() -> None:
     update, alert = _advance_loop_detection(
         {"loop_detection": {**update, "compaction_since_last_prefix": True}},
         prefix_fp="a",
-        tools_fp="t",
         alert_threshold=1,
     )
-    assert alert == {"loop_count": 1, "prefix_fp": "a", "tools_fp": "t"}
+    assert alert == {"loop_count": 1, "prefix_fp": "a"}
     assert update["loop_count"] == 1
     assert update["compaction_since_last_prefix"] is False
 
@@ -109,10 +105,9 @@ def test_advance_loop_detection_alerts_at_threshold() -> None:
     update2, alert2 = _advance_loop_detection(
         lifecycle_threshold_2,
         prefix_fp="a",
-        tools_fp="t",
         alert_threshold=2,
     )
-    assert alert2 == {"loop_count": 2, "prefix_fp": "a", "tools_fp": "t"}
+    assert alert2 == {"loop_count": 2, "prefix_fp": "a"}
     assert update2["loop_count"] == 2
 
 
@@ -123,7 +118,6 @@ def test_advance_loop_detection_window_is_bounded() -> None:
         update, _alert = _advance_loop_detection(
             {"loop_detection": update},
             prefix_fp=f"p{index}",
-            tools_fp="t",
             alert_threshold=1,
         )
     assert len(update["fingerprint_events"]) <= 16
@@ -274,7 +268,7 @@ async def test_model_node_terminates_on_loop_alert_when_enabled() -> None:
         model_result=ModelStepResult(
             intent="tool_calls",
             tool_calls=(_loop_call(),),
-            loop_alert={"loop_count": 1, "prefix_fp": "a", "tools_fp": "t"},
+            loop_alert={"loop_count": 1, "prefix_fp": "a"},
         ),
     )
     update = await executor._model(state, _context())
@@ -300,7 +294,7 @@ async def test_model_node_continues_when_terminate_switch_off() -> None:
         model_result=ModelStepResult(
             intent="tool_calls",
             tool_calls=(_loop_call(),),
-            loop_alert={"loop_count": 1, "prefix_fp": "a", "tools_fp": "t"},
+            loop_alert={"loop_count": 1, "prefix_fp": "a"},
         ),
     )
     update = await executor._model(state, _context())
@@ -325,7 +319,7 @@ async def test_model_node_never_kills_non_spinning_intent() -> None:
         model_result=ModelStepResult(
             intent="finish",
             finish_content="done",
-            loop_alert={"loop_count": 1, "prefix_fp": "a", "tools_fp": "t"},
+            loop_alert={"loop_count": 1, "prefix_fp": "a"},
         ),
     )
     update = await executor._model(state, _context())

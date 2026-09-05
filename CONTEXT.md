@@ -134,3 +134,24 @@ _Avoid_: 锁≠注册表（一个串行化时机，一个提供信息）；Deplo
 trace 上标记本次部署的 git commit 版本，供看板、告警、实验按部署对比与指标突变归因。语义版本（如 v2.1）不适用：平台无发布节奏，commit hash 才是部署事实。
 
 _Avoid_: Native Score 勿与 evaluator score 混用（应用写事实、平台做推断，两者同源会失去交叉校验价值）；Implicit Negative Signal 勿把「继续下一步」当负反馈；Release Tag 勿用语义版本。
+
+## Loop Breaker（循环熔断）
+
+运行时兜底「模型原地空转」的熔断词汇（机制见 ADR-0016 与方案 20260905-agent-no-progress-detection-plan）。
+
+**Evidence Gain（证据增益）**:
+判定一轮工具执行「是否让任务/世界状态前进」的确定性计分，替代签名匹配。判定键落在客观副作用上：read_file 新 (path, content_hash) +1、execute_code 结果哈希变化 +1 / 失败→成功 +2、write 真实变更 +3、external_write +3；重复读/重复命令/空编辑 = 0。与「签名级熔断」（判定动作是否相同）相对——后者抓不住「换了姿势做同一件事」（git status/branch/checkout/fetch + read_file 混杂，参数每次不同）。
+
+**Material Progress（材料进度）**:
+Clawith 特有、比通用证据增益更根本的信号：workspace 实际变更。`workspace_file_revisions` 只在 before≠after 时落行（`record_revision` 空编辑返回 None），所以「写是否真实变更」有客观证据；git 巡检类命令永不产生 revision → 天然零材料进度。
+
+**No-Progress Ladder（零增益阶梯）**:
+连续零增益轮数（streak）触发的分级干预 nudge(3)/pivot(5)/stop(8)，对齐 `_SUCCESS_LOOP_THRESHOLD=5` 与 DeepCode 3/5/8 口径。stop 档注入「停止探索、交最终答案」并放行 finish，非硬 terminate。
+
+**Look-only Cap（纯观察上限）**:
+连续 N=6 轮「无任何真实写变更」后，即使后续轮读到新文件/命令输出变化也强制该轮增益归零——封死「逐文件读遍」与「无限发明新命令串」两类游走（Reasonix `explorationRunLimit` 的移植，Clawith 靠材料进度信号使其更严）。
+
+**ScoreRound（增益计分器）**:
+`no_progress.py` 的纯函数核心：从 ledger（effect/status/sanitized_arguments/result_metadata）+ material_change（接线层把 WorkspaceFileRevision before≠after 解析成布尔）重放计算每轮增益，零新 checkpoint 状态，per-turn 重算。
+
+_Avoid_: Evidence Gain 勿与签名熔断混用（一个问「前进没有」，一个问「动作相同没有」，前者是后者盲区的补集而非替代——`_trailing_identical_calls` 仍兜重复执行本身）；No-Progress Ladder 勿与 Thread Compact（历史压缩）混用——阶梯是零增益干预，压缩是水位触发的历史替换；Material Progress 勿把 external_write 当可验（外部副作用无 workspace 证据，只能假定前进）。

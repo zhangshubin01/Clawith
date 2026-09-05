@@ -917,21 +917,26 @@ def settle_step_messages(
 
 @dataclass(frozen=True, slots=True)
 class LoopFingerprintEvent:
-    """One model step's cache-fingerprint facts for loop detection."""
+    """One model step's cache-fingerprint facts for loop detection.
+
+    The ``tools_fp`` dimension was retired (ADR-0016): a tool-schema summary is
+    a constant across a run — it never distinguishes a re-attempt from a real
+    change, so it contributed no loop signal. Only the cacheable prefix and the
+    compaction flag remain.
+    """
 
     prefix_fp: str
-    tools_fp: str
     compaction_since_last_prefix: bool = False
 
 
 def detect_loop(events: Sequence[LoopFingerprintEvent]) -> int:
-    """Count consecutive confirmations of a stuck prefix/tool fingerprint pair.
+    """Count consecutive confirmations of a stuck cacheable prefix.
 
-    One loop confirmation = an adjacent pair whose prefix AND tool fingerprints
-    match, where the LATER event reports a real compaction since the earlier
-    observation: the history shrank, the cacheable prefix rebuilt identically,
-    and the model resumed the same tool pattern. Identical repeats without an
-    intervening compaction are the same stuck observation, counted once.
+    One loop confirmation = an adjacent pair whose prefix fingerprints match,
+    where the LATER event reports a real compaction since the earlier
+    observation: the history shrank and the cacheable prefix rebuilt
+    identically — the compaction-amnesia signature. Identical repeats without
+    an intervening compaction are the same stuck observation, counted once.
     """
     loop_confirmations = 0
     previous: LoopFingerprintEvent | None = None
@@ -939,7 +944,6 @@ def detect_loop(events: Sequence[LoopFingerprintEvent]) -> int:
         if (
             previous is not None
             and event.prefix_fp == previous.prefix_fp
-            and event.tools_fp == previous.tools_fp
             and event.compaction_since_last_prefix
         ):
             loop_confirmations += 1

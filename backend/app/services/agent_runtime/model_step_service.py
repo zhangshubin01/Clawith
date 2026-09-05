@@ -12,6 +12,7 @@ import uuid
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from copy import deepcopy
 from dataclasses import asdict, replace
+from datetime import timedelta
 from typing import Any, Protocol, cast
 
 from loguru import logger
@@ -24,6 +25,7 @@ from app.models.agent_tool_execution import AgentToolExecution
 from app.models.group import GroupMember
 from app.models.llm import LLMModel
 from app.models.participant import Participant
+from app.models.workspace import WorkspaceFileRevision
 from app.services.agent_context import build_agent_context
 from app.services.activity_logger import log_activity
 from app.services.agent_runtime.answer_stream import AnswerStreamWriter
@@ -54,6 +56,16 @@ from app.services.agent_runtime.model_capabilities import (
     ModelCapabilityResolver,
 )
 from app.services.agent_runtime.node_executor import ModelStepResult
+from app.services.agent_runtime.no_progress import (
+    LADDER_NONE,
+    LADDER_NUDGE,
+    LADDER_PIVOT,
+    LADDER_STOP,
+    NoProgressConfig,
+    NoProgressSignal,
+    build_no_progress_signal,
+    no_progress_message,
+)
 from app.services.agent_runtime.run_compactor import (
     LoopFingerprintEvent,
     RunCompactInputs,
@@ -126,6 +138,7 @@ from app.services.llm.single_step import LLMCompletionStep, complete_llm_once
 from app.services.llm.utils import get_max_tokens
 from app.services.storage import get_storage_backend, normalize_storage_key
 from app.services.vision_inject import compress_bytes_to_base64
+from app.services.workspace_collaboration import normalize_workspace_path
 
 _ACTIVE_AGENT_STATUSES = frozenset({"creating", "running", "idle"})
 _RUNTIME_WAIT_TOOL_NAME = "wait"
@@ -401,15 +414,15 @@ def _advance_loop_detection(
     lifecycle: Mapping[str, object],
     *,
     prefix_fp: str,
-    tools_fp: str,
     alert_threshold: int,
 ) -> tuple[JsonObject, JsonObject | None]:
     """Advance the fingerprint window and detect compaction-amnesia loops.
 
     The executor's Compact node arms ``compaction_since_last_prefix`` after a
     REAL compaction; the next model step consumes it into its fingerprint
-    event, so an adjacent identical (prefix_fp, tools_fp) pair with the flag
-    proves the history shrank and rebuilt identically — the loop signature.
+    event, so an adjacent identical prefix pair with the flag proves the
+    history shrank and rebuilt identically — the loop signature. The retired
+    ``tools_fp`` dimension is no longer part of the event (ADR-0016).
     """
     current = lifecycle.get("loop_detection")
     current_map = current if isinstance(current, Mapping) else {}
@@ -423,7 +436,6 @@ def _advance_loop_detection(
     events.append(
         {
             "prefix_fp": prefix_fp,
-            "tools_fp": tools_fp,
             "compaction_since_last_prefix": compaction_flag,
         }
     )
@@ -431,7 +443,6 @@ def _advance_loop_detection(
     fingerprint_events = [
         LoopFingerprintEvent(
             prefix_fp=str(event.get("prefix_fp") or ""),
-            tools_fp=str(event.get("tools_fp") or ""),
             compaction_since_last_prefix=(
                 event.get("compaction_since_last_prefix") is True
             ),
@@ -449,7 +460,6 @@ def _advance_loop_detection(
         alert = {
             "loop_count": loop_count,
             "prefix_fp": prefix_fp,
-            "tools_fp": tools_fp,
         }
     return update, alert
 
@@ -755,6 +765,114 @@ def _dup_read_reminder_message(dup_count: int, total: int) -> LLMMessage:
         "确需重新读取某文件时，先说明你期望该文件发生了哪些变化。"
     )
     return LLMMessage(role="user", content=content)
+
+
+_WRITE_MATERIAL_CHANGE_WINDOW_BEFORE = timedelta(seconds=1)
+_WRITE_MATERIAL_CHANGE_WINDOW_AFTER = timedelta(seconds=3)
+
+
+def _write_execution_paths(arguments: Mapping[str, Any] | None) -> tuple[str, ...]:
+    """Normalized workspace paths a write execution touches (deduplicated)."""
+    if not isinstance(arguments, Mapping):
+        return ()
+    paths: list[str] = []
+    for key in ("path", "source_path", "destination_path"):
+        value = arguments.get(key)
+        if isinstance(value, str) and value.strip():
+            paths.append(normalize_workspace_path(value))
+    return tuple(dict.fromkeys(paths))
+
+
+async def _no_op_write_tool_call_ids(
+    session_factory: RuntimeSessionFactory,
+    *,
+    agent_id: str,
+    run_id: str,
+    executions: Sequence[AgentToolExecution],
+) -> frozenset[str]:
+    """``tool_call_id`` of agent-scope writes proven NOT to mutate content (v1).
+
+    A write (``effect == "write"``) is real progress only when it produced a
+    ``WorkspaceFileRevision`` row — ``record_revision`` returns None for
+    before==after no-ops (empty edits). The revision id is not yet threaded
+    into ``result_metadata``, so this joins by normalized path + a tight
+    ``created_at`` window around each succeeded write execution.
+
+    Only *positive* no-op evidence is returned; everything else (group-scope
+    writes, unresolved evidence) is left out so the caller can stay lenient and
+    never false-positive a run that is genuinely writing. Known limitation: a
+    real write immediately followed by an empty edit to the same path can
+    inherit the earlier revision and be mis-scored as progress (ADR-0016).
+    """
+    try:
+        scope_id = uuid.UUID(agent_id)
+    except (TypeError, ValueError):
+        return frozenset()
+    if not run_id:
+        return frozenset()
+    write_executions: list[tuple[AgentToolExecution, tuple[str, ...]]] = []
+    for execution in executions:
+        if (
+            str(getattr(execution, "run_id", "")) != run_id
+            or getattr(execution, "effect", None) != "write"
+            or getattr(execution, "status", None) != "succeeded"
+        ):
+            continue
+        paths = _write_execution_paths(
+            getattr(execution, "sanitized_arguments", None)
+        )
+        if paths:
+            write_executions.append((execution, paths))
+    if not write_executions:
+        return frozenset()
+
+    all_paths = {path for _, paths in write_executions for path in paths}
+    lower = min(
+        execution.started_at for execution, _ in write_executions
+    ) - _WRITE_MATERIAL_CHANGE_WINDOW_BEFORE
+    upper = max(
+        execution.completed_at or execution.started_at
+        for execution, _ in write_executions
+    ) + _WRITE_MATERIAL_CHANGE_WINDOW_AFTER
+    try:
+        async with session_factory() as db:
+            result = await db.execute(
+                select(
+                    WorkspaceFileRevision.path,
+                    WorkspaceFileRevision.created_at,
+                ).where(
+                    WorkspaceFileRevision.scope_type == "agent",
+                    WorkspaceFileRevision.scope_id == scope_id,
+                    WorkspaceFileRevision.path.in_(all_paths),
+                    WorkspaceFileRevision.created_at >= lower,
+                    WorkspaceFileRevision.created_at <= upper,
+                )
+            )
+            rows = result.all()
+    except Exception:
+        # Best-effort guard: unresolved evidence degrades to "assume changed"
+        # (lenient) rather than risking a false no-progress nudge.
+        logger.warning(
+            "[RuntimeNoProgress] material_change resolve failed run_id={}",
+            run_id,
+        )
+        return frozenset()
+
+    no_op: set[str] = set()
+    for execution, paths in write_executions:
+        path_set = frozenset(paths)
+        lower_bound = (
+            execution.started_at - _WRITE_MATERIAL_CHANGE_WINDOW_BEFORE
+        )
+        upper_bound = (
+            execution.completed_at or execution.started_at
+        ) + _WRITE_MATERIAL_CHANGE_WINDOW_AFTER
+        if not any(
+            path in path_set and lower_bound <= created_at <= upper_bound
+            for path, created_at in rows
+        ):
+            no_op.add(execution.tool_call_id)
+    return frozenset(no_op)
 
 
 def _estimate_tokens(value: object) -> int:
@@ -2355,6 +2473,7 @@ class RuntimeModelStepService:
         turn_local_dynamic_prompt: str = "",
         read_dedup_map: dict[str, dict[str, Any]] | None = None,
         dup_read_signal: tuple[int, int] | None = None,
+        no_progress_signal: NoProgressSignal | None = None,
     ) -> tuple[list[LLMMessage] | ModelStepResult, JsonObject | None]:
         """Prepare the outbound messages plus the frozen budget profile.
 
@@ -2658,6 +2777,18 @@ class RuntimeModelStepService:
             # Same absolutely-last slot as the soft-loop reminder; prompt-only.
             dup_count, total = dup_counts
             messages.append(_dup_read_reminder_message(dup_count, total))
+        if (
+            no_progress_signal is not None
+            and no_progress_signal.level != LADDER_NONE
+            and confirmation_instruction is None
+        ):
+            # ADR-0016: nudge/pivot/stop are prompt-only guidance appended
+            # absolutely-last — never a hard termination (Q8-B). The stop level
+            # steers the model to stop exploring and deliver, finish is let
+            # through by the executor's normal flow.
+            progress_message = no_progress_message(no_progress_signal)
+            if progress_message is not None:
+                messages.append(LLMMessage(role="user", content=progress_message))
         if not model.supports_vision:
             return messages, budget_profile
         try:
@@ -2980,6 +3111,64 @@ class RuntimeModelStepService:
             except (TypeError, ValueError):
                 dup_read_signal = None  # malformed checkpoint: skip stall signal
 
+            # ADR-0016 no-progress signal: evidence-gain over each model turn,
+            # replayed from the ledger + workspace material change (zero new
+            # checkpoint state). Independent of every signature-level breaker —
+            # it catches "the same thing in different disguises".
+            no_progress_signal: NoProgressSignal | None = None
+            try:
+                no_op_ids = await _no_op_write_tool_call_ids(
+                    self._session_factory,
+                    agent_id=context.agent_id or "",
+                    run_id=context.run_id,
+                    executions=executions,
+                )
+
+                def _material_change_of(execution: object) -> bool:
+                    # Only reached for effect=="write" executions. A failed write
+                    # never mutates; a succeeded write mutates unless proven to be
+                    # an empty edit (agent scope, no revision in its window).
+                    if getattr(execution, "status", None) != "succeeded":
+                        return False
+                    return getattr(execution, "tool_call_id", None) not in no_op_ids
+
+                no_progress_signal = build_no_progress_signal(
+                    executions,
+                    run_id=context.run_id,
+                    material_change_of=_material_change_of,
+                )
+            except (TypeError, ValueError):
+                no_progress_signal = None  # malformed checkpoint: skip the guard
+            if no_progress_signal is not None and no_progress_signal.level != LADDER_NONE:
+                _thresholds = {
+                    LADDER_NUDGE: NoProgressConfig().nudge_threshold,
+                    LADDER_PIVOT: NoProgressConfig().pivot_threshold,
+                    LADDER_STOP: NoProgressConfig().stop_threshold,
+                }
+                if no_progress_signal.streak == _thresholds[no_progress_signal.level]:
+                    logger.warning(
+                        "[RuntimeNoProgress] run_id={} level={} streak={} last_gain={}",
+                        context.run_id,
+                        no_progress_signal.level,
+                        no_progress_signal.streak,
+                        no_progress_signal.last_round_gain,
+                    )
+                    await _audit_breaker_event(
+                        context,
+                        self._activity_logger,
+                        action_type=f"runtime_no_progress_{no_progress_signal.level}",
+                        summary=(
+                            "过程无进展检测触发：连续"
+                            f" {no_progress_signal.streak} 轮工具执行无实质进展"
+                            f"（{no_progress_signal.level}）"
+                        ),
+                        detail={
+                            "level": no_progress_signal.level,
+                            "streak": no_progress_signal.streak,
+                            "last_round_gain": no_progress_signal.last_round_gain,
+                        },
+                    )
+
             # 卡片模式: 惰性创建 CardStreamBridge（首次模型调用时）
             card_on_chunk = None
             card_on_thinking = None
@@ -3092,6 +3281,7 @@ class RuntimeModelStepService:
                 turn_local_dynamic_prompt=turn_local_dynamic_prompt,
                 read_dedup_map=read_dedup_map,
                 dup_read_signal=dup_read_signal,
+                no_progress_signal=no_progress_signal,
             )
             if isinstance(prepared, ModelStepResult):
                 return prepared
@@ -3111,7 +3301,6 @@ class RuntimeModelStepService:
             loop_detection_update, loop_alert = _advance_loop_detection(
                 state["lifecycle"],
                 prefix_fp=prefix_fp,
-                tools_fp=tools_fp,
                 alert_threshold=self._compaction_loop_alert_threshold,
             )
             if loop_alert is not None:
@@ -3244,6 +3433,7 @@ class RuntimeModelStepService:
                     turn_local_dynamic_prompt=fallback_turn_local_dynamic_prompt,
                     read_dedup_map=read_dedup_map,
                     dup_read_signal=dup_read_signal,
+                    no_progress_signal=no_progress_signal,
                 )
                 if isinstance(fallback_prepared, ModelStepResult):
                     return fallback_prepared
