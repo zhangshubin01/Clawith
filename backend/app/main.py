@@ -438,6 +438,13 @@ async def lifespan(app: FastAPI):
         await close_checkpointer_pool()
         await realtime_router.stop()
         await close_redis()
+        # Flush pending Langfuse spans so the final batch of in-flight traces isn't
+        # lost on graceful shutdown (the SDK's atexit hook can miss this window).
+        # No-op when observability is disabled. Sync flush blocks the loop briefly,
+        # but this is the last teardown step before process exit.
+        from app.services.observability import flush
+
+        flush()
 
 
 app = FastAPI(

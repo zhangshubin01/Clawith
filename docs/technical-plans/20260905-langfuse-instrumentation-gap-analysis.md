@@ -115,6 +115,14 @@ Clawith 手写 OTel-backed facade 的**选型正确**（Langfuse Python SDK v4 �
 
 验证：`test_token_tracker.py` / `test_observability_tracing.py` / `test_observability_scores.py` 87 passed；ruff 通过；arch-guard P0 全绿；`bash -n scripts/deploy.sh` 与 `docker compose config` 通过（新增 3 条测试：reasoning 提取、deepseek 拆分、非 deepseek 不拆）。
 
+**第三批提交（P2 #8 flush 死代码收口）**：
+
+| 项 | 改动 |
+| --- | --- |
+| P2 #8 / §二.B | `main.py` lifespan shutdown `finally` 块末尾调用 `observability.flush()`（§二.B 曾判定 `flush()` 全仓零调用、优雅停机有最后一批 span 丢失窗口） |
+
+验证：`test_schedule_scheduler_startup.py`（驱动 `main.lifespan` 的既有 harness）2 passed；observability 相关 72 passed；ruff 通过；arch-guard P0 全绿（`flush()` 本身已有 `test_flush_covers_tenant_clients` 覆盖，disabled 时为 no-op）。
+
 **留待后续（需外部配置或独立决策）**：
 - score `config_id`（需先在 Langfuse UI 建 ScoreConfig）
 - 自定义 model definition（UI `Project Settings > Models` 配 DeepSeek/Qwen 定价）
