@@ -96,6 +96,11 @@ Rules:
 - The completed_actions pipeline in the request payload is the authoritative
   record of finished tool executions: prefer it over re-deriving outcomes from
   raw history, and record each entry as DONE, never as pending work.
+- The files_read pipeline in the request payload lists files that were already
+  read with their content hash (unchanged since the last read): treat them as
+  already-available context — record their contents under "Files and Code",
+  and do NOT instruct the resuming model to re-read them unless the file is
+  expected to have changed.
 - A FAILED tool execution in the history is a retry to be resolved, never a
   new task: record its final resolution once, do not schedule a new attempt.
 - If a prior checkpoint summary contradicts the completed_actions pipeline,
@@ -495,6 +500,7 @@ def _payload(
     blocks: Sequence[MessageBlock],
     exact_inputs: Sequence[JsonObject],
     completed_actions: Sequence[JsonObject] = (),
+    files_read: Sequence[JsonObject] = (),
 ) -> JsonObject:
     payload: JsonObject = {
         "schema_version": "thread_running_summary_v1",
@@ -506,6 +512,10 @@ def _payload(
         # Deterministic completed-actions pipeline (A): always present — an
         # empty list is a meaningful statement ("nothing completed yet").
         "completed_actions": [dict(entry) for entry in completed_actions],
+        # Files-read pipeline (P1): always present — an empty list is a
+        # meaningful statement ("no file read yet"). Only read_file entries
+        # carry a content_hash, which is the "unchanged since last read" signal.
+        "files_read": [dict(entry) for entry in files_read],
     }
     try:
         return cast(JsonObject, project_multimodal_for_summary(payload))
@@ -528,6 +538,11 @@ _TERMINAL_EXECUTION_STATUSES = frozenset({"succeeded", "failed"})
 _COMPLETED_ACTIONS_LIMIT = 50
 _COMPLETED_ACTIONS_MAX_BYTES = 2048
 _COMPLETED_ACTION_SUMMARY_MAX_CHARS = 200
+
+# Files-read pipeline (P1) bounds: mirror completed-actions — a bounded list of
+# "files already read, content unchanged" facts, newest first.
+_FILES_READ_LIMIT = 50
+_FILES_READ_MAX_BYTES = 2048
 
 
 class CompletedActionSource(Protocol):
@@ -612,6 +627,102 @@ def build_completed_actions(
     ):
         actions = actions[1:]
     return actions
+
+
+def _files_read_entry(path: str, execution: CompletedActionSource) -> JsonObject:
+    """One files-read fact: the path, its segment hash, and the last read time.
+
+    ``content_hash`` (segment-level ``sha256(summary)``) is the change signal:
+    a write to the file yields a different hash on the next read, so the entry
+    naturally reflects the latest content actually read.  The full-file hash
+    (``content_hash_bytes``) is a storage-layer value not present in the ledger,
+    and is intentionally not reconstructed here (it would require re-reading
+    storage — the exact work this pipeline exists to discourage).
+    """
+    metadata = getattr(execution, "result_metadata", None)
+    content_hash = metadata.get("content_hash") if isinstance(metadata, Mapping) else None
+    started_at = execution.started_at
+    return {
+        "path": path,
+        "content_hash": str(content_hash) if isinstance(content_hash, str) else None,
+        "last_read_at": (
+            started_at.isoformat()
+            if isinstance(started_at, datetime)
+            else str(started_at)
+            if started_at is not None
+            else None
+        ),
+    }
+
+
+def build_files_read(
+    executions: Sequence[CompletedActionSource],
+    *,
+    limit: int = _FILES_READ_LIMIT,
+    max_bytes: int = _FILES_READ_MAX_BYTES,
+) -> list[JsonObject]:
+    """Aggregate the deterministic "files already read, content unchanged" facts.
+
+    Only ``succeeded`` ``read_file`` executions enter; each path is kept once
+    (the latest read by settlement time wins), ordered by settlement time, and
+    bounded to ``limit`` entries / ``max_bytes`` serialized bytes with
+    oldest-first trimming.  Rebuilt from the ledger for every payload — never
+    mutated, so it stays ADD-only and cannot drift from the ledger.
+    """
+    latest: dict[str, CompletedActionSource] = {}
+    for execution in executions:
+        if str(getattr(execution, "tool_name", None)) != "read_file":
+            continue
+        if str(getattr(execution, "status", None)) != "succeeded":
+            continue
+        arguments = getattr(execution, "sanitized_arguments", None)
+        path = arguments.get("path") if isinstance(arguments, Mapping) else None
+        if not isinstance(path, str) or not path:
+            continue
+        metadata = getattr(execution, "result_metadata", None)
+        content_hash = metadata.get("content_hash") if isinstance(metadata, Mapping) else None
+        if not isinstance(content_hash, str) or not content_hash:
+            continue
+        previous = latest.get(path)
+        if previous is None or _started_after(execution, previous):
+            latest[path] = execution
+
+    def sort_key(item: tuple[str, CompletedActionSource]) -> tuple[datetime, str]:
+        execution = item[1]
+        started_at = execution.started_at
+        return (
+            started_at or datetime.min.replace(tzinfo=timezone.utc),
+            str(item[0]),
+        )
+
+    entries = [
+        _files_read_entry(path, execution)
+        for path, execution in sorted(latest.items(), key=sort_key)
+    ]
+    if len(entries) > limit:
+        entries = entries[-limit:]
+    while (
+        len(entries) > 1
+        and len(json.dumps(entries, ensure_ascii=False).encode("utf-8")) > max_bytes
+    ):
+        entries = entries[1:]
+    return entries
+
+
+def _started_after(
+    execution: CompletedActionSource,
+    previous: CompletedActionSource,
+) -> bool:
+    """True when ``execution`` settled strictly later than ``previous``."""
+    current = execution.started_at
+    prior = previous.started_at
+    if current is None:
+        return False
+    if prior is None:
+        return True
+    if isinstance(current, datetime) and isinstance(prior, datetime):
+        return current > prior
+    return str(current) > str(prior)
 
 
 @dataclass(frozen=True, slots=True)
@@ -981,10 +1092,11 @@ class RuntimeRunCompactorService:
         batch: Sequence[MessageBlock],
         exact_inputs: Sequence[JsonObject],
         completed_actions: Sequence[JsonObject] = (),
+        files_read: Sequence[JsonObject] = (),
         summary_budget: int,
         summary_output_limit: int,
     ) -> JsonObject:
-        payload = _payload(summary, batch, exact_inputs, completed_actions)
+        payload = _payload(summary, batch, exact_inputs, completed_actions, files_read)
         messages = _prompt_messages(payload)
         try:
             step = await self._completion(
@@ -1037,6 +1149,7 @@ class RuntimeRunCompactorService:
                     batch=batch[:midpoint],
                     exact_inputs=exact_inputs,
                     completed_actions=completed_actions,
+                    files_read=files_read,
                     summary_budget=summary_budget,
                     summary_output_limit=summary_output_limit,
                 )
@@ -1047,6 +1160,7 @@ class RuntimeRunCompactorService:
                     batch=batch[midpoint:],
                     exact_inputs=exact_inputs,
                     completed_actions=completed_actions,
+                    files_read=files_read,
                     summary_budget=summary_budget,
                     summary_output_limit=summary_output_limit,
                 )
@@ -1071,6 +1185,7 @@ class RuntimeRunCompactorService:
         blocks: Sequence[MessageBlock],
         exact_inputs: Sequence[JsonObject],
         completed_actions: Sequence[JsonObject] = (),
+        files_read: Sequence[JsonObject] = (),
         batch_budget: int,
         summary_budget: int,
         summary_output_limit: int,
@@ -1086,7 +1201,7 @@ class RuntimeRunCompactorService:
 
         while remaining:
             batch: list[MessageBlock] = []
-            base = _payload(summary, batch, exact_inputs, completed_actions)
+            base = _payload(summary, batch, exact_inputs, completed_actions, files_read)
             if _estimate_tokens(base) > batch_budget:
                 raise RunCompactorError(
                     "thread_summary_too_large",
@@ -1096,7 +1211,7 @@ class RuntimeRunCompactorService:
                 proposed = [*batch, remaining[0]]
                 if (
                     _estimate_tokens(
-                        _payload(summary, proposed, exact_inputs, completed_actions)
+                        _payload(summary, proposed, exact_inputs, completed_actions, files_read)
                     )
                     > batch_budget
                 ):
@@ -1114,6 +1229,7 @@ class RuntimeRunCompactorService:
                 batch=batch,
                 exact_inputs=exact_inputs,
                 completed_actions=completed_actions,
+                files_read=files_read,
                 summary_budget=summary_budget,
                 summary_output_limit=summary_output_limit,
             )
@@ -1206,6 +1322,7 @@ class RuntimeRunCompactorService:
             ledger=inputs.ledger,
         )
         completed_actions = build_completed_actions(inputs.executions)
+        files_read = build_files_read(inputs.executions)
         exact_inputs = tuple(
             dict(message)
             for block in retained
@@ -1224,6 +1341,7 @@ class RuntimeRunCompactorService:
             blocks=summary_blocks,
             exact_inputs=exact_inputs,
             completed_actions=completed_actions,
+            files_read=files_read,
             batch_budget=compact_model_budget,
             summary_budget=summary_budget,
             summary_output_limit=summary_output_limit,
@@ -1267,6 +1385,7 @@ __all__ = [
     "SettledExchange",
     "StepSettlement",
     "build_completed_actions",
+    "build_files_read",
     "detect_loop",
     "settle_completed_exchanges",
     "settle_step_messages",
