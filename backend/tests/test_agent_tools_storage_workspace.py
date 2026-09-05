@@ -1076,6 +1076,46 @@ async def test_edit_file_direct_write_updates_run_workspace_view(monkeypatch, tm
 
 
 @pytest.mark.asyncio
+async def test_edit_file_rejects_concurrent_change_between_read_and_write(
+    monkeypatch,
+    tmp_path,
+):
+    """edit_file must not clobber a change that lands after it reads the file.
+
+    This is the workspace-file analogue of orca's expectedRuntimeFence: a
+    stale editor whose read is overtaken by another writer must surface a
+    conflict instead of silently overwriting the newer content.
+    """
+    agent_id = uuid.uuid4()
+    storage_key = f"{agent_id}/workspace/notes.txt"
+    storage = MemoryStorageBackend({storage_key: b"# Notes\nline one\n"})
+    _patch_storage(monkeypatch, storage)
+    _patch_workspace_db(monkeypatch)
+
+    original_read_bytes = storage.read_bytes
+
+    async def read_then_concurrent_write(key, *args, **kwargs):
+        content = await original_read_bytes(key)
+        # Another writer lands a change on the same path right after our read.
+        await storage.write_bytes(storage_key, b"# Notes\nline one\nconcurrent edit\n")
+        return content
+
+    monkeypatch.setattr(storage, "read_bytes", read_then_concurrent_write)
+
+    result = await agent_tools._execute_workspace_mutation(
+        "edit_file",
+        {"path": "workspace/notes.txt", "old_string": "line one", "new_string": "line ONE"},
+        agent_id=agent_id,
+        base_dir=tmp_path / str(agent_id),
+        session_id=None,
+    )
+
+    assert "Conflict" in result or "changed" in result
+    # The concurrent writer's edit survives — never clobbered by the stale editor.
+    assert storage.files[storage_key] == b"# Notes\nline one\nconcurrent edit\n"
+
+
+@pytest.mark.asyncio
 async def test_delete_file_direct_delete_removes_from_run_workspace(monkeypatch, tmp_path):
     agent_id = uuid.uuid4()
     storage_key = f"{agent_id}/workspace/notes.txt"

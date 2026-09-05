@@ -3689,7 +3689,18 @@ async def _execute_workspace_mutation(
         if not await storage.is_file(storage_key):
             return f"File not found: {path}"
 
+        # Optimistic concurrency (the workspace-file analogue of orca's
+        # expectedRuntimeFence): capture the version token around the read so a
+        # concurrent writer between read and write surfaces as a conflict
+        # instead of the stale editor silently clobbering the newer content.
+        version_before = await storage.get_version(storage_key)
         content = await storage.read_text(storage_key, encoding="utf-8", errors="replace")
+        version_after = await storage.get_version(storage_key)
+        if version_before.token != version_after.token:
+            return (
+                f"❌ Conflict detected while editing {path}: the file changed "
+                f"after it was read. Re-read it and re-apply your edit."
+            )
         if old_string not in content:
             return f"❌ 'old_string' not found in {path}. Please check the exact text including whitespace and newlines."
         count = content.count(old_string)
@@ -3709,6 +3720,7 @@ async def _execute_workspace_mutation(
                 operation="edit",
                 session_id=session_id,
                 enforce_human_lock=True,
+                expected_version_token=version_after.token,
             )
             await _wdb.commit()
         if write_result.ok:
