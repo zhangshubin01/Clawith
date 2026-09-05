@@ -190,6 +190,71 @@ def test_unknown_input_capabilities_use_runtime_config_fallback() -> None:
     assert budget.request_input_limit == 130_072
 
 
+@pytest.mark.parametrize(
+    ("model_name", "expected_context"),
+    [
+        ("deepseek-v4-flash", 1_000_000),
+        ("deepseek-v4-pro", 1_000_000),
+    ],
+)
+def test_deepseek_null_context_resolves_provider_context_window(
+    model_name: str, expected_context: int
+) -> None:
+    # DB has context_window_tokens=NULL for flash (pro was hand-filled); the
+    # provider spec registry must supply the official 1M instead of the 131072
+    # global fallback. See docs/technical-plans/20260821-deepseek-max-tokens-raise.md.
+    model = _model(provider="deepseek", model=model_name, max_output_tokens=65_536)
+
+    capabilities = ModelCapabilityResolver.capabilities(model)
+
+    assert capabilities.context_window_tokens == expected_context
+    assert capabilities.capability_source == "builtin_registry"
+
+
+def test_runtime_budget_deepseek_flash_threshold_is_sub_million_scale() -> None:
+    model = _model(provider="deepseek", model="deepseek-v4-flash")
+
+    budget = ModelCapabilityResolver.runtime_budget(
+        model,
+        requested_max_output_tokens=65_536,
+        static_prompt_tokens=16_000,
+        tool_schema_tokens=3_500,
+        reserved_runtime_tokens=256,
+        safety_margin_tokens=256,
+    )
+
+    # Magnitude assertions only: the trigger must sit near the full 1M window,
+    # not the collapsed ~33K it produced with the 128K fallback.
+    assert budget.compact_threshold > 700_000
+    assert budget.effective_runtime_budget > 900_000
+
+
+def test_db_context_window_still_wins_over_provider_value() -> None:
+    model = _model(
+        provider="deepseek",
+        model="deepseek-v4-flash",
+        context_window_tokens=200_000,
+        capability_source="manual",
+    )
+
+    capabilities = ModelCapabilityResolver.capabilities(model)
+
+    assert capabilities.context_window_tokens == 200_000
+    assert capabilities.capability_source == "manual"
+
+
+def test_provider_context_fallback_still_fails_closed_without_output() -> None:
+    model = _model(provider="deepseek", model="deepseek-v4-flash")
+
+    with pytest.raises(ModelCapabilityError, match="requires a request or model output limit") as exc_info:
+        ModelCapabilityResolver.request_input_limit(
+            model,
+            requested_max_output_tokens=None,
+        )
+
+    assert exc_info.value.code == "unknown_output_limit"
+
+
 def test_shared_context_without_output_reservation_fails_closed() -> None:
     model = _model(context_window_tokens=100_000)
 

@@ -2363,6 +2363,10 @@ class ProviderSpec:
     supports_parallel_tool_calls: bool = False
     default_max_tokens: int = 4096
     model_max_tokens: dict[str, int] = field(default_factory=dict)
+    # Official input context window per model, used as the provider-level
+    # fallback when DB llm_models.context_window_tokens is NULL. Keyed by exact
+    # model name (unlike model_max_tokens, which prefix-matches).
+    model_context_window_tokens: dict[str, int] = field(default_factory=dict)
 
 
 # Provider aliases accepted for compatibility
@@ -2419,6 +2423,14 @@ PROVIDER_REGISTRY: dict[str, ProviderSpec] = {
         model_max_tokens={
             "deepseek-v4-flash": 65536,
             "deepseek-v4-pro": 65536,
+        },
+        # DeepSeek V4 official CONTEXT LENGTH is 1M (MAX OUTPUT MAXIMUM 384K);
+        # fills the DB NULL context_window_tokens gap that otherwise collapses
+        # the compaction trigger to the 131072 global fallback. See
+        # docs/technical-plans/20260821-deepseek-max-tokens-raise.md §2.
+        model_context_window_tokens={
+            "deepseek-v4-flash": 1_000_000,
+            "deepseek-v4-pro": 1_000_000,
         },
     ),
     "qwen": ProviderSpec(

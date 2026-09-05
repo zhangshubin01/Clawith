@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import Settings, get_settings
 from app.models.llm import LLMModel
 from app.services.agent_runtime.runtime_model_settings import resolve_runtime_model_settings
+from app.services.llm.client import get_provider_spec
 
 
 class ModelCapabilityError(RuntimeError):
@@ -73,6 +74,18 @@ def _legacy_output_limit(value: int | None) -> int | None:
     return value if isinstance(value, int) and value > 0 else None
 
 
+def _provider_context_window_tokens(model: LLMModel) -> int | None:
+    """Official input context window from the provider registry, if known.
+
+    Used as the intermediate fallback between DB ``context_window_tokens`` and
+    the global runtime fallback, keyed by exact model name.
+    """
+    spec = get_provider_spec(model.provider)
+    if spec is None:
+        return None
+    return spec.model_context_window_tokens.get(model.model)
+
+
 class ModelCapabilityResolver:
     """Resolve model semantics without performing provider I/O."""
 
@@ -98,9 +111,14 @@ class ModelCapabilityResolver:
         max_output_tokens = _legacy_output_limit(model.max_output_tokens)
         capability_source = model.capability_source
         if context_window_tokens is None and max_input_tokens is None:
-            runtime_settings = settings or get_settings()
-            context_window_tokens = runtime_settings.AGENT_RUNTIME_FALLBACK_CONTEXT_WINDOW_TOKENS
-            capability_source = "runtime_config"
+            provider_context = _provider_context_window_tokens(model)
+            if provider_context is not None:
+                context_window_tokens = provider_context
+                capability_source = "builtin_registry"
+            else:
+                runtime_settings = settings or get_settings()
+                context_window_tokens = runtime_settings.AGENT_RUNTIME_FALLBACK_CONTEXT_WINDOW_TOKENS
+                capability_source = "runtime_config"
         return ResolvedModelCapabilities(
             context_window_tokens=context_window_tokens,
             max_input_tokens=max_input_tokens,
