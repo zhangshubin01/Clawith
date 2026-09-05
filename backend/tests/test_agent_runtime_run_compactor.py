@@ -12,6 +12,7 @@ from app.config import Settings
 from app.models.llm import LLMModel
 from app.services.agent_runtime.model_capabilities import ModelCapabilityError
 from app.services.agent_runtime.run_compactor import (
+    _COMPACTION_INSTRUCTION,
     RunCompactInputs,
     RunCompactorError,
     RuntimeRunCompactorService,
@@ -985,6 +986,30 @@ async def test_compaction_instruction_is_final_user_message_without_system() -> 
         assert section in instruction
     assert "stuck loop" in instruction
     assert "Next Step never controls Runtime routing" in instruction
+
+
+def test_compaction_instruction_forbids_corrective_rewrite_of_authorized_inputs() -> None:
+    """Primary Request and Intent must preserve authorization verbatim.
+
+    Regression contract for run 764eb591: the summary LLM "corrected" the
+    user's authorized wording ("均等创建者指示" → "均待创建者指示") and invented
+    "no authorization was granted". The instruction must hard-require verbatim
+    reproduction of ``authoritative_exact_inputs``, forbid corrective rewrites,
+    and make the original wording win over any prior judgment.
+    """
+    instruction = _COMPACTION_INSTRUCTION
+
+    # Hard rule: verbatim copy of the authoritative exact inputs.
+    assert "authoritative_exact_inputs" in instruction
+    assert "VERBATIM" in instruction
+    # Hard rule: the original wording wins over any prior judgment.
+    assert "wins over" in instruction
+    # Hard rule: suspected typos are preserved, not corrected.
+    assert "原文如此" in instruction
+    # Forbidden judgment sentences must be quoted as counter-examples.
+    assert "mis-transcription" in instruction
+    assert "No ... authorization was granted" in instruction
+    assert "未获授权" in instruction
 
 
 @pytest.mark.asyncio

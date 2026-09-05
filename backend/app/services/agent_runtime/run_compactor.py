@@ -63,7 +63,17 @@ Use terse bullets, not prose paragraphs. Write "(none)" for an empty section —
 never drop a section.
 
 ## Primary Request and Intent
-- [the user's original and evolving goals; quote verbatim where the exact wording matters]
+- [the user's original and evolving goals, authorization, scope, and task objectives]
+- Copy VERBATIM the authorization, scope, and task-objective wording from
+  authoritative_exact_inputs: reproduce the original text first, then explain
+  only if necessary — the explanation must never change the authorization
+  conclusion.
+- Never "correct" the user's wording. Do NOT emit judgments like "X is a
+  mis-transcription", "X 是误写", "No ... authorization was granted", or
+  "未获授权". If you suspect a typo, mark it 原文如此 (keep as written) and
+  preserve the original meaning — do not correct it.
+- The original wording in authoritative_exact_inputs wins over any prior
+  judgment or assumption.
 
 ## Key Technical Concepts
 - [technologies, frameworks, patterns, and conventions in play]
