@@ -105,8 +105,17 @@ Clawith 手写 OTel-backed facade 的**选型正确**（Langfuse Python SDK v4 �
 
 验证：`test_observability_tracing.py` / `test_observability_scores.py` 68 passed；`test_llm_failover.py` / `test_llm_single_step.py` 69 passed；ruff 通过；arch-guard P0 全绿（新增 4 条测试覆盖 agent 类型/trace 名/environment/status 脱敏）。
 
+**第二批提交（bfe7edc7）**：
+
+| 项 | 改动 |
+| --- | --- |
+| P1 #6 | `token_tracker.py` `TokenUsage` 新增 `reasoning_tokens` 字段 + `extract_token_usage` 从顶层 `reasoning_tokens` / `completion_tokens_details.reasoning_tokens` 提取；`output_tokens` 语义保持 inclusive（配额/计费账不变） |
+| P1 #6 | `tracing.py` `_map_usage` 仅 `provider=="deepseek"` 时拆 `output_reasoning_tokens` 桶（`output = max(output - reasoning, 0)`，total 仍=各桶求和）；非 deepseek 不拆、不发 reasoning 桶（避免双计） |
+| 部署注入 | `scripts/deploy.sh` export `LANGFUSE_ENVIRONMENT`（默认 `production`，调用前可 `LANGFUSE_ENVIRONMENT=staging` 覆盖）；`docker-compose.yml` 注入 `LANGFUSE_ENVIRONMENT: ${LANGFUSE_ENVIRONMENT:-}` |
+
+验证：`test_token_tracker.py` / `test_observability_tracing.py` / `test_observability_scores.py` 87 passed；ruff 通过；arch-guard P0 全绿；`bash -n scripts/deploy.sh` 与 `docker compose config` 通过（新增 3 条测试：reasoning 提取、deepseek 拆分、非 deepseek 不拆）。
+
 **留待后续（需外部配置或独立决策）**：
 - score `config_id`（需先在 Langfuse UI 建 ScoreConfig）
 - 自定义 model definition（UI `Project Settings > Models` 配 DeepSeek/Qwen 定价）
-- reasoning token 拆分（`TokenUsage` 增 reasoning 字段 → `output_reasoning_tokens` 分桶；触碰配额/计费账，建议单独立小票）
 - tool 输出采集（泄密 vs 排障的权衡）、采样/TTL（部署侧，高流量再评估）
