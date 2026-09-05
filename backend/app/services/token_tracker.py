@@ -4,7 +4,9 @@ Provides a single function to record token consumption against an Agent,
 used by web chat, heartbeat, triggers, and A2A communication.
 """
 
+import time
 import uuid
+from collections import OrderedDict
 from dataclasses import dataclass
 
 from loguru import logger
@@ -31,6 +33,73 @@ class TokenUsage:
         self.cache_creation_tokens += other.cache_creation_tokens
         self.cache_miss_tokens += other.cache_miss_tokens
         self.estimated_tokens += other.estimated_tokens
+
+
+# — Cache low-hit watchdog cooldown —
+# In long conversations the cache-miss ratio oscillates in a sawtooth:
+# compaction spikes to ~100% (history → summary rewrites the prefix) and
+# DeepSeek's prefix-cache eviction spikes to 50–66%, falling back to 30–48%
+# in between. The ≥50% threshold lands on every spike, so a single spike is
+# expected behaviour — only a *sustained* low hit rate signals a real break
+# (schema reorder / prompt edit). The warning is therefore rate-limited to
+# once per agent per window: the right shape for a one-shot "go check schema
+# stability" alert, and the fix for alert fatigue, not a workaround.
+# Langfuse usage_details (input / input_cache_read) and DailyTokenUsage already
+# carry the full hit/miss signal; this warning is a rate-limited operator alert
+# layered on top of that observation, not the source of truth for cache health.
+# In-memory like agent_tools_cache.py / list_dedup.py: production runs uvicorn
+# with a single worker; with several workers each holds its own cooldown and
+# the window only bounds per-worker noise.
+LOW_HIT_WARNING_COOLDOWN_SECONDS = 30 * 60.0  # decision value, not derived from any reference project
+_MAX_LOW_HIT_WARNING_ENTRIES = 1024
+_last_low_hit_warning: "OrderedDict[uuid.UUID, float]" = OrderedDict()
+
+
+def _evict_low_hit_lru_if_needed() -> None:
+    while len(_last_low_hit_warning) > _MAX_LOW_HIT_WARNING_ENTRIES:
+        _last_low_hit_warning.popitem(last=False)
+
+
+def _low_hit_warning_due(agent_id: uuid.UUID) -> bool:
+    """True when a low-hit warning should fire for this agent (cooldown elapsed)."""
+    now = time.monotonic()
+    last = _last_low_hit_warning.get(agent_id)
+    if last is not None and now - last < LOW_HIT_WARNING_COOLDOWN_SECONDS:
+        return False
+    _last_low_hit_warning[agent_id] = now
+    _last_low_hit_warning.move_to_end(agent_id)
+    _evict_low_hit_lru_if_needed()
+    return True
+
+
+def clear_low_hit_warning_cooldown() -> None:
+    """Test hook — drop every cooldown timestamp."""
+    _last_low_hit_warning.clear()
+
+
+def _maybe_warn_low_hit(agent_id: uuid.UUID, agent_name: str, usage: TokenUsage) -> None:
+    """Emit the cache-health warning, at most once per agent per cooldown window.
+
+    A sawtooth spike (compaction / cache eviction) is expected behaviour, not a
+    broken prefix; the per-agent cooldown collapses repeated spikes into a
+    single alert. Thresholds are unchanged so a real sustained break still
+    fires (once per window, indefinitely).
+    """
+    if usage.cache_miss_tokens < 1024:
+        return
+    miss_ratio = usage.cache_miss_tokens / max(usage.input_tokens, 1)
+    if miss_ratio < 0.5:
+        return
+    if not _low_hit_warning_due(agent_id):
+        return
+    logger.warning(
+        "[Token Cache] Low hit rate agent={} miss={} input={} "
+        "ratio={:.0%} — check prompt/tool-schema stability",
+        agent_name,
+        usage.cache_miss_tokens,
+        usage.input_tokens,
+        miss_ratio,
+    )
 
 
 def estimate_tokens_from_chars(total_chars: int) -> int:
@@ -232,20 +301,11 @@ async def record_token_usage(
                 agent.cache_miss_tokens_month = (agent.cache_miss_tokens_month or 0) + usage.cache_miss_tokens
                 agent.cache_miss_tokens_total = (agent.cache_miss_tokens_total or 0) + usage.cache_miss_tokens
 
-                # Cache health watchdog: a large share of uncached prompt tokens
-                # on a non-trivial request usually means the stable prefix was
-                # broken (schema reorder, prompt edit, cache eviction).
-                if usage.cache_miss_tokens >= 1024:
-                    miss_ratio = usage.cache_miss_tokens / max(usage.input_tokens, 1)
-                    if miss_ratio >= 0.5:
-                        logger.warning(
-                            "[Token Cache] Low hit rate agent={} miss={} input={} "
-                            "ratio={:.0%} — check prompt/tool-schema stability",
-                            agent.name,
-                            usage.cache_miss_tokens,
-                            usage.input_tokens,
-                            miss_ratio,
-                        )
+                # Cache health watchdog: a single high cache-miss step is not
+                # evidence of a broken prefix — compaction and cache eviction
+                # both spike then recover. Warn at most once per agent per
+                # window; a sustained break still fires once per window.
+                _maybe_warn_low_hit(agent_id, agent.name, usage)
 
                 from datetime import datetime, timezone
                 from sqlalchemy.dialects.postgresql import insert
