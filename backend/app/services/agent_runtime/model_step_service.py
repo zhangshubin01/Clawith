@@ -12,7 +12,7 @@ import uuid
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from copy import deepcopy
 from dataclasses import asdict, replace
-from typing import Protocol, cast
+from typing import Any, Protocol, cast
 
 from loguru import logger
 from sqlalchemy import select
@@ -80,6 +80,11 @@ from app.services.agent_runtime.tool_contracts import (
     ToolWorksetEntry,
     deadline_policy_for_tool,
     workset_version,
+)
+from app.services.agent_runtime.read_dedup import (
+    DEFAULT_READ_DEDUP_N,
+    build_read_dedup_map,
+    read_dedup_placeholder,
 )
 from app.services.agent_runtime.tool_exchange import ledger_from_executions
 from app.services.agent_runtime.tool_result_store import (
@@ -1333,6 +1338,7 @@ def _prompt_messages(
     model_step_count: int = 0,
     extra_instruction: str | None = None,
     turn_local_dynamic_prompt: str = "",
+    read_dedup: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> list[LLMMessage]:
     """Assemble the model input with a cache-friendly, protocol-safe layout.
 
@@ -1437,9 +1443,24 @@ def _prompt_messages(
             if isinstance(raw_tool_call_id, str)
             else None
         )
+        content = _model_message_content(raw, build)
+        if (
+            read_dedup
+            and role == "tool"
+            and isinstance(raw_tool_call_id, str)
+            and raw_tool_call_id in read_dedup
+        ):
+            # Soft placeholder: the repeated read_file body is dropped, but the
+            # tool result stays a legal tool result (tool_call_id preserved).
+            info = read_dedup[raw_tool_call_id]
+            content = read_dedup_placeholder(
+                str(info.get("path") or ""),
+                int(info.get("seen_count") or 0),
+                content if isinstance(content, str) else None,
+            )
         return LLMMessage(
             role=cast(str, role),  # type: ignore[arg-type]
-            content=_model_message_content(raw, build),
+            content=content,
             tool_calls=provider_tool_calls,
             tool_call_id=provider_tool_call_id,
             is_error=(
@@ -2318,6 +2339,7 @@ class RuntimeModelStepService:
         static_prompt: str,
         dynamic_prompt: str,
         turn_local_dynamic_prompt: str = "",
+        read_dedup_map: dict[str, dict[str, Any]] | None = None,
     ) -> tuple[list[LLMMessage] | ModelStepResult, JsonObject | None]:
         """Prepare the outbound messages plus the frozen budget profile.
 
@@ -2527,6 +2549,7 @@ class RuntimeModelStepService:
                 else None
             ),
             turn_local_dynamic_prompt=turn_local_dynamic_prompt,
+            read_dedup=read_dedup_map,
         )
         if soft_loop is not None and confirmation_instruction is None:
             # Absolutely-last position so the reminder is not overridden by
@@ -2830,6 +2853,19 @@ class RuntimeModelStepService:
         try:
             model, agent, ledger, executions = await self._load(context, state)
 
+            # P0 read-dedup: mark repeated read_file results for soft placeholders,
+            # computed from the execution ledger + the current cycle's messages
+            # (zero new checkpoint state; resets on compaction which clears messages).
+            read_dedup_map: dict[str, dict[str, Any]] = {}
+            try:
+                read_dedup_map = build_read_dedup_map(
+                    executions,
+                    runtime_messages_as_json(state),
+                    n=getattr(agent, "read_dedup_n", DEFAULT_READ_DEDUP_N),
+                )
+            except (TypeError, ValueError):
+                read_dedup_map = {}  # malformed checkpoint: skip dedup
+
             # 卡片模式: 惰性创建 CardStreamBridge（首次模型调用时）
             card_on_chunk = None
             card_on_thinking = None
@@ -2940,6 +2976,7 @@ class RuntimeModelStepService:
                 static_prompt=static_prompt,
                 dynamic_prompt=dynamic_prompt,
                 turn_local_dynamic_prompt=turn_local_dynamic_prompt,
+                read_dedup_map=read_dedup_map,
             )
             if isinstance(prepared, ModelStepResult):
                 return prepared
@@ -3090,6 +3127,7 @@ class RuntimeModelStepService:
                     static_prompt=fallback_static_prompt,
                     dynamic_prompt=fallback_dynamic_prompt,
                     turn_local_dynamic_prompt=fallback_turn_local_dynamic_prompt,
+                    read_dedup_map=read_dedup_map,
                 )
                 if isinstance(fallback_prepared, ModelStepResult):
                     return fallback_prepared

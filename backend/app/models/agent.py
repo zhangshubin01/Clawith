@@ -116,6 +116,10 @@ class Agent(Base):
     # Historical field name: this is the maximum number of model-decision turns
     # allowed for one Agent Run, not the number of tools executed.
     max_tool_rounds: Mapped[int] = mapped_column(Integer, default=10000)
+    # Model-side read_file dedup threshold: after N reads of the same
+    # (path, content_hash) within a compaction cycle, further repeats are fed
+    # as soft placeholders instead of the full body. 0 disables dedup.
+    read_dedup_n: Mapped[int] = mapped_column(Integer, default=3)
 
     # Trigger limits (per-agent, configurable from Settings UI)
     max_triggers: Mapped[int] = mapped_column(Integer, default=20)

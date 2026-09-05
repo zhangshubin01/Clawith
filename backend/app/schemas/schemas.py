@@ -269,6 +269,7 @@ class AgentOut(BaseModel):
     max_tokens_per_month: int | None = None
     context_window_size: int = 200
     max_tool_rounds: int = 10000
+    read_dedup_n: int = 3
     max_triggers: int = 20
     min_poll_interval_min: int = 5
     webhook_rate_limit: int = 5
@@ -314,6 +315,7 @@ class AgentUpdate(BaseModel):
     max_tokens_per_day: int | None = None
     max_tokens_per_month: int | None = None
     max_tool_rounds: int | None = Field(default=None, ge=5)  # upper cap (10000) enforced (clamped) in the API layer
+    read_dedup_n: int | None = Field(default=None, ge=0)  # 0 disables model-side read_file dedup
     max_triggers: int | None = None
     min_poll_interval_min: int | None = None
     webhook_rate_limit: int | None = None

@@ -3082,6 +3082,7 @@ export default function AgentDetailPage() {
         fallback_model_id: '',
         context_window_size: 200,
         max_tool_rounds: 10000,
+        read_dedup_n: 3,
         max_tokens_per_day: '' as string | number,
         max_tokens_per_month: '' as string | number,
         max_triggers: 20,
@@ -3101,6 +3102,7 @@ export default function AgentDetailPage() {
                 fallback_model_id: agent.fallback_model_id || '',
                 context_window_size: agent.context_window_size ?? 200,
                 max_tool_rounds: (agent as any).max_tool_rounds ?? 10000,
+                read_dedup_n: (agent as any).read_dedup_n ?? 3,
                 max_tokens_per_day: agent.max_tokens_per_day || '',
                 max_tokens_per_month: agent.max_tokens_per_month || '',
                 max_triggers: (agent as any).max_triggers ?? 20,
@@ -3121,6 +3123,7 @@ export default function AgentDetailPage() {
         settingsForm.fallback_model_id !== (agent?.fallback_model_id || '') ||
         settingsForm.context_window_size !== (agent?.context_window_size ?? 200) ||
         settingsForm.max_tool_rounds !== ((agent as any)?.max_tool_rounds ?? 10000) ||
+        settingsForm.read_dedup_n !== ((agent as any)?.read_dedup_n ?? 3) ||
         String(settingsForm.max_tokens_per_day) !== String(agent?.max_tokens_per_day || '') ||
         String(settingsForm.max_tokens_per_month) !== String(agent?.max_tokens_per_month || '') ||
         settingsForm.max_triggers !== ((agent as any)?.max_triggers ?? 20) ||
@@ -3137,6 +3140,7 @@ export default function AgentDetailPage() {
                 fallback_model_id: settingsForm.fallback_model_id || null,
                 context_window_size: settingsForm.context_window_size,
                 max_tool_rounds: settingsForm.max_tool_rounds,
+                read_dedup_n: settingsForm.read_dedup_n,
                 max_tokens_per_day: settingsForm.max_tokens_per_day ? Number(settingsForm.max_tokens_per_day) : null,
                 max_tokens_per_month: settingsForm.max_tokens_per_month ? Number(settingsForm.max_tokens_per_month) : null,
                 max_triggers: settingsForm.max_triggers,

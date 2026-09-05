@@ -13,6 +13,7 @@ type SettingsFormState = {
     fallback_model_id: string;
     context_window_size: number;
     max_tool_rounds: number;
+    read_dedup_n: number;
     max_tokens_per_day: string | number;
     max_tokens_per_month: string | number;
     max_triggers: number;
@@ -180,6 +181,18 @@ export default function SettingsTab(props: Props) {
                         style={{ width: '120px' }}
                     />
                     <div style={{ fontSize: '11px', color: 'var(--text-tertiary)', marginTop: '4px' }}>{t('agent.settings.maxToolRoundsDesc', 'Each model step that returns a result counts, including wait or error results. Tool-call count is separate. Default: 10000')}</div>
+                </div>
+                <div style={{ marginTop: '12px' }}>
+                    <label style={{ display: 'block', fontSize: '13px', fontWeight: 500, marginBottom: '6px' }}>{t('agent.settings.readDedupNLabel', 'Repeated read threshold')}</label>
+                    <input
+                        className="input"
+                        type="number"
+                        min={0}
+                        value={settingsForm.read_dedup_n}
+                        onChange={(e) => setSettingsForm((form) => ({ ...form, read_dedup_n: Math.max(0, Math.min(50, parseInt(e.target.value) || 0)) }))}
+                        style={{ width: '120px' }}
+                    />
+                    <div style={{ fontSize: '11px', color: 'var(--text-tertiary)', marginTop: '4px' }}>{t('agent.settings.readDedupNDesc', 'Repeated reads of unchanged file content become placeholders after this many times within one context cycle. 0 disables dedup. Default: 3')}</div>
                 </div>
             </div>
 
