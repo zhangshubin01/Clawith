@@ -6,8 +6,7 @@
 - read 新 (path, content_hash) +1 / 重复 0；execute_code 同 command 结果哈希变化
   +1 / 失败→成功 +2 / 新命令首次观察或重复 0；write 真实变更 +3 / 空编辑 0；
   external_write 假定前进 +3；
-- look-only 上限：连续 N=6 轮纯观察（无真实写变更）后强制归零，封「逐文件读遍」
-  与「无限发明新命令串」两类游走；
+- 连续读全新文件不累积 streak（正常探索不误杀）；读遍后重复读（零增益）才累积；
 - 阶梯 nudge(3)/pivot(5)/stop(8)。
 """
 
@@ -20,7 +19,6 @@ from app.services.agent_runtime.no_progress import (
     LADDER_NUDGE,
     LADDER_PIVOT,
     LADDER_STOP,
-    NoProgressConfig,
     NoProgressSignal,
     RoundState,
     build_no_progress_signal,
@@ -232,64 +230,6 @@ def test_external_write_scores_three() -> None:
 
 
 # ---------------------------------------------------------------------------
-# look-only 上限
-# ---------------------------------------------------------------------------
-
-
-def test_look_only_cap_forces_zero_after_six_observation_rounds() -> None:
-    config = NoProgressConfig(look_only_cap=6)
-    state = RoundState()
-    # 前 5 轮逐文件读遍：每轮读新文件 → 仍 +1
-    for i in range(5):
-        assert (
-            score_round(
-                [_execution(tool_name="read_file", path=f"f{i}.py", content_hash=f"h{i}")],
-                state,
-                config=config,
-            )
-            == 1
-        )
-    # 第 6 轮仍是纯观察 → 强制归零（封「打开从未见过的文件」游走）
-    assert (
-        score_round(
-            [_execution(tool_name="read_file", path="f99.py", content_hash="h99")],
-            state,
-            config=config,
-        )
-        == 0
-    )
-
-
-def test_real_mutation_resets_look_only_run() -> None:
-    config = NoProgressConfig(look_only_cap=6)
-    state = RoundState()
-    for i in range(5):
-        score_round(
-            [_execution(tool_name="read_file", path=f"f{i}.py", content_hash=f"h{i}")],
-            state,
-            config=config,
-        )
-    # 一次真实写变更重置观察计数
-    assert (
-        score_round(
-            [_execution(tool_name="edit_file", effect="write", material_change=True)],
-            state,
-            config=config,
-        )
-        == 3
-    )
-    # 重置后读新文件重新计分
-    assert (
-        score_round(
-            [_execution(tool_name="read_file", path="new.py", content_hash="nh")],
-            state,
-            config=config,
-        )
-        == 1
-    )
-
-
-# ---------------------------------------------------------------------------
 # 阶梯
 # ---------------------------------------------------------------------------
 
@@ -367,16 +307,30 @@ def test_git_inspection_loop_triggers_stop() -> None:
     assert signal.last_round_gain == 0
 
 
-def test_read_file_walk_triggers_look_only_then_streak() -> None:
-    """逐文件读遍游走：前 5 轮 +1，第 6 轮起 look-only 归零 → streak 累计 → stop。"""
-    config = NoProgressConfig()
+def test_continuous_new_reads_do_not_accumulate_streak() -> None:
+    """正常探索不误杀：每轮读一个全新文件，streak 恒为 0（不再有 look-only 归零）。"""
     rounds = [
         [_execution(tool_name="read_file", path=f"f{i}.py", content_hash=f"h{i}")]
         for i in range(14)
     ]
-    signal = fold_rounds(rounds, config=config)
-    # 前 5 轮有增益（streak 0），第 6..14 轮被 look-only 上限强制归零（9 轮）→ streak=9
-    assert signal.streak == 9
+    signal = fold_rounds(rounds)
+    assert signal.streak == 0
+    assert signal.level == LADDER_NONE
+
+
+def test_read_walk_repeat_reads_triggers_stop() -> None:
+    """读遍文件后回头重复读：新读不累积，重复读（零增益）累积 → stop。"""
+    rounds = [
+        [_execution(tool_name="read_file", path=f"f{i}.py", content_hash=f"h{i}")]
+        for i in range(6)
+    ]
+    # 回头重读同样 6 个文件 8 轮 → 零增益 → streak 8 → stop
+    rounds += [
+        [_execution(tool_name="read_file", path=f"f{i % 6}.py", content_hash=f"h{i % 6}")]
+        for i in range(8)
+    ]
+    signal = fold_rounds(rounds)
+    assert signal.streak == 8
     assert signal.level == LADDER_STOP
 
 

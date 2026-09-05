@@ -24,7 +24,7 @@ Clawith 现有熔断器全是「签名级」——判定「动作是否相同」
 | Q3-A | 并存现有熔断器；**退役 `detect_loop` 的 `tools_fp` 维**（工具 schema 摘要恒定 = 死信号），保留 `prefix_fp` + compaction flag 本体 |
 | Q4 | 阶梯语义 nudge/pivot/stop；接线复用 `_audit_breaker_event` |
 | Q5-A | tdd 先行 + dc557d91 回归用例 |
-| Q6 | 增益键表（下表）+ **look-only 上限**（连续 N 轮纯观察 → 强制零增益） |
+| Q6 | 增益键表（下表）；streak 纯粹由「连续零增益」（连续无任何新证据）驱动，不设 look-only 上限（见 §三末更正） |
 | Q7-B | 阈值 3/5/8（对齐 `_SUCCESS_LOOP_THRESHOLD=5`、DeepCode 3/5/8 口径） |
 | Q8-B | stop = 注入「停止探索、交最终答案」+ 放行 finish（非硬 terminate） |
 | Q9-A | 增益从 ledger 重放计算（零新 checkpoint 状态）；`streak` 单值（bounded）；per-turn 重算 |
@@ -44,7 +44,7 @@ Clawith 现有熔断器全是「签名级」——判定「动作是否相同」
 | write 族 | 空编辑 / 无 revision | 0 | 同左 |
 | external_write | 外部副作用（无 workspace 证据可验） | +3 | `effect=external_write`，假定前进 |
 
-**look-only 上限**（封死 git 绕圈 / 逐文件读遍游走）：连续 `look_only_cap=6` 轮「无任何真实写变更」后，即使后续轮读到新文件/命令输出变化，也强制该轮增益 = 0。Reasonix `explorationRunLimit=6` 的直接移植；Clawith 比它更强——git status/branch/checkout/fetch 永不产生 WorkspaceFileRevision，天然零材料进度。
+**无 look-only 上限**（2026-09-05 双源验证后更正）：初版照搬 Reasonix `explorationRunLimit=6`，在连续 6 轮「无真实写变更」后强制归零。生产 run `5a70c8ef` 逐轮还原发现它把「正常调研探索」（每轮读新文件）锁成误杀——`look_only_run` 计数器只被真实写重置、不被新读重置，第 8-11 轮真正读新源码文件的增益被强制归零，streak 累积到 8 触发 stop。修正：**删掉 look-only 上限**，streak 纯粹由「连续零增益」（连续无任何新证据）驱动——正常探索每轮读新文件不累积；「读遍文件绕圈」的终点（读无可读后重复读）仍被 gain==0 抓住，另有 200 轮 recursion_limit + 结果验收双兜底。
 
 ## 四、`no_progress.py` 纯函数核心（本票交付）
 
@@ -58,17 +58,15 @@ class NoProgressConfig:
     nudge_threshold: int = 3
     pivot_threshold: int = 5
     stop_threshold: int = 8
-    look_only_cap: int = 6
 
 @dataclass
 class RoundState:                      # run-scoped 折叠态（replay，零持久化）
     read_keys: set[tuple[str, str]]    # 已读 (path, content_hash)
     command_results: dict[str, str]    # command_key -> 最近结果哈希
     command_failed: set[str]           # 曾失败的命令
-    look_only_run: int = 0             # 连续纯观察轮数
 
-def score_round(executions, state, *, config=NoProgressConfig()) -> int
-    # 对一轮的工具执行求和增益；更新 state；look-only 上限强制归零
+def score_round(executions, state, *, material_change_of=None) -> int
+    # 对一轮的工具执行求和增益；更新 state；纯证据驱动（无 look-only 上限）
 
 def classify_streak(streak, *, config=NoProgressConfig()) -> str
     # none / nudge / pivot / stop
@@ -107,7 +105,7 @@ def no_progress_message(signal) -> str | None
 `backend/tests/test_agent_runtime_no_progress.py`，红→绿：
 
 - **增益分**：新读 +1 / 重复读 0；execute_code 新结果 +1、失败→成功 +2、重复 0；write 真实变更 +3、空编辑 0；external_write +3；failed 读/命令不计分。
-- **look-only 上限**：连续 6 轮纯观察后，第 7 轮读新文件仍 0；中间出现真实写变更即重置。
+- **正常探索不误杀**：连续读全新文件 streak 恒 0；读遍后回头重复读（零增益）才累积 → stop。
 - **阶梯**：streak 2→none、3→nudge、5→pivot、8→stop；正增益即清零 streak。
 - **fold**：混排 rounds 的尾部 streak 与 last_round_gain。
 - **dc557d91 回归**：14 次 edit_file（真实变更）不应触发 stop；git status/branch/checkout/fetch 绕圈（零材料进度）应触发。

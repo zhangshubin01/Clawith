@@ -20,11 +20,6 @@ Design contract (see docs/technical-plans/20260905-agent-no-progress-detection-p
   status/branch/checkout/fetch uses), repeat 0.  write (``effect == "write"``)
   with a real mutation (``material_change``) +3, empty edit 0.  external_write
   +3 (no workspace evidence to verify, so assume forward progress).
-- **Look-only cap.** ``look_only_cap`` consecutive turns with no real mutation
-  force the turn's gain to zero even if it read new files / produced changed
-  command output — sealing the "read every file it never opened" walk
-  (Reasonix ``explorationRunLimit`` port; Clawith's material-change signal
-  makes it stricter).
 - **Zero new checkpoint state.** Everything is replayed from the ledger +
   ``material_change`` (resolved by the wiring layer from
   ``workspace_file_revisions`` before≠after); ``RoundState`` is a run-scoped
@@ -54,12 +49,11 @@ _CODE_TOOL = "execute_code"
 
 @dataclass(frozen=True, slots=True)
 class NoProgressConfig:
-    """Ladder thresholds and the look-only cap (Q7-B / Q6)."""
+    """Ladder thresholds (nudge / pivot / stop)."""
 
     nudge_threshold: int = 3
     pivot_threshold: int = 5
     stop_threshold: int = 8
-    look_only_cap: int = 6
 
 
 @dataclass
@@ -69,7 +63,6 @@ class RoundState:
     read_keys: set[tuple[str, str]] = field(default_factory=set)
     command_results: dict[str, str] = field(default_factory=dict)
     command_failed: set[str] = field(default_factory=set)
-    look_only_run: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -158,20 +151,18 @@ def score_round(
     executions: Sequence[Any],
     state: RoundState,
     *,
-    config: NoProgressConfig = NoProgressConfig(),
     material_change_of: Callable[[Any], bool] | None = None,
 ) -> int:
     """Score ONE model turn's tool executions for evidence gain.
 
     Mutates ``state`` in place (the run-scoped seen-set), returns the turn's
-    total gain.  A turn with a real mutation resets the look-only counter; a
-    turn without one increments it, and once it reaches ``look_only_cap`` the
-    turn is forced to zero gain regardless of fresh reads / changed output.
-    ``material_change_of`` (optional) resolves whether a write really mutated
-    workspace content; default reads ``execution.material_change``.
+    total gain.  A turn's gain is purely evidence-driven: fresh reads, changed
+    command output, failure recovery, and real mutations all score; a turn with
+    no new evidence scores zero.  ``material_change_of`` (optional) resolves
+    whether a write really mutated workspace content; default reads
+    ``execution.material_change``.
     """
     gain = 0
-    material = False
     for execution in executions:
         tool = getattr(execution, "tool_name", None)
         if tool == _READ_TOOL:
@@ -179,16 +170,7 @@ def score_round(
         elif tool == _CODE_TOOL:
             gain += _code_gain(execution, state)
         else:
-            write_gain = _write_gain(execution, material_change_of)
-            gain += write_gain
-            if write_gain > 0:
-                material = True
-    if material:
-        state.look_only_run = 0
-    else:
-        state.look_only_run += 1
-        if config.look_only_cap > 0 and state.look_only_run >= config.look_only_cap:
-            return 0
+            gain += _write_gain(execution, material_change_of)
     return gain
 
 
@@ -226,7 +208,6 @@ def fold_rounds(
         gain = score_round(
             round_executions,
             state,
-            config=config,
             material_change_of=material_change_of,
         )
         last_gain = gain
