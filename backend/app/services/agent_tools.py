@@ -1774,6 +1774,11 @@ class TempWorkspace:
     materialized_paths: list[str]
     publish_paths: list[str]
     manifest: dict[str, TempWorkspaceManifestEntry]
+    # workspace-relative path → sha256 of the repo's git HEAD version, captured
+    # at materialization. Empty when no git repo is present (best-effort); the
+    # flush revert guard compares a cas_file's sandbox hash against this to
+    # distinguish an intentional edit from a git checkout/reset back to HEAD.
+    git_head_hashes: dict[str, str] = field(default_factory=dict)
 
     @property
     def selected_paths(self) -> list[str]:
@@ -1924,6 +1929,7 @@ async def _prepare_temp_workspace(
     await _restore_git_bundles(temp_ws, agent_id, git_bundles, manifest)
     await gitlab_workspace.restore_git_metadata_from_remote(temp_ws, agent_id)
     await gitlab_workspace.inject_credentials_into_temp_workspace(temp_ws, agent_id)
+    git_head_hashes = await _capture_git_head_hashes(temp_ws)
     skipped_skills = [
         path
         for path in budget["skipped"]
@@ -1943,7 +1949,30 @@ async def _prepare_temp_workspace(
         materialized_paths=list(selected),
         publish_paths=list(selected if publish_paths is None else publish_paths),
         manifest=manifest,
+        git_head_hashes=git_head_hashes,
     )
+
+
+async def _capture_git_head_hashes(root: Path) -> dict[str, str]:
+    """Capture ``{workspace-relative path: sha256}`` for each repo tracked at HEAD.
+
+    Runs after git bundle/remote restore, so each materialized repo's ``.git``
+    resolves ``HEAD``. Paths are normalized to the same namespace as the
+    flush-time ``cas_files`` keys (``workspace/<repo>/<path>``). Best-effort:
+    no repo or any git failure yields an empty dict and the flush guard simply
+    never triggers.
+    """
+    hashes: dict[str, str] = {}
+    root_resolved = root.resolve()
+    for repo in gitlab_workspace._iter_repo_copies(root):
+        try:
+            repo_rel = repo.resolve().relative_to(root_resolved).as_posix()
+        except ValueError:
+            continue
+        tree = await gitlab_workspace.capture_head_tree_hashes(repo, root)
+        for path, digest in tree.items():
+            hashes[normalize_workspace_path(f"{repo_rel}/{path}")] = digest
+    return hashes
 
 
 async def _materialize_storage_path_with_budget(
@@ -2096,6 +2125,21 @@ async def _sync_tasks_to_file(agent_id: uuid.UUID, ws: Path):
         logger.error(f"[AgentTools] Failed to sync tasks: {e}")
 
 
+async def _current_storage_hash(storage, storage_key: str) -> str | None:
+    """Read the live storage content hash for a key; ``None`` on any failure.
+
+    Used by the flush revert guard to confirm storage has actually diverged from
+    git HEAD (a stale manifest ``base_hash`` snapshot is not authoritative).
+    """
+    try:
+        data = await storage.read_bytes(storage_key)
+    except Exception:  # noqa: BLE001 — guard is best-effort
+        return None
+    if not data:
+        return None
+    return content_hash_bytes(data)
+
+
 async def flush_temp_workspace(
     temp_workspace: TempWorkspace,
     conflict_mode: Literal["fail", "overwrite"] = "fail",
@@ -2111,11 +2155,16 @@ async def flush_temp_workspace(
     cas_files.update(await _create_git_bundles(temp_workspace.root, git_repos))
     local_files = {**cas_files, **overwrite_files}
     run_id = sandbox_run_scope_id.get().strip() or None
+    git_head_hashes = temp_workspace.git_head_hashes
 
     updated: list[str] = []
     conflicted: list[str] = []
     deleted: list[str] = []
     skipped: list[str] = []
+    # Paths whose sandbox copy was reverted to git HEAD while storage diverged:
+    # publishing would erase an edit_file (or other) write, so the flush skips
+    # them and surfaces them here for observability.
+    reverted: list[str] = []
     # Per-conflict CAS forensics (path/operation/condition/expected/current),
     # mirroring the fields of the [WorkspaceFlushConflict] warning log so the
     # same evidence survives in the ledger after container logs rotate.
@@ -2177,6 +2226,27 @@ async def flush_temp_workspace(
                 else WriteCondition(require_absent=True)
             )
             storage_key = entry.storage_key if entry else normalize_storage_key(f"{temp_workspace.agent_id}/{rel_path}")
+            # Revert guard: if the sandbox copy is byte-identical to the repo's
+            # git HEAD while storage has diverged from HEAD, the divergence came
+            # from a git checkout/reset reverting an uncommitted edit — not an
+            # intentional edit. Publishing would silently erase the edit, so
+            # refuse the publish and warn instead.
+            git_head_hash = git_head_hashes.get(rel_path)
+            if entry is not None and git_head_hash is not None and current_hash == git_head_hash:
+                storage_hash = await _current_storage_hash(storage, storage_key)
+                if storage_hash is not None and storage_hash != git_head_hash:
+                    reverted.append(rel_path)
+                    logger.warning(
+                        "[WorkspaceFlushRevertGuard] run_id={} agent_id={} path={} "
+                        "sandbox_hash={} git_head_hash={} storage_hash={}",
+                        run_id,
+                        temp_workspace.agent_id,
+                        rel_path,
+                        current_hash,
+                        git_head_hash,
+                        storage_hash,
+                    )
+                    continue
             if conflict_mode == "overwrite":
                 await storage.write_bytes(storage_key, data)
                 version = await storage.get_version(storage_key)
@@ -2261,6 +2331,7 @@ async def flush_temp_workspace(
                         "conflicted": conflicted,
                         "conflict_details": conflict_details,
                         "skipped": skipped,
+                        "reverted": reverted,
                         "derived_skipped_count": len(derived_paths),
                     }
                 continue
@@ -2351,6 +2422,7 @@ async def flush_temp_workspace(
                         "conflicted": conflicted,
                         "conflict_details": conflict_details,
                         "skipped": skipped,
+                        "reverted": reverted,
                         "derived_skipped_count": len(derived_paths),
                     }
                 continue
@@ -2382,6 +2454,7 @@ async def flush_temp_workspace(
         "conflicted": conflicted,
         "conflict_details": conflict_details,
         "skipped": skipped,
+        "reverted": reverted,
         "derived_skipped_count": len(derived_paths),
     }
 
@@ -3443,6 +3516,7 @@ async def _execute_code_with_workspace_outcome(
                     "conflicted": [],
                     "conflict_details": [],
                     "skipped": [],
+                    "reverted": [],
                     "derived_skipped_count": 0,
                 }
                 changed_refs = tuple(
@@ -3495,7 +3569,7 @@ async def _execute_code_with_workspace_outcome(
                 candidate_metadata = await reconciliation_metadata()
                 recovered = await recover_publication(
                     outcome,
-                    {"updated": [], "deleted": [], "conflicted": [], "skipped": [], "derived_skipped_count": 0},
+                    {"updated": [], "deleted": [], "conflicted": [], "skipped": [], "reverted": [], "derived_skipped_count": 0},
                 )
                 if recovered is not None:
                     return recovered

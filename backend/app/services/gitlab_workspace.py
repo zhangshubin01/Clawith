@@ -25,6 +25,7 @@ from __future__ import annotations
 import asyncio
 import re
 import shutil
+import tarfile
 import tempfile
 import uuid
 from pathlib import Path
@@ -33,6 +34,7 @@ from urllib.parse import urlparse
 from loguru import logger
 
 from app.config import get_settings
+from app.services.storage_runtime.base import content_hash_bytes
 
 _AGENT_INIT_LOCKS: dict[uuid.UUID, asyncio.Lock] = {}
 
@@ -323,6 +325,55 @@ def _iter_repo_copies(root: Path):
     for entry in sorted(workspace.iterdir()):
         if entry.is_dir() and (entry / ".git" / "HEAD").is_file():
             yield entry
+
+
+async def capture_head_tree_hashes(repo: Path, scratch_dir: Path) -> dict[str, str]:
+    """Return ``{repo-relative path: sha256}`` for every file tracked at HEAD.
+
+    Uses ``git archive`` (writes a tar into ``scratch_dir``, never through
+    stdout) so file contents are not truncated by ``_run_git``'s 4096-char
+    output cap, then hashes each regular file with ``content_hash_bytes`` so the
+    digests are directly comparable to the flush-time ``current_hash`` of a
+    ``cas_file``.
+
+    Best-effort by design: any git/archive failure returns ``{}`` — the revert
+    guard is a protective skip and must never break workspace materialization.
+    """
+    tar_path = scratch_dir / f"clawith-head-{repo.name}.tar"
+    try:
+        rc, _, err = await _run_git(
+            ["archive", "-o", str(tar_path), "HEAD"],
+            cwd=repo,
+        )
+    except OSError:  # e.g. repo dir missing — best-effort guard
+        return {}
+    if rc != 0 or not tar_path.is_file():
+        logger.warning(
+            "[GitHeadTreeCapture] archive failed repo={}: {}",
+            repo,
+            err.strip()[:200],
+        )
+        return {}
+    hashes: dict[str, str] = {}
+    try:
+        with tarfile.open(tar_path) as tf:
+            for member in tf.getmembers():
+                if not member.isfile():
+                    continue
+                extracted = tf.extractfile(member)
+                if extracted is None:
+                    continue
+                hashes[member.name] = content_hash_bytes(extracted.read())
+    except (tarfile.TarError, OSError) as exc:  # noqa: BLE001 — best-effort guard
+        logger.warning(
+            "[GitHeadTreeCapture] extract failed repo={} error_type={}",
+            repo,
+            type(exc).__name__,
+        )
+        return {}
+    finally:
+        tar_path.unlink(missing_ok=True)
+    return hashes
 
 
 async def _load_binding_credential(agent_id: uuid.UUID) -> tuple[str, str, str, str, str, str, str | None] | None:
