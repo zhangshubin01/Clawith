@@ -19,7 +19,7 @@ Clawith 现有熔断器全是「签名级」——判定「动作是否相同」
 
 | # | 决策 |
 |---|---|
-| Q1-B | 过程无进展先行（本票）；结果验收（judge `run_outcome`/`attempt_count` 接运行循环）随后独立成票 |
+| Q1-B | 过程无进展先行（本票）；结果验收（judge `run_outcome`/`attempt_count` 接运行循环）**已由既有 `TaskCompletionGate` + `verify` 节点实现，无需新票**（更正 2026-09-05：原「随后独立成票」系未核对既有代码的错误前提） |
 | Q2-A | 信号 = 证据增益 + workspace 材料变迁，确定性、零 LLM 成本（不用 gemini-cli LLM 语义复核） |
 | Q3-A | 并存现有熔断器；**退役 `detect_loop` 的 `tools_fp` 维**（工具 schema 摘要恒定 = 死信号），保留 `prefix_fp` + compaction flag 本体 |
 | Q4 | 阶梯语义 nudge/pivot/stop；接线复用 `_audit_breaker_event` |

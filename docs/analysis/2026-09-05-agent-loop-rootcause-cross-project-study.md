@@ -91,7 +91,7 @@ const explorationRunLimit = 6  // 连续 6 轮「只看不写」，连读新文�
 
 连续 N 轮「零材料进度」→ nudge / pivot / stop 阶梯（Goal 强制 replan，chat 强制最终答案）。
 
-**结果验收闭环**：Clawith judge 平台（`run_outcome`/`attempt_count` 评分、judge evaluator/rule ID，票 03/04 已上线）就是 rubric 原料，缺的是把它从「事后打分」接到「模型要结束时 → 验收 → needs_revision 强制继续」的运行期闭环。
+**结果验收闭环**：Clawith judge 平台（`run_outcome`/`attempt_count` 评分、judge evaluator/rule ID，票 03/04 已上线）是 rubric 的离线可观测原料（与运行期门分轨）；而「模型要结束时 → 验收 → needs_revision 强制继续」的运行期闭环**已由既有 `TaskCompletionGate`（LLM 判 pass/repair）+ `verify` 节点（repair → 注入消息 → 继续，`max_verification_repairs=10`）实现**，即 deepagents RubricMiddleware 的迁移，早于本观察已建成——原「缺的是…运行期闭环」不成立，已更正。
 
 ## 五、源码出处索引
 

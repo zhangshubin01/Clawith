@@ -17,7 +17,7 @@ Clawith 现有熔断器全是「签名级」：`_trailing_identical_calls`（连
 2. **阶梯 nudge(3) / pivot(5) / stop(8)**，对齐现有 `_SUCCESS_LOOP_THRESHOLD=5` 与 DeepCode 3/5/8 口径；stop 档注入「停止探索、交最终答案」并放行 finish，非硬 terminate。
 3. **并存现有熔断器，但退役 `detect_loop` 的 `tools_fp` 维**：工具 schema 摘要恒定、是死信号；保留 `prefix_fp` + compaction flag 本体（压缩失忆循环仍由它兜底）。`tools_fp` 降级为纯日志诊断。
 4. **零新 checkpoint 状态**：增益从 ledger（`agent_tool_executions` 的 effect/status/sanitized_arguments/result_metadata）+ `workspace_file_revisions`（before≠after = 真实变更，空编辑无 revision 行）重放计算；`streak` 单值、per-turn 重算。
-5. **过程无进展先行**；结果验收（judge `run_outcome`/`attempt_count` 接入运行循环的「要结束时验收 → needs_revision 强制继续」）随后独立成票（deepagents RubricMiddleware 的迁移）。
+5. **过程无进展先行**；结果验收（「要结束时验收 → needs_revision 强制继续」）**已由既有 `TaskCompletionGate` + `verify` 节点实现**（deepagents RubricMiddleware 的迁移，早于本 ADR 已建成；judge `run_outcome`/`attempt_count` 属已上线的独立离线可观测轨道，票 03/04）。*更正 2026-09-05：原稿「结果验收随后独立成票」系写稿时未核对既有代码的错误前提，本维度无需新票。*
 
 ## 后果
 
