@@ -381,6 +381,70 @@ def test_extract_reflections_injection_truncates_at_cap():
     assert extracted.endswith("\n...(truncated)")
 
 
+def test_extract_reflections_injection_caps_hypotheses_to_most_recent():
+    from app.services.agent_context import (
+        _MAX_HYPOTHESIS_VERDICTS,
+        _extract_reflections_injection,
+    )
+
+    verdicts = [
+        f"- ✅ 旧结论 {i}"
+        for i in range(_MAX_HYPOTHESIS_VERDICTS + 5)
+    ]
+    content = "## Hypotheses & Experiments\n" + "\n".join(verdicts) + "\n"
+
+    extracted = _extract_reflections_injection(content)
+
+    # 只保留最近 N 条：最旧的 5 条被裁掉，最新一条仍在。
+    assert "旧结论 0" not in extracted
+    assert "旧结论 4" not in extracted
+    assert "旧结论 5" in extracted
+    assert f"旧结论 {_MAX_HYPOTHESIS_VERDICTS + 4}" in extracted
+    # 最新在前（append-ordered 日志取尾部再反转）。
+    assert (
+        extracted.index(f"旧结论 {_MAX_HYPOTHESIS_VERDICTS + 4}")
+        < extracted.index("旧结论 5")
+    )
+
+
+def test_extract_reflections_injection_orders_insights_newest_first():
+    from app.services.agent_context import _extract_reflections_injection
+
+    content = (
+        "## Insights & Discoveries\n"
+        "- 最早发现 A\n"
+        "- 中间发现 B\n"
+        "- 最新发现 C\n"
+    )
+
+    extracted = _extract_reflections_injection(content)
+
+    # 时间倒序：最新发现排最前，截头时保留的是新知识而非旧条目。
+    assert extracted.index("最新发现 C") < extracted.index("中间发现 B")
+    assert extracted.index("中间发现 B") < extracted.index("最早发现 A")
+
+
+def test_extract_reflections_injection_drops_template_noise():
+    from app.services.agent_context import _extract_reflections_injection
+
+    content = "\n".join(
+        [
+            "## Insights & Discoveries",
+            "_Verified findings worth remembering. Include sources where applicable._",
+            "",
+            "- (none yet)",
+            "",
+            "## Hypotheses & Experiments",
+            "_Ideas you want to test. Mark with ✅ verified, ❌ disproven, or 🔄 in progress._",
+            "",
+            "- (none yet)",
+        ]
+    )
+
+    # 空模板不注入任何内容：描述行与 "- (none yet)" 占位符都不进上下文。
+    assert _extract_reflections_injection(content) == ""
+
+
 @pytest.mark.asyncio
 async def test_reflections_injection_on_injects_filtered_sections_and_profile():
     from app.services.agent_context import build_agent_context

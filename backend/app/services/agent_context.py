@@ -36,14 +36,25 @@ _REFLECTIONS_INJECTION_SECTION_ORDER = (
     "Hypotheses & Experiments",
 )
 
+# Recency + count cap for hypothesis verdicts injected per run. The journal is
+# append-ordered (newest entry at the bottom), so the freshest verdicts are the
+# trailing ones; keeping only those stops stale ✅/❌ history from bloating every
+# step's context as the log grows (G1' injection slimming).
+_MAX_HYPOTHESIS_VERDICTS = 10
+
 
 def _extract_reflections_injection(content: str, *, max_chars: int = 2000) -> str:
     """Extract conclusion-only reflections content for per-run injection.
 
-    Only Insights & Discoveries (full section) and the ✅/❌ verdict lines of
-    Hypotheses & Experiments qualify. Open Questions, in-progress hypotheses,
+    Only the bullet entries of Insights & Discoveries and the ✅/❌ verdict lines
+    of Hypotheses & Experiments qualify. Open Questions, in-progress hypotheses,
     and Next Cycle Seeds are heartbeat/todo signals, not knowledge — injecting
     them would pull the current run toward old work.
+
+    Both sections are emitted newest-first (the journal is append-ordered), and
+    hypothesis verdicts are additionally capped to the most recent
+    ``_MAX_HYPOTHESIS_VERDICTS``. This makes the hard ``max_chars`` head cut keep
+    the freshest knowledge instead of the stale earliest entries.
     """
     if not content.strip():
         return ""
@@ -67,9 +78,21 @@ def _extract_reflections_injection(content: str, *, max_chars: int = 2000) -> st
                 for line in lines
                 if line.strip().startswith(("- ✅", "- ❌"))
             ]
+            # Most recent first, capped: trailing = newest in an append-ordered
+            # log, so keep only the last N and reverse.
+            verdicts = verdicts[-_MAX_HYPOTHESIS_VERDICTS:][::-1]
             body = "\n".join(verdicts).strip()
         else:
-            body = "\n".join(lines).strip()
+            # Insights & Discoveries: keep only real bullet entries — drop the
+            # template description line and the "- (none yet)" placeholder —
+            # newest first so the head cut favours recent findings.
+            insights = [
+                line
+                for line in lines
+                if line.strip().startswith("- ")
+                and line.strip() != "- (none yet)"
+            ]
+            body = "\n".join(reversed(insights)).strip()
         if body:
             selected.append(f"### {name}\n{body}")
     if not selected:
