@@ -343,7 +343,10 @@ def _map_usage(
     if usage.cache_read_tokens:
         details["input_cache_read"] = usage.cache_read_tokens
     if usage.cache_creation_tokens:
-        details["input_cache_write"] = usage.cache_creation_tokens
+        # `input_cache_creation` is Langfuse's canonical cache-write alias (see
+        # langfuse repo `.agents/skills/add-model-price/references/
+        # provider-usage-key-matrix.md`); `input_cache_write` is not recognized.
+        details["input_cache_creation"] = usage.cache_creation_tokens
     if split_reasoning:
         details["output_reasoning_tokens"] = reasoning_tokens
     return details

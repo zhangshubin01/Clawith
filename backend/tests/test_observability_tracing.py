@@ -779,6 +779,26 @@ def test_map_usage_total_is_bucket_sum_not_provider_total() -> None:
     }
 
 
+def test_map_usage_cache_creation_uses_canonical_alias() -> None:
+    """Cache-write tokens must use Langfuse's canonical `input_cache_creation` key
+    (not the unrecognized `input_cache_write`), so model-definition prices match."""
+    usage = tracing._map_usage(
+        TokenUsage(
+            total_tokens=20,
+            input_tokens=10,
+            output_tokens=5,
+            cache_creation_tokens=3,
+        ),
+        provider="anthropic",
+    )
+    assert usage == {
+        "input": 10,
+        "output": 5,
+        "total": 18,
+        "input_cache_creation": 3,
+    }
+
+
 def test_map_usage_no_cache_keeps_input_as_is() -> None:
     usage = tracing._map_usage(
         TokenUsage(total_tokens=15, input_tokens=10, output_tokens=5),
