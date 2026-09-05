@@ -83,6 +83,9 @@ from app.services.agent_runtime.tool_contracts import (
 )
 from app.services.agent_runtime.read_dedup import (
     DEFAULT_READ_DEDUP_N,
+    DEFAULT_STALL_RATIO,
+    DEFAULT_STALL_WINDOW,
+    build_dup_read_ratio,
     build_read_dedup_map,
     read_dedup_placeholder,
 )
@@ -740,6 +743,17 @@ def _soft_loop_reminder_message(signal: tuple[str, str, int]) -> LLMMessage:
             f"注意：你已连续 {count} 次以完全相同的参数调用工具 {tool_name} 且均已执行。"
             "停止重复调用，直接基于已有结果输出最终回复。"
         )
+    return LLMMessage(role="user", content=content)
+
+
+def _dup_read_reminder_message(dup_count: int, total: int) -> LLMMessage:
+    """Interleaved duplicate-read reminder: prompt-only, no execution change."""
+    ratio = dup_count / total if total else 0.0
+    content = (
+        f"注意：最近 {total} 次 read_file 中有 {dup_count} 次在重复读取内容未变的文件"
+        f"（重复占比 {ratio:.0%}）。请停止反复读取，基于已读内容继续推进任务；"
+        "确需重新读取某文件时，先说明你期望该文件发生了哪些变化。"
+    )
     return LLMMessage(role="user", content=content)
 
 
@@ -2340,6 +2354,7 @@ class RuntimeModelStepService:
         dynamic_prompt: str,
         turn_local_dynamic_prompt: str = "",
         read_dedup_map: dict[str, dict[str, Any]] | None = None,
+        dup_read_signal: tuple[int, int] | None = None,
     ) -> tuple[list[LLMMessage] | ModelStepResult, JsonObject | None]:
         """Prepare the outbound messages plus the frozen budget profile.
 
@@ -2457,6 +2472,58 @@ class RuntimeModelStepService:
             )
         except (TypeError, ValueError):
             soft_loop = None  # malformed checkpoint: let the context builder report it
+        # Duplicate-read stall signal (P2): interleaved re-reads of unchanged
+        # files are invisible to the consecutive-call breaker above. A window
+        # ratio >= stall_ratio means the model is spinning on already-read
+        # content. Convergence is per-agent configurable: remind (default),
+        # force compact, or terminate; "off" disables the guard entirely.
+        dup_action: str | None = None
+        dup_ratio: float | None = None
+        dup_counts: tuple[int, int] | None = None
+        if dup_read_signal is not None:
+            dup_count, total = dup_read_signal
+            if total > 0:
+                stall_ratio = getattr(agent, "stall_ratio", None)
+                if not isinstance(stall_ratio, (int, float)):
+                    stall_ratio = DEFAULT_STALL_RATIO
+                ratio = dup_count / total
+                if ratio >= float(stall_ratio):
+                    action = str(
+                        getattr(agent, "stall_guard_action", "remind") or "remind"
+                    )
+                    if action in {"remind", "compact", "terminate"}:
+                        dup_action = action
+                        dup_ratio = ratio
+                        dup_counts = (dup_count, total)
+        if dup_action == "terminate":
+            assert dup_counts is not None and dup_ratio is not None
+            dup_count, total = dup_counts
+            logger.warning(
+                "[RuntimeModelStep] duplicate_read_stall run_id={} dup={}/{} ratio={:.2f}",
+                context.run_id,
+                dup_count,
+                total,
+                dup_ratio,
+            )
+            await _audit_breaker_event(
+                context,
+                self._activity_logger,
+                action_type="runtime_duplicate_read_stall",
+                summary=(
+                    f"窗口内 read_file 重复读占比 {dup_ratio:.0%}"
+                    f"（{dup_count}/{total}），运行已终止"
+                ),
+                detail={"dup_count": dup_count, "total": total, "ratio": dup_ratio},
+            )
+            return (
+                _error(
+                    "duplicate_read_stall",
+                    f"最近 {total} 次 read_file 中有 {dup_count} 次在重复读取内容未变的"
+                    f"文件（重复占比 {dup_ratio:.0%}），判定为原地空转，已停止本轮运行。"
+                    "如需继续，请发送新消息并说明接下来要处理的具体变更。",
+                ),
+                None,
+            )
         initial_build = await self._context_builder.build(
             state,
             context,
@@ -2506,6 +2573,32 @@ class RuntimeModelStepService:
             )
             if history_tokens >= budget.compact_threshold:
                 return ModelStepResult(intent="compact"), budget_profile
+        # P2 "force compact" convergence: the duplicate-read stall resets the
+        # read-dedup cycle only via a real compaction, so route there directly.
+        # Respect compact_guard so a history that compaction cannot shrink does
+        # not loop on this intent.
+        if dup_action == "compact" and not state["lifecycle"].get("compact_guard"):
+            assert dup_counts is not None and dup_ratio is not None
+            dup_count, total = dup_counts
+            logger.warning(
+                "[RuntimeModelStep] duplicate_read_stall_compact run_id={} dup={}/{} "
+                "ratio={:.2f}",
+                context.run_id,
+                dup_count,
+                total,
+                dup_ratio,
+            )
+            await _audit_breaker_event(
+                context,
+                self._activity_logger,
+                action_type="runtime_duplicate_read_stall_compact",
+                summary=(
+                    f"窗口内 read_file 重复读占比 {dup_ratio:.0%}"
+                    f"（{dup_count}/{total}），触发强制压缩"
+                ),
+                detail={"dup_count": dup_count, "total": total, "ratio": dup_ratio},
+            )
+            return ModelStepResult(intent="compact"), budget_profile
         build = await self._context_builder.build(
             state,
             context,
@@ -2557,6 +2650,14 @@ class RuntimeModelStepService:
             # group confirmation is pending: that protocol must keep its
             # highest-priority position.
             messages.append(_soft_loop_reminder_message(soft_loop))
+        if (
+            dup_action == "remind"
+            and dup_counts is not None
+            and confirmation_instruction is None
+        ):
+            # Same absolutely-last slot as the soft-loop reminder; prompt-only.
+            dup_count, total = dup_counts
+            messages.append(_dup_read_reminder_message(dup_count, total))
         if not model.supports_vision:
             return messages, budget_profile
         try:
@@ -2866,6 +2967,19 @@ class RuntimeModelStepService:
             except (TypeError, ValueError):
                 read_dedup_map = {}  # malformed checkpoint: skip dedup
 
+            # P2 duplicate-read stall signal: measured from the same ledger +
+            # current cycle messages; interleaved re-reads only, so it is
+            # independent of the consecutive-call breaker.
+            dup_read_signal: tuple[int, int] | None = None
+            try:
+                dup_read_signal = build_dup_read_ratio(
+                    executions,
+                    runtime_messages_as_json(state),
+                    window=getattr(agent, "stall_window", DEFAULT_STALL_WINDOW),
+                )
+            except (TypeError, ValueError):
+                dup_read_signal = None  # malformed checkpoint: skip stall signal
+
             # 卡片模式: 惰性创建 CardStreamBridge（首次模型调用时）
             card_on_chunk = None
             card_on_thinking = None
@@ -2977,6 +3091,7 @@ class RuntimeModelStepService:
                 dynamic_prompt=dynamic_prompt,
                 turn_local_dynamic_prompt=turn_local_dynamic_prompt,
                 read_dedup_map=read_dedup_map,
+                dup_read_signal=dup_read_signal,
             )
             if isinstance(prepared, ModelStepResult):
                 return prepared
@@ -3128,6 +3243,7 @@ class RuntimeModelStepService:
                     dynamic_prompt=fallback_dynamic_prompt,
                     turn_local_dynamic_prompt=fallback_turn_local_dynamic_prompt,
                     read_dedup_map=read_dedup_map,
+                    dup_read_signal=dup_read_signal,
                 )
                 if isinstance(fallback_prepared, ModelStepResult):
                     return fallback_prepared

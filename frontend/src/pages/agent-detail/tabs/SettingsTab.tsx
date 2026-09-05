@@ -14,6 +14,9 @@ type SettingsFormState = {
     context_window_size: number;
     max_tool_rounds: number;
     read_dedup_n: number;
+    stall_window: number;
+    stall_ratio: number;
+    stall_guard_action: string;
     max_tokens_per_day: string | number;
     max_tokens_per_month: string | number;
     max_triggers: number;
@@ -193,6 +196,48 @@ export default function SettingsTab(props: Props) {
                         style={{ width: '120px' }}
                     />
                     <div style={{ fontSize: '11px', color: 'var(--text-tertiary)', marginTop: '4px' }}>{t('agent.settings.readDedupNDesc', 'Repeated reads of unchanged file content become placeholders after this many times within one context cycle. 0 disables dedup. Default: 3')}</div>
+                </div>
+                <div style={{ marginTop: '12px' }}>
+                    <label style={{ display: 'block', fontSize: '13px', fontWeight: 500, marginBottom: '6px' }}>{t('agent.settings.stallWindowLabel', 'Duplicate-read stall window')}</label>
+                    <input
+                        className="input"
+                        type="number"
+                        min={1}
+                        max={200}
+                        value={settingsForm.stall_window}
+                        onChange={(e) => setSettingsForm((form) => ({ ...form, stall_window: Math.max(1, Math.min(200, parseInt(e.target.value) || 20)) }))}
+                        style={{ width: '120px' }}
+                    />
+                    <div style={{ fontSize: '11px', color: 'var(--text-tertiary)', marginTop: '4px' }}>{t('agent.settings.stallWindowDesc', 'How many recent read_file results are scanned to detect re-reading unchanged files. Default: 20')}</div>
+                </div>
+                <div style={{ marginTop: '12px' }}>
+                    <label style={{ display: 'block', fontSize: '13px', fontWeight: 500, marginBottom: '6px' }}>{t('agent.settings.stallRatioLabel', 'Duplicate-read stall ratio')}</label>
+                    <input
+                        className="input"
+                        type="number"
+                        step={0.05}
+                        min={0}
+                        max={1}
+                        value={settingsForm.stall_ratio}
+                        onChange={(e) => setSettingsForm((form) => ({ ...form, stall_ratio: Math.max(0, Math.min(1, parseFloat(e.target.value) || 0.7)) }))}
+                        style={{ width: '120px' }}
+                    />
+                    <div style={{ fontSize: '11px', color: 'var(--text-tertiary)', marginTop: '4px' }}>{t('agent.settings.stallRatioDesc', 'Fraction of the window that re-reads unchanged content before the stall guard acts. Default: 0.7')}</div>
+                </div>
+                <div style={{ marginTop: '12px' }}>
+                    <label style={{ display: 'block', fontSize: '13px', fontWeight: 500, marginBottom: '6px' }}>{t('agent.settings.stallGuardActionLabel', 'On duplicate-read stall')}</label>
+                    <select
+                        className="input"
+                        value={settingsForm.stall_guard_action}
+                        onChange={(e) => setSettingsForm((form) => ({ ...form, stall_guard_action: e.target.value }))}
+                        style={{ width: '180px' }}
+                    >
+                        <option value="remind">{t('agent.settings.stallActionRemind', 'Remind (default)')}</option>
+                        <option value="compact">{t('agent.settings.stallActionCompact', 'Force compaction')}</option>
+                        <option value="terminate">{t('agent.settings.stallActionTerminate', 'Terminate run')}</option>
+                        <option value="off">{t('agent.settings.stallActionOff', 'Off')}</option>
+                    </select>
+                    <div style={{ fontSize: '11px', color: 'var(--text-tertiary)', marginTop: '4px' }}>{t('agent.settings.stallGuardActionDesc', 'What to do when the model keeps re-reading unchanged files. Default: remind')}</div>
                 </div>
             </div>
 

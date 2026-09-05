@@ -26,6 +26,13 @@ from typing import Any, Mapping, Sequence
 
 DEFAULT_READ_DEDUP_N = 3
 
+# P2 stall-signal bounds: a sliding window of the most recent ``read_file``
+# results in which the fraction of re-reads (a key already seen within the
+# window) is measured. Interleaved re-reads are invisible to the consecutive
+# ``_trailing_identical_calls`` breaker, so this ratio is a separate dimension.
+DEFAULT_STALL_WINDOW = 20
+DEFAULT_STALL_RATIO = 0.7
+
 _HEAD_PREVIEW_CHARS = 120
 _TAIL_PREVIEW_CHARS = 120
 
@@ -121,3 +128,70 @@ def build_read_dedup_map(
             result[call_id] = {"path": path, "seen_count": count}
 
     return result
+
+
+def build_dup_read_ratio(
+    executions: Sequence[Any],
+    messages: Sequence[Mapping[str, Any]],
+    *,
+    window: int = DEFAULT_STALL_WINDOW,
+) -> tuple[int, int] | None:
+    """Return ``(dup_count, total)`` over the trailing ``window`` read_file results.
+
+    Walks the current cycle's messages in order and keeps the last ``window``
+    succeeded ``read_file`` results (resolved via ``tool_call_id`` → execution).
+    Each result's identity key is ``(path, content_hash)``; a result is a
+    *duplicate* when its key already appeared earlier within the window — an
+    interleaved re-read, which ``_trailing_identical_calls`` cannot catch
+    because it only counts *consecutive* identical calls. ``dup_count`` = total
+    minus distinct keys; the caller derives ``dup_count / total`` and compares
+    it against the ``stall_ratio`` threshold.
+
+    Returns ``None`` when there are no read_file results in the window (or
+    ``window < 1`` disables the signal). Failed reads and reads without a
+    usable hash/path are ignored entirely: they never enter the denominator and
+    never count as duplicates, so a mix of failed/partial reads cannot mask a
+    real stall.
+    """
+    if window < 1:
+        return None
+
+    exec_by_id: dict[str, Any] = {}
+    for execution in executions:
+        call_id = getattr(execution, "tool_call_id", None)
+        if isinstance(call_id, str) and call_id:
+            exec_by_id[call_id] = execution
+
+    keys: list[tuple[str, str]] = []
+    for raw in messages:
+        if not isinstance(raw, Mapping):
+            continue
+        if raw.get("role") != "tool":
+            continue
+        call_id = raw.get("tool_call_id")
+        if not isinstance(call_id, str) or not call_id:
+            continue
+        execution = exec_by_id.get(call_id)
+        if execution is None:
+            continue
+        if getattr(execution, "tool_name", None) != "read_file":
+            continue
+        if getattr(execution, "status", None) != "succeeded":
+            continue
+
+        metadata = getattr(execution, "result_metadata", None)
+        content_hash = metadata.get("content_hash") if isinstance(metadata, Mapping) else None
+        arguments = getattr(execution, "sanitized_arguments", None)
+        path = arguments.get("path") if isinstance(arguments, Mapping) else None
+        if not isinstance(content_hash, str) or not content_hash:
+            continue
+        if not isinstance(path, str) or not path:
+            continue
+        keys.append((path, content_hash))
+
+    if not keys:
+        return None
+    window_keys = keys[-window:]
+    total = len(window_keys)
+    dup_count = total - len(set(window_keys))
+    return dup_count, total

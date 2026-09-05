@@ -3,7 +3,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, Enum, ForeignKey, Index, Integer, String, Text, func, text
+from sqlalchemy import Boolean, DateTime, Enum, Float, ForeignKey, Index, Integer, String, Text, func, text
 from sqlalchemy.dialects.postgresql import JSON, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -120,6 +120,13 @@ class Agent(Base):
     # (path, content_hash) within a compaction cycle, further repeats are fed
     # as soft placeholders instead of the full body. 0 disables dedup.
     read_dedup_n: Mapped[int] = mapped_column(Integer, default=3)
+    # Duplicate-read stall guard (P2): sliding window of the most recent
+    # read_file results in which the fraction of re-reads (a key already seen
+    # within the window) is measured; >= stall_ratio triggers convergence via
+    # stall_guard_action ("remind" default, "compact", "terminate", or "off").
+    stall_window: Mapped[int] = mapped_column(Integer, default=20)
+    stall_ratio: Mapped[float] = mapped_column(Float, default=0.7)
+    stall_guard_action: Mapped[str] = mapped_column(String(16), default="remind")
 
     # Trigger limits (per-agent, configurable from Settings UI)
     max_triggers: Mapped[int] = mapped_column(Integer, default=20)
