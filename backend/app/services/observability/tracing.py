@@ -199,6 +199,8 @@ def _build_client(*, public_key: str, secret_key: str) -> Any:
         kwargs["base_url"] = settings.LANGFUSE_HOST
     if settings.LANGFUSE_RELEASE:
         kwargs["release"] = settings.LANGFUSE_RELEASE
+    if settings.LANGFUSE_ENVIRONMENT:
+        kwargs["environment"] = settings.LANGFUSE_ENVIRONMENT
     return Langfuse(public_key=public_key, secret_key=secret_key, **kwargs)
 
 
@@ -380,13 +382,13 @@ class GenerationHandle:
 
     def mark_error(self, exc: BaseException) -> None:
         self._level = "ERROR"
-        self._status = f"{type(exc).__name__}: {str(exc)[:400]}"
+        self._status = mask_text(f"{type(exc).__name__}: {str(exc)[:400]}")
 
     def mark_retry(self, exc: BaseException) -> None:
         """Record a business retry-control-flow exit (not an error)."""
         self._metadata["retry_pending"] = True
         self._metadata["retry_type"] = type(exc).__name__
-        self._status = f"{type(exc).__name__}: {str(exc)[:400]}"
+        self._status = mask_text(f"{type(exc).__name__}: {str(exc)[:400]}")
 
     def finalize(self, started: float) -> None:
         """Apply accumulated output/usage/error/latency in one span update."""
@@ -626,13 +628,13 @@ class RunHandle:
 
     def mark_error(self, exc: BaseException) -> None:
         self._level = "ERROR"
-        self._status = f"{type(exc).__name__}: {str(exc)[:400]}"
+        self._status = mask_text(f"{type(exc).__name__}: {str(exc)[:400]}")
 
     def mark_retry(self, exc: BaseException) -> None:
         """Record a business retry-control-flow exit (not an error)."""
         self._metadata["retry_pending"] = True
         self._metadata["retry_type"] = type(exc).__name__
-        self._status = f"{type(exc).__name__}: {str(exc)[:400]}"
+        self._status = mask_text(f"{type(exc).__name__}: {str(exc)[:400]}")
 
     def finalize(self, started: float) -> None:
         """Apply accumulated metadata/output/error/latency in one span update."""
@@ -704,7 +706,10 @@ def observe_run(
         prop_cm = propagate_attributes(
             user_id=meta.get("actor_user_id"),
             session_id=meta.get("session_id"),
-            trace_name=f"run:{run_id}",
+            # Low-cardinality trace name: run_id already lives in metadata, so it
+            # must not also name the trace — a unique name per run makes traces
+            # ungroupable/unfilterable in dashboards (see Langfuse "Choose good names").
+            trace_name="agent-run",
             metadata={key: meta[key] for key in ("tenant_id", "agent_id", "run_id", "command_id") if key in meta},
         )
     except Exception as exc:  # noqa: BLE001
@@ -716,7 +721,7 @@ def observe_run(
         stack.enter_context(prop_cm)
         try:
             start_cm = client.start_as_current_observation(
-                as_type="span",
+                as_type="agent",
                 name="run",
                 input=mask_text(input) if input is not None else None,
                 metadata=meta,

@@ -258,6 +258,10 @@ class Settings(BaseSettings):
     # Deployment version tag for traces (git commit hash, injected by
     # scripts/deploy.sh at deploy time — zero manual maintenance). Empty = unset.
     LANGFUSE_RELEASE: str = ""
+    # Environment tag for traces (production/staging/development), propagated to
+    # every observation via the SDK client-level environment so test traces stay
+    # separable from production in dashboards/evaluators. Empty = SDK default.
+    LANGFUSE_ENVIRONMENT: str = ""
     # Hard cap for file-upload endpoints (all of them buffer the whole body
     # into memory before writing). Without it a single authenticated request
     # can exhaust the process (see P0 fix plan D3). Override via env if a

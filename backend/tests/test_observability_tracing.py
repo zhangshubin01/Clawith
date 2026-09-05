@@ -874,3 +874,78 @@ def test_current_trace_id_is_none_when_run_observations_never_start(
     with tracing.observe_run(run_id="r-1", command_id="c-1", tenant_id="t-1") as run_handle:
         assert run_handle is None
         assert tracing.current_trace_id() is None
+
+
+def test_observe_run_root_is_agent_type(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The run root is an `agent` observation (enables Langfuse agent graph view)."""
+    span = _FakeSpan()
+    started: dict[str, Any] = {}
+
+    class _CapturingClient(_FakeClient):
+        def start_as_current_observation(self, **kwargs: Any) -> Any:
+            started.update(kwargs)
+            return _fake_start_cm(self.span)
+
+    monkeypatch.setattr(tracing, "_get_client", lambda _tenant_id=None: _CapturingClient(span=span))
+
+    with tracing.observe_run(run_id="r-1", command_id="c-1", tenant_id="t-1"):
+        pass
+
+    assert started["as_type"] == "agent"
+
+
+def test_observe_run_uses_low_cardinality_trace_name(monkeypatch: pytest.MonkeyPatch) -> None:
+    """trace_name is a stable low-cardinality value; run_id stays in metadata only."""
+    span = _FakeSpan()
+    monkeypatch.setattr(tracing, "_get_client", lambda _tenant_id=None: _FakeClient(span=span))
+    propagated: dict[str, Any] = {}
+
+    @contextmanager
+    def _fake_propagate(**kwargs: Any) -> Iterator[None]:
+        propagated.update(kwargs)
+        yield
+
+    monkeypatch.setitem(sys.modules, "langfuse", SimpleNamespace(propagate_attributes=_fake_propagate))
+
+    with tracing.observe_run(run_id="r-unique-id", command_id="c-1", tenant_id="t-1"):
+        pass
+
+    assert propagated["trace_name"] == "agent-run"
+    assert "r-unique-id" not in propagated["trace_name"]
+
+
+def test_build_client_passes_environment_when_configured(monkeypatch: pytest.MonkeyPatch) -> None:
+    """LANGFUSE_ENVIRONMENT 非空时，client 构造 kwargs 必须含 environment=标签。"""
+    captured: dict[str, Any] = {}
+
+    class _FakeLangfuse:
+        def __init__(self, **kwargs: Any) -> None:
+            captured.update(kwargs)
+
+    monkeypatch.setitem(sys.modules, "langfuse", SimpleNamespace(Langfuse=_FakeLangfuse))
+    settings = tracing.get_settings()
+    monkeypatch.setattr(settings, "LANGFUSE_ENVIRONMENT", "staging")
+    monkeypatch.setattr(settings, "LANGFUSE_HOST", "")
+    monkeypatch.setattr(settings, "LANGFUSE_RELEASE", "")
+
+    tracing._build_client(public_key="pk-1", secret_key="sk-1")
+
+    assert captured["environment"] == "staging"
+
+
+def test_status_message_masks_secrets(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Error status_message goes through redaction (no bearer token leak)."""
+    span = _FakeSpan()
+    monkeypatch.setattr(tracing, "_get_client", lambda _tenant_id=None: _FakeClient(span=span))
+
+    class Boom(Exception):
+        pass
+
+    with pytest.raises(Boom):
+        with tracing.observe_generation(name="llm") as gen:
+            assert gen is not None
+            raise Boom("auth failed: Bearer abc.def.ghi leaked")
+
+    update = span.updates[-1]
+    assert "abc.def.ghi" not in update["status_message"]
+    assert "[REDACTED]" in update["status_message"]

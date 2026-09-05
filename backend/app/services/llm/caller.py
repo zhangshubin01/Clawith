@@ -679,6 +679,7 @@ async def call_llm(
                 model=getattr(model, "model", None),
                 provider=getattr(model, "provider", None),
                 agent_id=agent_id,
+                input=api_messages,
             ) as gen:
                 response = await client.stream(
                     messages=api_messages,
