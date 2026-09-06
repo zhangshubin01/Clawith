@@ -26,6 +26,8 @@ class AgentActivityLog(Base):
             "runtime_compaction_loop", "runtime_tool_config_failure_loop",
             "runtime_tool_success_loop", "runtime_duplicate_read_stall",
             "runtime_duplicate_read_stall_compact",
+            "runtime_no_progress_nudge", "runtime_no_progress_pivot",
+            "runtime_no_progress_stop",
             name="activity_action_enum",
             create_constraint=False,
         ),

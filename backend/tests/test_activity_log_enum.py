@@ -16,6 +16,9 @@ _RUNTIME_BREAKER_VALUES = frozenset(
         "runtime_tool_success_loop",
         "runtime_duplicate_read_stall",
         "runtime_duplicate_read_stall_compact",
+        "runtime_no_progress_nudge",
+        "runtime_no_progress_pivot",
+        "runtime_no_progress_stop",
     }
 )
 
