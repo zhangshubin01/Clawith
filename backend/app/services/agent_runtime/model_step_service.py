@@ -3317,7 +3317,7 @@ class RuntimeModelStepService:
                     self._activity_logger,
                     action_type="runtime_compaction_loop",
                     summary=(
-                        "检测到压缩失忆循环：压缩后上下文前缀与工具调用模式完全复原"
+                        "检测到压缩失忆循环：压缩后上下文前缀完全复原"
                         f"（第 {loop_alert['loop_count']} 次确认）"
                     ),
                     detail=dict(loop_alert),

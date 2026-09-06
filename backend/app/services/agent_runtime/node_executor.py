@@ -785,8 +785,8 @@ class DeterministicRuntimeNodeExecutor:
                     "error": _error(
                         "compaction_loop_detected",
                         (
-                            "检测到压缩失忆循环：压缩后上下文前缀与工具调用模式完全复原，"
-                            "模型即将重复同样的工具操作，运行已终止。"
+                            "检测到压缩失忆循环：压缩后上下文前缀完全复原，"
+                            "模型即将再次发起工具调用，运行已终止。"
                             "请发送新的消息明确下一步目标。"
                         ),
                     ),
