@@ -14,7 +14,7 @@ model_step_service.py:3159 (``runtime_no_progress_{level}``).
 Idempotent:
     - ADD VALUE IF NOT EXISTS, mirroring f075_add_runtime_activity_enum.py.
 
-Revision ID: f076_add_no_progress_activity_enum
+Revision ID: f076_add_no_progress_enum
 Revises: f075_add_runtime_activity_enum
 Create Date: 2026-09-05 00:00:00
 """
@@ -23,7 +23,7 @@ from typing import Sequence, Union
 
 from alembic import op
 
-revision: str = "f076_add_no_progress_activity_enum"
+revision: str = "f076_add_no_progress_enum"
 down_revision: Union[str, Sequence[str], None] = "f075_add_runtime_activity_enum"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
