@@ -8,6 +8,7 @@ import {
   mergeSessionToolMessage,
   mergeSessionToolMessages,
   mergeInterruptedStreamMessage,
+  settleRunningTools,
   reduceSessionStreamChunk,
   shouldPreserveInterruptedStream,
   runtimeCompletionNeedsMessageRefresh,
@@ -218,6 +219,48 @@ test('session Tool cache updates by call id without downgrading canonical histor
 
   assert.deepEqual(mergeSessionToolMessage([running], done), [done]);
   assert.deepEqual(mergeSessionToolMessage([done], running), [done]);
+});
+
+test('terminal refresh settles a running tool left behind by a lost done packet', () => {
+  const running = {
+    role: 'tool_call',
+    content: '',
+    toolName: 'read_file',
+    toolCallId: 'call-lost',
+    toolArgs: { path: 'memory.md' },
+    toolStatus: 'running',
+  };
+  const assistant = { id: 'msg-1', role: 'assistant', content: 'done' };
+
+  assert.deepEqual(settleRunningTools([assistant, running]), [
+    assistant,
+    { ...running, toolStatus: 'done' },
+  ]);
+  assert.deepEqual(
+    settleRunningTools([
+      assistant,
+      { ...running, toolStatus: 'done', toolResult: 'ok' },
+    ]),
+    [assistant, { ...running, toolStatus: 'done', toolResult: 'ok' }],
+  );
+  assert.deepEqual(settleRunningTools([assistant]), [assistant]);
+});
+
+test('terminal refresh settles every stuck running tool after the canonical merge', () => {
+  const running = {
+    role: 'tool_call',
+    content: '',
+    toolName: 'read_file',
+    toolCallId: 'call-lost',
+    toolArgs: { path: 'memory.md' },
+    toolStatus: 'running',
+  };
+  const canonical = [{ id: 'u-1', role: 'user', content: 'work' }];
+  const merged = mergeSessionToolMessages(canonical, [running]);
+  assert.deepEqual(settleRunningTools(merged), [
+    { id: 'u-1', role: 'user', content: 'work' },
+    { ...running, toolStatus: 'done' },
+  ]);
 });
 
 test('runtime-state request failure preserves display identity but disables actions', () => {

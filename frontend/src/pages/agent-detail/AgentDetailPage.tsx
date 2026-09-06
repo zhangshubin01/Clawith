@@ -70,6 +70,7 @@ import {
     mergeInterruptedStreamMessage,
     mergeTerminalAssistantMessage,
     reduceSessionStreamChunk,
+    settleRunningTools,
     shouldPreserveInterruptedStream,
     runtimeCompletionNeedsMessageRefresh,
     runtimeTerminalPacketNeedsMessageRefresh,
@@ -2503,13 +2504,16 @@ export default function AgentDetailPage() {
                 }),
             }));
             const runtimeKey = buildSessionRuntimeKey(agentId, sessionId);
-            setChatMessages(mergeSessionToolMessages(
+            const merged = mergeSessionToolMessages(
                 mergeInterruptedStreamMessage(
                     parsed,
                     interruptedStreamMessagesRef.current[runtimeKey],
                 ),
                 sessionToolMessagesRef.current[runtimeKey] || [],
-            ));
+            );
+            setChatMessages(discardSessionToolCacheOnSuccess
+                ? settleRunningTools(merged)
+                : merged);
             if (discardSessionToolCacheOnSuccess) {
                 delete sessionToolMessagesRef.current[runtimeKey];
             }

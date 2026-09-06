@@ -116,6 +116,20 @@ export const mergeSessionToolMessages = <T extends SessionToolMessage>(
     incoming: T[],
 ): T[] => incoming.reduce(mergeSessionToolMessage, messages);
 
+// A terminal run can no longer hold a running tool. A `tool_call` stuck in
+// `running` happens when its `done` packet is lost to a websocket gap and the
+// canonical refresh page (limit=20) does not carry that tool's settled row —
+// `mergeSessionToolMessage` then appends it as a fresh running row, leaving the
+// red `analysis-trace--stopped` square after the run is over. Settling every
+// running tool to `done` on a terminal refresh clears that stale state.
+export const settleRunningTools = <T extends SessionToolMessage>(
+    messages: T[],
+): T[] => messages.map((message) => (
+    message.role === 'tool_call' && message.toolStatus === 'running'
+        ? { ...message, toolStatus: 'done' }
+        : message
+));
+
 const record = (value: unknown): Record<string, unknown> | null =>
     value !== null && typeof value === 'object'
         ? value as Record<string, unknown>
