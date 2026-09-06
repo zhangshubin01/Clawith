@@ -1,42 +1,44 @@
 # 上下文压缩生产级修复方案
 
-- 日期：2026-08-29
+- 日期：2026-08-29（**2026-09-05 复审更新**：F1/F1.5 已落地，F2/F3 待落地；行号按复审时工作区代码重新核实）
 - 范围：`backend/app/services/agent_runtime/run_compactor.py`（RuntimeRunCompactorService，Thread 内压缩）及其输入侧 `model_step_service.py`（`compact_inputs`、水位判定）、`backend/app/services/llm/multimodal_content.py`（token 估算）。**不含** `session_context_compactor.py`（会话级背景压缩，另案）。
-- 依据：run `a4b1a018`（2026-08-28，Langfuse trace `710ab55d`）实测：三次 flash 摘要调用 cache_read 全 256（前缀缓存零命中），第一次 84.2s / 入 14.7K → 出 10.9K tokens（74% 重述），总卡顿 141s。全部行号引用已按当前工作区代码核实。
+- 依据：run `a4b1a018`（2026-08-28，Langfuse trace `710ab55d`）实测：三次 flash 摘要调用 cache_read 全 256（前缀缓存零命中），第一次 84.2s / 入 14.7K → 出 10.9K tokens（74% 重述），总卡顿 141s。
 - 关联：`docs/technical-plans/20260829-deepseek-harness-study.md`（dsh 参考实现）；票 `.scratch/compaction-slimming/{01,02,03,04}`；记忆 [[deepseek-token-estimation-facts]]、[[direct-chat-run-boundary-fix]]、[[deepseek-cache-tool-schema-facts]]。
 
 ---
 
-## 1. 现状与三缺陷（核实后的精确事实）
+## 1. 现状与缺陷（复审核实，2026-09-05）
+
+**状态**：F1/F1.5 已落地（指令模板 + 背景措辞 + shrink 校验 + 结构校验），F2/F3 未动。原「三缺陷」中缺陷 1 已修复，缺陷 2/3 仍成立。
 
 **执行链**（已核实）：
-- 水位判定：`model_step_service.py:2425-2436` — `history_tokens >= budget.compact_threshold(0.80)` 时返回 `ModelStepResult(intent="compact")`，**不真正调模型**，路由到 compact 节点（`node_executor.py:798-808`，`compact_guard` 防循环）。
-- 压缩执行：`run_compactor.py:699 compact_if_needed` → `_compactable_prefix`（工具交换原子边界 + 保护 current/resume/repair 消息）→ `_summary_ready_blocks` → `_compact_batches`（分批，批满 `batch_budget`）→ `_compact_batch` → `_completion`（`complete_llm_once`）→ `_summary_from_step`（finish_reason 校验；`length`/空文本触发**二分重试** `_compact_batch:611-631`）→ 终检（总预算 + 50% 低水位 `:806-812`）。
-- **压缩请求形态**（缺陷根源）：`_prompt_messages`（`run_compactor.py:430-443`）= `[system(_SYSTEM_PROMPT), user(JSON payload)]`，`tools=[]`，`supports_vision=False`（`_compact_batch:591-598`）。
-- **主请求形态**（对照基准）：`model_step_service._prompt_messages`（1296）= `[system(static_prompt + _MESSAGE_LAYOUT_NOTE)] + history（make_message 转换，provider_call_id 重写、dedup） + block A（dynamic+运行时快照，**`prefix_cache_break=True` 标记：system+history 是 cache-stable 前缀**，1499）+ block B（turn-local，可选） + final control message`。工具 = `_provider_tools(tools)`（834）。
+- 水位判定：`model_step_service.py:2693` — `history_tokens >= budget.compact_threshold`（`compact_threshold_ratio=0.80`，2443/2672）时返回 `ModelStepResult(intent="compact")`，**不真正调模型**，路由到 compact 节点（`node_executor.py:_compact` 669，`terminate_on_compaction_loop` 636 防循环）。
+- 压缩执行：`run_compactor.py:1296 compact_if_needed` → `_compactable_prefix`（369，工具交换原子边界 + 保护 current/resume/repair 消息）→ `_summary_ready_blocks`（467）→ `_compact_batches`（1222，分批，批满 `batch_budget`）→ `_compact_batch`（1129）→ `_completion` → `_summary_from_step`（1013，finish_reason + 结构校验；`length`/空文本/结构不足触发**二分重试**）→ 终检（总预算 1395 + 50% 低水位 1407）。
+- **压缩请求形态**（缺陷 2 根源）：`_prompt_messages`（`run_compactor.py:993`）= `[user(JSON payload), user(_COMPACTION_INSTRUCTION)]`（F1 已把指令移出 system，无 system 消息），`tools=[]`，`supports_vision=False`，`thinking_disabled=True`（`_compact_batch:1148-1152`）。payload 现含 `covered_messages` + `authoritative_exact_inputs` + `existing_thread_summary` + `completed_actions` + `files_read`（`_payload` 517）。
+- **主请求形态**（对照基准）：`model_step_service._prompt_messages`（1465）= `[system(static_prompt + _MESSAGE_LAYOUT_NOTE)] + history（make_message 1524 转换，provider_call_id 重写、dedup） + block A（dynamic+运行时快照，**`prefix_cache_break=True` 标记：system+history 是 cache-stable 前缀**，1684）+ block B（turn-local，可选） + final control message`。工具 = `_provider_tools(tools)`（1041）。
 
 **三缺陷**：
-1. **输出侧无硬约束**：`_SYSTEM_PROMPT`（50-62）只给 5 节软指令，无「terse bullets / 空节写 (none) / 不回抄已有摘要 / 保留原文标识符」硬规则；`_summary_from_step` 只查 finish_reason 与空文本，不校验摘要是否真比输入小（shrink）。弱模型自然重述 74%。
-2. **零前缀缓存**：压缩调用 system 是专用 `_SYSTEM_PROMPT`、messages 是 JSON payload、tools=[]——与主请求（agent system + 59-214 工具 schema + 消息流）零共享前缀；且批间（串行增量合并）payload 每次不同。三次调用 cache_read 全 256 即此。
-3. **bytes/4 对中文低估近半**：`estimate_multimodal_tokens(chars_per_token=4, utf8_bytes=True)`（multimodal_content.py:281-304）对中文（实测 0.47-0.54 tokens/byte，[[deepseek-token-estimation-facts]]）只估 0.25 → 低估 ~50%，使 `batch_budget` 装箱判定、`summary_budget` 校验、低水位校验全部失真。注释（model_step_service.py:672-675）的「+4%~+26%」是英文为主的测量，中文场景相反。
+1. ~~输出侧无硬约束~~ **（F1/F1.5 已修复）**：`_COMPACTION_INSTRUCTION`（56）8 节硬模板 + 批级 shrink 校验（`_compact_batch:1175-1182`）+ 结构校验（`_summary_from_step`，8 节至少 5 节）。
+2. **零前缀缓存（待修，F2）**：压缩调用 messages 是 JSON payload、tools=[]、supports_vision=False——与主请求（agent system + 工具 schema + 消息流）零共享前缀；且批间（串行增量合并）payload 每次不同。三次调用 cache_read 全 256 即此。
+3. **bytes/4 对中文低估近半（待修，F3）**：`estimate_multimodal_tokens(chars_per_token=4, utf8_bytes=True)`（multimodal_content.py:281-303）对中文（实测 0.47-0.54 tokens/byte，[[deepseek-token-estimation-facts]]）只估 0.25 → 低估 ~50%，使 `batch_budget` 装箱判定、`summary_budget` 校验、低水位校验全部失真。
 
-**已到位、无需改的**：`TokenUsage` 已 disjoint（`input_tokens/cache_read_tokens/cache_creation_tokens` 分列，token_tracker.py:15-23）；usage 取 provider 真实值优先、估算兜底（single_step.py `_usage_from_response_or_estimate`）；fail-open 链（provider 失败→TransientRunCompactorError 重试；确定性失败→run failed 可读原因）。
+**已到位、无需改的**：`TokenUsage` 已 disjoint（`input_tokens/cache_read_tokens/cache_creation_tokens` 分列，`backend/app/services/token_tracker.py:17`）；usage 取 provider 真实值优先、估算兜底；fail-open 链（provider 失败→TransientRunCompactorError 重试；确定性失败→run failed 可读原因）。
 
 ---
 
 ## 2. 修复设计总览
 
-| # | 修复 | 核心改动 | 目标指标 |
-|---|---|---|---|
-| F1 | 输出硬约束 | 8 节结构化指令模板 + 指令移出 system（作最后 user 消息）+ 批级 shrink 校验 + 背景框定措辞 | 摘要/输入 ≤ 50%（现 74%） |
-| F2 | 前缀缓存复用 | 压缩请求改为「主请求 cache-stable 前缀 + 指令」：复用同一消息构造管线产物的 system+tools+history，指令最后 | 压缩调用 cache_read > 0；压缩 141s → 单次调用 |
-| F3 | CJK-aware 估算 | `estimate_multimodal_tokens` 默认公式改为 CJK 分段计价（无新参数），压缩/水位/计量兜底三处零改动自动继承 | 中英混合样本误差 ≤ ±10% |
+| # | 修复 | 状态 | 核心改动 | 目标指标 |
+|---|---|---|---|---|
+| F1 | 输出硬约束 | ✅ 已落地 | 8 节结构化指令模板 + 指令移出 system（作最后 user 消息）+ 批级 shrink 校验 + 背景框定措辞 | 摘要/输入 ≤ 50%（现 74%） |
+| F2 | 前缀缓存复用 | ⏳ 待落地 | 压缩请求改为「主请求 cache-stable 前缀 + 指令」：复用同一消息构造管线产物的 system+tools+history，指令最后 | 压缩调用 cache_read > 0；压缩 141s → 单次调用 |
+| F3 | CJK-aware 估算 | ⏳ 待落地 | `estimate_multimodal_tokens` 默认公式改为 CJK 分段计价（无新参数），压缩/水位/计量兜底三处零改动自动继承 | 中英混合样本误差 ≤ ±10% |
 
 三者相互咬合：F2 要求 system 与主请求逐字节一致 → 压缩指令**必须**从 system 移到最后一条 user 消息（F1 的模板恰好如此）；F1 的模板压低输出 → 单批装下全部可压缩区间（当前 74% 重述是触发二分重试、放大到三次调用的直接原因）。
 
 ---
 
-## 3. F1：结构化压缩指令 + 输出硬约束
+## 3. F1：结构化压缩指令 + 输出硬约束（✅ 已落地，本节为历史设计记录）
 
 ### 3.1 指令模板（替换 `_SYSTEM_PROMPT`）
 
@@ -128,7 +130,7 @@ if summary_tokens >= covered_tokens:
 - `_degraded_summary` 产物加 `"shrink_failed": True` 标记，供 Langfuse/日志监控（现状 `degraded: True` 已有，加个原因字段即可）。
 - **定位澄清（评审决议 Q1-a）**：本校验是**安全网**，只挡「摘要不比输入小」；它**挡不住 74% 重述**（10.9K/14.7K 本满足「严格小于」）。「输出/输入比 ≤50%」指标的实现载体是 8 节模板 + maxTokens（§3.1、§3.4），不是本校验。阈值取「严格小于」（`summary_tokens >= covered_tokens` 才失败），**不设百分比阈值**——收紧会在弱模型上多烧重试；先上线看输出比，指标不达标再收紧（备选收紧值 ≤70% covered）。
 
-### 3.4 `_summary_from_step` 结构校验（P2，可后置）
+### 3.4 `_summary_from_step` 结构校验（P2，已随 F1.5 落地）
 
 温和校验：要求 8 个节标题至少出现 5 个，否则 `_RepairableCompactOutput`。不做严格全节校验（弱模型偶尔合并小节的成本低于重试成本）。与 3.3 一起入库，但可作为独立 commit 回滚。
 
@@ -138,7 +140,7 @@ if summary_tokens >= covered_tokens:
 
 ### 4.1 设计要点
 
-主请求已明确 cache-stable 前缀 = `system + history`（`prefix_cache_break` 标记在 block A，model_step_service.py:1499）。压缩请求构造为：
+主请求已明确 cache-stable 前缀 = `system + history`（`prefix_cache_break` 标记在 block A，model_step_service.py:1684）。压缩请求构造为：
 
 ```
 [system(与主请求逐字节一致)]
@@ -154,7 +156,7 @@ supports_vision = model.supports_vision（与主请求一致）
 
 ### 4.2 代码改动
 
-**A. `RunCompactInputs` 增加请求形态快照**（run_compactor.py:126-132）：
+**A. `RunCompactInputs` 增加请求形态快照**（run_compactor.py:228）：
 
 ```python
 @dataclass(frozen=True, slots=True)
@@ -176,13 +178,13 @@ request_shape: CompactRequestShape
 
 **B. `model_step_service.compact_inputs`（2367）填充快照**：
 
-- 从 `_prompt_messages` 中抽出 history 段构造为可复用函数 `_build_history_messages(build, ...) -> list[CompactHistoryMessage]`（现 1343-1479 的 system+history 循环），`_prompt_messages` 与 compact_inputs 共用——**同一管线、同一转换**：逐字节一致的保证落实在 `_model_message_content` 这一层（make_message 的 provider_call_id 重写、dedup、`_model_message_content` 内容转换都走同一函数，不在 compact_inputs 里复制转换逻辑）。
+- 从 `_prompt_messages` 中抽出 history 段构造为可复用函数 `_build_history_messages(build, ...) -> list[CompactHistoryMessage]`（现 `_prompt_messages` 1465 内 make_message 1524 的 system+history 循环），`_prompt_messages` 与 compact_inputs 共用——**同一管线、同一转换**：逐字节一致的保证落实在 `_model_message_content` 这一层（make_message 的 provider_call_id 重写、dedup、`_model_message_content` 内容转换都走同一函数，不在 compact_inputs 里复制转换逻辑）。
 - `compact_inputs` 在现有 `static_prompt`/`tools`/`build` 材料上构造 `CompactRequestShape` 传入 `RunCompactInputs`。
 - exact_inputs 不需要单独传：run_compactor 已有 `_protected_current_run_message_ids` 计算出的 protected 集合，从 `shape.history` 按 id 挑选即可。
 - **工具构造参数必须与 `complete_once` 完全对齐（评审发现 F-A，现 2375 vs 3234 不一致）**：`compact_inputs:2375` 的 `allow_user_wait = not _is_public_group_chat_run(state)` 缺 `onboarding_run` 条件（`complete_once:3234` 是 `... and not onboarding_run`），onboarding 场景下压缩请求 tools 会比主请求多 `user_wait` 工具 → 前缀缓存必 miss。落地时补 `onboarding_run = _is_onboarding_run(state)`（985 现成判定），两处用同一表达式；invariant 测试覆盖 onboarding 场景。
 - **范围收敛（code-review 修订，2026-09-05）**：本次 F2 **只修 F-A 一行 + `_build_history_messages` 抽取**；`compact_inputs` 与 `complete_once` 的整段「请求形态构造」（application_tools → `_application_tools_for_model` → `_with_runtime_tools` → allowed_names，2374-2395 vs 3232-3253）共享抽取**另立案**（宪法 §3 不混结构重构 + §4 Minimalism），不混入 F2 这个形态切换 commit。
 
-**C. `run_compactor._prompt_messages`（430-443）重写为 `_compact_messages`**：
+**C. `run_compactor._prompt_messages`（993）重写为 `_compact_messages`**：
 
 ```python
 def _compact_messages(
@@ -191,28 +193,35 @@ def _compact_messages(
     covered_ids: frozenset[str],
     summary_text: str | None,          # 批 2+ 的背景消息
     exact_ids: frozenset[str],
+    completed_actions: Sequence[JsonObject] = (),  # 账本事实（非前缀）
+    files_read: Sequence[JsonObject] = (),          # 已读文件事实（非前缀）
 ) -> list[LLMMessage]:
     messages = [LLMMessage(role="system", content=shape.system_content)]
-    for replay in shape.history:
-        if replay.state_message_id in covered_ids:
-            messages.append(replay.message)
+    for entry in shape.history:
+        if entry.state_message_id in covered_ids:
+            messages.append(entry.message)
     if summary_text:
         messages.append(LLMMessage(role="user", content=_CHECKPOINT_PREAMBLE + "\n\n" + summary_text))
-    for replay in shape.history:
-        if replay.state_message_id in exact_ids:
-            messages.append(replay.message)
+    for entry in shape.history:
+        if entry.state_message_id in exact_ids:
+            messages.append(entry.message)
+    # 压缩专用内容（completed_actions/files_read）不进 cache-stable 前缀——它们随批变化；
+    # 放在指令之前的 user 消息，指令仍是永远最后（F1 不变量）。
+    if completed_actions or files_read:
+        messages.append(LLMMessage(role="user", content=_render_deterministic_ledger(completed_actions, files_read)))
     messages.append(LLMMessage(role="user", content=_COMPACTION_INSTRUCTION))
     return messages
 ```
 
 - covered_ids 由 `_compactable_prefix` 产出的 compactable 块 message_ids 计算（现成数据，无需改该函数）。
-- exact_ids：protected 集合中 `runtime_input in {"current","resume"}` 的消息（现 `compact_if_needed:770-776` 已算 exact_inputs，改为传 id 集合）。
+- exact_ids：protected 集合中 `runtime_input in {"current","resume"}` 的消息（现 `compact_if_needed:1369-1375` 已算 exact_inputs，改为传 id 集合）。
 - 摘要背景消息的 `_CHECKPOINT_PREAMBLE` 是 §3.2 定义的**新常量**（run-boundary 硬约束措辞），随 F2 落地为 run_compactor.py 模块级常量。
-- `_compact_batch` 的 `_completion` 调用（591-598）改为：`tools=list(shape.provider_tools)`、`supports_vision=model.supports_vision`、`max_output_tokens=summary_output_limit` 不变。
+- **completed_actions/files_read 是复审新发现的压缩输入**（`_payload` 517 现含这两段；`build_completed_actions`/`build_files_read` 625/697 产出）。F2 切换消息形态时**必须携带**——但作为压缩专用段放在 cache-stable 前缀之后、指令之前，不得并入前缀（它们随批变化会破坏缓存）。
+- `_compact_batch` 的 `_completion` 调用（1145-1152）改为：`tools=list(shape.provider_tools)`、`supports_vision=model.supports_vision`、`max_output_tokens=summary_output_limit` 不变，且**保留 `thinking_disabled=True`**（0c43ce61 新增）。
 
-**D. `_payload`（411-428）与 JSON 序列化路径删除**：`_summary_from_step` 输出改为纯 checkpoint 文本；`_payload`、`project_multimodal_for_summary` 调用（425）删除。`RunCompactResult.thread_summary` 形状**保持** `{"format": _SUMMARY_FORMAT, "text": ...}`（state 与 context_builder 消费方零改动）。
+**D. `_payload`（517）与 JSON 序列化路径删除**：`_summary_from_step` 输出改为纯 checkpoint 文本；`_payload`、`project_multimodal_for_summary` 调用（541）删除。但 `_payload` 现含的 `completed_actions`/`files_read` 两段**保留**并迁入 `_compact_messages`（见 C，非前缀段），仅 covered/exact/summary 三块改为主请求形态。`RunCompactResult.thread_summary` 形状**保持** `{"format": _SUMMARY_FORMAT, "text": ...}`（state 与 context_builder 消费方零改动）。
 
-**E. 图片语义对齐**：covered 消息内容用 `_model_message_content`（与主请求同一转换，含 `parse_multimodal_content` 图片处理，1202-1228），`supports_vision` 对齐主请求——压缩请求不再需要 `project_multimodal_for_summary` 的 metadata 降级。若某 covered 块含图片且 `supports_vision=False` 的主模型场景，图片由 `_model_message_content` 按既有语义处理，行为与主请求一致。
+**E. 图片语义对齐**：covered 消息内容用 `_model_message_content`（1371，与主请求同一转换，含 `parse_multimodal_content` 图片处理），`supports_vision` 对齐主请求——压缩请求不再需要 `project_multimodal_for_summary` 的 metadata 降级。若某 covered 块含图片且 `supports_vision=False` 的主模型场景，图片由 `_model_message_content` 按既有语义处理，行为与主请求一致。
 
 ### 4.3 批 2+ 的缓存现实
 
@@ -220,8 +229,8 @@ def _compact_messages(
 
 ### 4.4 截断场景与 invariant 测试语义（评审决议 Q2-b / 发现 F-B）
 
-- **前提修正**：主请求真正发出的 history 来自 `_prepare_messages` 里**带预算截断的第二次 build**（2437-2443 → context_builder.py:509/559/589 的 `selected_thread_messages`），而 compact 的 covered 取自**无截断的 state 投影**（`_thread_messages`）。当历史超预算被截断时，covered 里的旧消息不在最近主请求里 → 该场景缓存 miss **不可避免**。
-- **决定（Q2-b）**：`compact_inputs` 保持无截断 build。理由：改用带预算 build 会让旧消息在 build 产物里消失 → compactable 变空、压缩失效（语义破坏）；而截断场景本就罕见（80% 水位先于截断触发；截断只发生在 `compact_guard` 已设或单条消息超预算时），miss 成本可接受。**不做**「截断后重算 covered 集合」的复杂对齐。
+- **前提修正**：主请求真正发出的 history 来自 `_prepare_messages`（2462）里**带预算截断的第二次 build**（→ context_builder.py:733-760 的 `selected_thread_messages`），而 compact 的 covered 取自**无截断的 state 投影**（`_thread_messages` 271）。当历史超预算被截断时，covered 里的旧消息不在最近主请求里 → 该场景缓存 miss **不可避免**。
+- **决定（Q2-b）**：`compact_inputs` 保持无截断 build。理由：改用带预算 build 会让旧消息在 build 产物里消失 → compactable 变空、压缩失效（语义破坏）；而截断场景本就罕见（80% 水位先于截断触发；截断只发生在压缩循环熔断已设 `terminate_on_compaction_loop` 或单条消息超预算时），miss 成本可接受。**不做**「截断后重算 covered 集合」的复杂对齐。
 - **invariant 测试语义修正**：从「压缩请求 covered 段 == 主请求同段（缓存命中保证）」改为**管线一致性门禁**——同一 state 下 `_build_history_messages` 两次调用产物逐字节一致（防管线漂移）。缓存命中率（`cache_read_tokens > 0`）降级为**集成监控指标**，不作为不变式断言（截断场景会正常 miss）。
 
 ---
@@ -272,9 +281,9 @@ def estimate_multimodal_tokens(value, *, chars_per_token, utf8_bytes=False):
 
 **顺序（round-2 评审 R2-Q1 改序，2026-08-30）**：F1 先上、F3 紧随（相邻两次部署）。理由：F1 验收指标（≤50% 输出比、cache_read>0）来自 Langfuse 真实 usage，不依赖 F3 的估算修正；反之 F3 先上会放大「中文压缩更频繁 × 74% 重述仍贵」的成本窗口。F3 上线后再校准计量基准。
 
-1. **commit F1**（指令/校验）：模板替换 + 背景措辞 + shrink 校验。此时压缩请求仍是 JSON payload 形态（`_SYSTEM_PROMPT` 删除后指令放 payload 里），功能自洽。
-2. **commit F3**（紧随 F1）：估算器默认公式改为 CJK 分段计价（**无参数，三处调用点零改动**）+ 计价测试。修正中文低估近半的计量基准。**注意（R2-Q4 评审发现）**：F3 同时作用于 context_builder 截断的 token_counter（model_step_service.py:2441 `_message_token_counter`），中文长会话压缩+截断都会更早——预算首次对中文真实生效，属预期行为（修复性质），上线后监控 1-2 天。
-3. **commit F1.5**（可选小 commit，评审决议 Q6）：`_summary_from_step` 温和结构校验（8 节至少 5 节）。可单独回滚。
+1. **commit F1**（指令/校验，✅ 已落地）：模板替换 + 背景措辞 + shrink 校验。此时压缩请求仍是 JSON payload 形态（`_SYSTEM_PROMPT` 删除后指令作最后一条 user 消息），功能自洽。
+2. **commit F3**（紧随 F1）：估算器默认公式改为 CJK 分段计价（**无参数，三处调用点零改动**）+ 计价测试。修正中文低估近半的计量基准。**注意（R2-Q4 评审发现）**：F3 同时作用于 context_builder 截断的 token_counter（model_step_service.py:887 `_message_token_counter`），中文长会话压缩+截断都会更早——预算首次对中文真实生效，属预期行为（修复性质），上线后监控 1-2 天。
+3. **commit F1.5**（可选小 commit，评审决议 Q6，✅ 已落地）：`_summary_from_step` 温和结构校验（8 节至少 5 节）。可单独回滚。
 4. **commit F2**（形态切换，最大）：`CompactRequestShape` + `_build_history_messages` 抽取 + `_compact_messages` + 管线切换 + **工具构造参数对齐（F-A）**。依赖 F1 的模板常量。
 
 ### 6.2 验证矩阵
@@ -339,3 +348,13 @@ def estimate_multimodal_tokens(value, *, chars_per_token, utf8_bytes=False):
 6. **票 04 补 R2-Q4「截断更早」效应**（Spec：context_builder 截断 token_counter 同受影响）。
 7. **§5.1 伪代码改逐码点遍历 + 英语注释**（Standards：修「按字节循环 vs 逐码点注释」矛盾）。
 8. **§7/§6.2 补 DeepSeek 前缀缓存 TTL 边界**（对照发现）：cache_read>0 验收仅适用同 run 秒级间隔。
+
+## 11. 复审记录（2026-09-05，代码漂移核对）
+
+用户提示「代码已改了很多」后，对照当前工作区重新核实全部代码引用。结论：**F2/F3 设计前提仍成立**（JSON payload 形态、tools=[]/supports_vision=False、bytes/4、F-A 都在），但方案基线已漂移，已回改：
+
+1. **F1/F1.5 已落地**（§1/§2/§3/§6.1 标记 ✅）：`_SYSTEM_PROMPT`（50-62）→ `_COMPACTION_INSTRUCTION`（56）；shrink 校验（`_compact_batch:1175-1182`）+ 结构校验（`_summary_from_step`）已入库。原「三缺陷」缺陷 1 已修复。
+2. **两个新压缩输入须折进 F2**（§4.2-C/D）：`completed_actions` + `files_read`（`_payload` 517，`build_completed_actions`/`build_files_read` 625/697）——F2 切换消息形态时作为非前缀段携带，不得并入 cache-stable 前缀。
+3. **`thinking_disabled=True` 须保留**（0c43ce61 新增，§4.2-C）：F2 切 `_completion` 调用时不丢。
+4. **行号全面刷新**（§1/§4.2/§4.4/§6.1）：`compact_if_needed` 699→1296、`_compact_batch` 591→1129、`_prompt_messages` 430→993、主请求 `_prompt_messages` 1296→1465、水位判定 2425→2693、`_prepare_messages` 2437→2462、`_message_token_counter` 2441→887 等。
+5. **结构性移位**：`token_tracker.py` 移出 `agent_runtime` 子包（现 `backend/app/services/token_tracker.py:17`）；node_executor 的 `compact_guard` → `_compact`（669）+ `terminate_on_compaction_loop`（636）。
