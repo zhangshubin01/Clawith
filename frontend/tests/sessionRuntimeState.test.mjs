@@ -13,6 +13,7 @@ import {
   shouldPreserveInterruptedStream,
   runtimeCompletionNeedsMessageRefresh,
   runtimeTerminalPacketNeedsMessageRefresh,
+  runIsActive,
   sessionActiveRunFromResponse,
   sessionRuntimeStateResponseIsValid,
   mergeTerminalAssistantMessage,
@@ -261,6 +262,27 @@ test('terminal refresh settles every stuck running tool after the canonical merg
     { id: 'u-1', role: 'user', content: 'work' },
     { ...running, toolStatus: 'done' },
   ]);
+});
+
+test('run activity is authoritative — terminal statuses are never active', () => {
+  assert.equal(runIsActive(null), false);
+  assert.equal(runIsActive({ ...waitingRun, status: 'queued' }), true);
+  assert.equal(runIsActive({ ...waitingRun, status: 'running' }), true);
+  assert.equal(runIsActive({ ...waitingRun, status: 'waiting_user' }), true);
+  assert.equal(runIsActive({ ...waitingRun, status: 'completed' }), false);
+  assert.equal(runIsActive({ ...waitingRun, status: 'failed' }), false);
+  assert.equal(runIsActive({ ...waitingRun, status: 'cancelled' }), false);
+});
+
+test('analysis card gates running tools on authoritative run activity', () => {
+  assert.match(
+    agentDetailSource,
+    /const hasRunningTool = runActive && toolItems\.some/,
+  );
+  assert.match(
+    agentDetailSource,
+    /runActive=\{runIsActive\(selectedSessionActiveRun\)\}/,
+  );
 });
 
 test('runtime-state request failure preserves display identity but disables actions', () => {

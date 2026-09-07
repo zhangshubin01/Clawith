@@ -130,6 +130,17 @@ export const settleRunningTools = <T extends SessionToolMessage>(
         : message
 ));
 
+const TERMINAL_RUN_STATUSES = new Set(['completed', 'failed', 'cancelled']);
+
+// The authoritative "is this run still active" predicate. A tool may only
+// legitimately render as `running` while its run is active; once the run is
+// terminal, any surviving running tool is stale and must not drive the
+// `analysis-trace--stopped` red square. Mirrors OpenHands'
+// `isExecutionActive(status)` — a single source of truth, never scanning
+// message rows for a running tool to infer the run state.
+export const runIsActive = (activeRun: SessionActiveRun | null): boolean =>
+    activeRun !== null && !TERMINAL_RUN_STATUSES.has(activeRun.status);
+
 const record = (value: unknown): Record<string, unknown> | null =>
     value !== null && typeof value === 'object'
         ? value as Record<string, unknown>
@@ -276,7 +287,7 @@ export const sessionActiveRunFromResponse = (payload: unknown): SessionActiveRun
 
     const correlationId = optionalText(raw.correlation_id);
     const waitingType = optionalText(raw.waiting_type);
-    const terminal = ['completed', 'failed', 'cancelled'].includes(status);
+    const terminal = TERMINAL_RUN_STATUSES.has(status);
     const rawStepCount = raw.model_step_count;
     const modelStepCount = (
         typeof rawStepCount === 'number'
@@ -373,7 +384,7 @@ export const runtimeCompletionNeedsMessageRefresh = (
 export const runtimeTerminalPacketNeedsMessageRefresh = (
     runtimeStatus: unknown,
 ): boolean => typeof runtimeStatus === 'string'
-    && ['completed', 'failed', 'cancelled'].includes(runtimeStatus);
+    && TERMINAL_RUN_STATUSES.has(runtimeStatus);
 
 type TerminalAssistantMessageLike = {
     id?: string;

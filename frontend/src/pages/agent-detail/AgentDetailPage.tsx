@@ -74,6 +74,7 @@ import {
     shouldPreserveInterruptedStream,
     runtimeCompletionNeedsMessageRefresh,
     runtimeTerminalPacketNeedsMessageRefresh,
+    runIsActive,
     sessionActiveRunFromResponse,
     sessionRuntimeStateResponseIsValid,
     type SessionActiveRun,
@@ -1220,7 +1221,7 @@ function describeToolResolution(
 }
 
 function AnalysisCard({
-    items, t, expanded, onToggle, isGroupRunning, chatActive, sessionId,
+    items, t, expanded, onToggle, isGroupRunning, chatActive, runActive, sessionId,
     reconciliationsByToolCallId,
 }: {
     items: AnalysisItem[];
@@ -1231,6 +1232,8 @@ function AnalysisCard({
     isGroupRunning: boolean;
     /** True while the chat is actively streaming/waiting (any turn in flight) */
     chatActive?: boolean;
+    /** Authoritative run activity — a tool may render running only while this is true */
+    runActive: boolean;
     sessionId?: string | null;
     reconciliationsByToolCallId: Map<string, ToolReconciliation>;
 }) {
@@ -1241,7 +1244,7 @@ function AnalysisCard({
     );
     const toolItems = items.filter(i => i.type === 'tool') as Extract<AnalysisItem, { type: 'tool' }>[];
     const hasTools = toolItems.length > 0;
-    const hasRunningTool = toolItems.some(tc => tc.status === 'running');
+    const hasRunningTool = runActive && toolItems.some(tc => tc.status === 'running');
     // Stopped responding: a tool is still marked running but the chat is no longer streaming.
     const stopped = hasRunningTool && chatActive === false;
     const isRunning = !stopped && (hasRunningTool || (!hasTools && isGroupRunning));
@@ -7199,6 +7202,7 @@ export default function AgentDetailPage() {
                                                                         onToggle={() => toggleToolGroup(entry.key)}
                                                                         isGroupRunning={groupIsRunning}
                                                                         chatActive={isWaiting || isStreaming}
+                                                                        runActive={runIsActive(selectedSessionActiveRun)}
                                                                         sessionId={activeSessionIdRef.current}
                                                                         reconciliationsByToolCallId={selectedReconciliationsByToolCallId}
                                                                     />

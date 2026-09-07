@@ -63,7 +63,7 @@ const stopped = hasRunningTool && chatActive === false;
 
 **第 2 层 · 数据收敛（保证数据终态一致，已有 `settleRunningTools` 扩到全部终态入口）**
 
-- 终态时 settle 所有 running 工具（`settleRunningTools`），挂到每个终态入口：`runtimeCompletionNeedsMessageRefresh`（active_run→null）、`runtimeTerminalPacketNeedsMessageRefresh`、WS `done` handler（3698-3748 当前只替换末尾 assistant 消息，**不清理 running 工具**，需补）、以及「进入页面时 run 已终态」的初始加载。
+- 终态时 settle 所有 running 工具（`settleRunningTools`），挂在 `refreshSessionMessages` 终态分支内，**两条终态信号源都已汇到这里**：轮询 `runtimeCompletionNeedsMessageRefresh`（active_run→null，2605）与 WS `done` 包（`runtimeTerminalPacketNeedsMessageRefresh` 3674 → 3751 `refreshSessionMessages(true)`，注释「always reload the canonical page after a terminal packet」）。
 - done 永不回退 running（`mergeSessionToolMessage` line 87 已有 guard，保留并契约测试锁死）。
 
 **第 3 层 · 加固（可选，WS 断流防线）**
@@ -84,7 +84,7 @@ running 工具带 fail-closed 租约：终态或 `chatActive===false` 超时自�
 ## 四、落地步骤
 
 1. **渲染投影**：`AnalysisCard` 增 `runActive` 入参（由 `selectedSessionActiveRun` 派生，`selectedSessionActiveRun` 在 7195 渲染作用域已可用），`hasRunningTool` 加 `runActive &&` 门控。
-2. **数据收敛补全**：`settleRunningTools` 扩到 WS `done` handler 与「初始加载时 run 已终态」两条路径（当前只挂了 `refreshSessionMessages` 终态分支）。
+2. **数据收敛（已完成）**：`settleRunningTools` 挂在 `refreshSessionMessages` 终态分支，两条终态源（轮询 active_run→null、WS done 包）都汇到这里，无需再扩。（2026-09-06 复核：done handler 本就调用 `refreshSessionMessages(true)`，此前「需补」判断不准确。）
 3. **契约测试**：①终态 + 窗口外 running → 全 settle；②done 永不回退 running；③重连重放重复 call_id 幂等无副作用；④`stopped` 只在「run 显式终态」+ 数据层漏 settle 的瞬间出现（投影门控后应为不可能，锁死）。
 4. **（可选）** fail-closed 租约。
 
