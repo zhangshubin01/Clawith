@@ -8,12 +8,13 @@ from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
 from loguru import logger
 from sqlalchemy import delete, exists, func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.config import get_settings
 from app.core.permissions import check_agent_access, is_agent_creator
-from app.core.security import get_current_user
+from app.core.security import get_current_admin, get_current_user
 from app.database import async_session, get_db
 from app.models.agent import Agent, AgentPermission, AgentTemplate
 from app.models.agent_run import AgentRun
@@ -36,6 +37,7 @@ from app.models.skill import Skill
 from app.services.resource_discovery import import_mcp_from_smithery
 from app.services.agent_runtime.persistence import enqueue_cancel
 from app.services.llm.model_resolution import load_active_model
+from app.services.maintainer_service import maintainer_service
 from app.dao import agent_dao, tenant_dao, user_dao
 
 router = APIRouter(prefix="/agents", tags=["agents"])
@@ -1034,6 +1036,161 @@ async def update_agent(
     if clamped_fields:
         out["_clamped_fields"] = clamped_fields
     return out
+
+
+async def _require_maintainer_agent(
+    db: AsyncSession, current_user: User, agent_id: uuid.UUID
+) -> Agent:
+    """Resolve the agent for a maintainers admin call, with tenant isolation.
+
+    Role gating (platform_admin + org_admin + identity.is_platform_admin) is done
+    by the ``get_current_admin`` dependency on the endpoints; this helper only
+    resolves the agent and enforces tenant isolation.
+    """
+    # arch-guard: allow (platform_admin cross-tenant) — 超管需跨租户，用父类 get() 而非 tenant-scoped get_active()
+    agent = await agent_dao.get(agent_id, db=db)
+    if not agent or agent.deleted_at is not None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Agent not found")
+    # 手动租户隔离：org_admin 与有租户的 platform_admin 必须同租户；无租户 platform_admin（超管）可跨租户
+    if current_user.tenant_id is not None and agent.tenant_id != current_user.tenant_id:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "No access to this agent")
+    return agent
+
+
+@router.get("/{agent_id}/maintainers")
+async def list_agent_maintainers(
+    agent_id: uuid.UUID,
+    current_user: User = Depends(get_current_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """List explicit maintainers plus the implicit creator."""
+    agent = await _require_maintainer_agent(db, current_user, agent_id)
+    maintainers = await maintainer_service.list_maintainers(db, agent_id)
+
+    users_by_id: dict[str, User] = {}
+    if maintainers:
+        users = await user_dao.list_by_ids([m.user_id for m in maintainers], db=db)
+        users_by_id = {str(u.id): u for u in users}
+
+    items = []
+    for m in maintainers:
+        u = users_by_id.get(str(m.user_id))
+        items.append(
+            {
+                "id": str(m.id),
+                "user_id": str(m.user_id),
+                "name": u.display_name if u else None,
+                "username": u.username if u else None,
+                "email": u.email if u else None,
+                "created_by": str(m.created_by) if m.created_by else None,
+                "created_at": m.created_at.isoformat() if m.created_at else None,
+            }
+        )
+
+    creator = None
+    if agent.creator_id:
+        c = await user_dao.get_with_identity(agent.creator_id)
+        if c:
+            creator = {
+                "user_id": str(c.id),
+                "name": c.display_name,
+                "username": c.username,
+                "is_implicit": True,
+            }
+    return {"maintainers": items, "creator": creator}
+
+
+@router.post("/{agent_id}/maintainers", status_code=status.HTTP_201_CREATED)
+async def add_agent_maintainer(
+    agent_id: uuid.UUID,
+    data: dict,
+    current_user: User = Depends(get_current_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Add a user as a maintainer (governance action, admin-only)."""
+    agent = await _require_maintainer_agent(db, current_user, agent_id)
+
+    raw_user_id = data.get("user_id")
+    try:
+        user_id = uuid.UUID(str(raw_user_id))
+    except (TypeError, ValueError, AttributeError):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid user_id")
+
+    target = await user_dao.get(user_id, db=db)
+    if not target or not target.is_active:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "User not found or inactive")
+    if target.tenant_id != agent.tenant_id:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "User is not in the agent's tenant")
+    if target.id == agent.creator_id:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT, "Creator is an implicit maintainer and cannot be added"
+        )
+    if await maintainer_service.is_maintainer(db, agent_id, target.id):
+        raise HTTPException(status.HTTP_409_CONFLICT, "User is already a maintainer")
+
+    try:
+        maintainer = await maintainer_service.add_maintainer(
+            db, agent_id=agent_id, user_id=target.id, created_by=current_user.id
+        )
+        db.add(
+            AuditLog(
+                user_id=current_user.id,
+                agent_id=agent.id,
+                action="maintainer_added",
+                details={
+                    "resource_id": str(agent.id),
+                    "tenant_id": str(agent.tenant_id) if agent.tenant_id else None,
+                    "target_user_id": str(target.id),
+                },
+            )
+        )
+        await db.commit()
+    except IntegrityError:
+        await db.rollback()
+        raise HTTPException(status.HTTP_409_CONFLICT, "User is already a maintainer")
+
+    return {
+        "id": str(maintainer.id),
+        "agent_id": str(agent_id),
+        "user_id": str(target.id),
+        "name": target.display_name,
+        "username": target.username,
+        "created_by": str(current_user.id),
+    }
+
+
+@router.delete("/{agent_id}/maintainers/{user_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def remove_agent_maintainer(
+    agent_id: uuid.UUID,
+    user_id: uuid.UUID,
+    current_user: User = Depends(get_current_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Remove a maintainer (governance action, admin-only)."""
+    agent = await _require_maintainer_agent(db, current_user, agent_id)
+
+    if user_id == agent.creator_id:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST, "Creator is an implicit maintainer and cannot be removed"
+        )
+
+    removed = await maintainer_service.remove_maintainer(db, agent_id=agent_id, user_id=user_id)
+    if not removed:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "User is not a maintainer")
+
+    db.add(
+        AuditLog(
+            user_id=current_user.id,
+            agent_id=agent.id,
+            action="maintainer_removed",
+            details={
+                "resource_id": str(agent.id),
+                "tenant_id": str(agent.tenant_id) if agent.tenant_id else None,
+                "target_user_id": str(user_id),
+            },
+        )
+    )
+    await db.commit()
 
 
 @router.delete("/{agent_id}", status_code=status.HTTP_204_NO_CONTENT)

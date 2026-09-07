@@ -18,9 +18,9 @@ Design anchors (docs/technical-plans/20260905-maintainer-gate-g3-g4-production-p
 
 import uuid
 from enum import Enum
-from typing import Mapping
+from typing import Mapping, Sequence
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.agent import Agent, AgentMaintainer
@@ -111,6 +111,56 @@ class MaintainerService:
             .limit(1)
         )
         return result.scalar_one_or_none() is not None
+
+    async def list_maintainers(
+        self, db: AsyncSession, agent_id: uuid.UUID
+    ) -> Sequence[AgentMaintainer]:
+        """List explicit maintainers (creator is implicit, never stored)."""
+        result = await db.execute(
+            select(AgentMaintainer)
+            .where(AgentMaintainer.agent_id == agent_id)
+            .order_by(AgentMaintainer.created_at)
+        )
+        return result.scalars().all()
+
+    async def add_maintainer(
+        self,
+        db: AsyncSession,
+        *,
+        agent_id: uuid.UUID,
+        user_id: uuid.UUID,
+        created_by: uuid.UUID | None,
+    ) -> AgentMaintainer:
+        """Insert a maintainer row; the caller pre-checks duplicates/creator.
+
+        ``created_by`` is the row-level audit (who granted). Removal has no
+        row-level audit — the row is gone — so the caller writes the removal to
+        ``AuditLog`` instead.
+        """
+        maintainer = AgentMaintainer(
+            agent_id=agent_id, user_id=user_id, created_by=created_by
+        )
+        db.add(maintainer)
+        await db.flush()
+        return maintainer
+
+    async def remove_maintainer(
+        self, db: AsyncSession, *, agent_id: uuid.UUID, user_id: uuid.UUID
+    ) -> bool:
+        """Delete a maintainer row; return False when it does not exist."""
+        result = await db.execute(
+            select(AgentMaintainer.id).where(
+                AgentMaintainer.agent_id == agent_id,
+                AgentMaintainer.user_id == user_id,
+            )
+        )
+        maintainer_id = result.scalar_one_or_none()
+        if maintainer_id is None:
+            return False
+        await db.execute(
+            delete(AgentMaintainer).where(AgentMaintainer.id == maintainer_id)
+        )
+        return True
 
     async def resolve_file_modify_permission(
         self,

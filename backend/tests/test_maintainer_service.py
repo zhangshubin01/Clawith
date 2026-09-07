@@ -12,7 +12,7 @@ import uuid
 
 import pytest
 
-from app.models.agent import Agent
+from app.models.agent import Agent, AgentMaintainer
 from app.services.maintainer_service import (
     FILE_MODIFY_TOOL_NAMES,
     FileModifyDecision,
@@ -243,3 +243,100 @@ def test_file_modify_tool_names_is_exactly_four() -> None:
     assert FILE_MODIFY_TOOL_NAMES == frozenset(
         {"delete_file", "edit_file", "write_file", "move_file"}
     )
+
+
+# ---------------------------------------------------------------------------
+# Maintainer list/add/remove service methods (DB-backed CRUD)
+# ---------------------------------------------------------------------------
+
+
+class _FakeResult:
+    def __init__(self, values=()):
+        self._values = list(values)
+
+    def scalar_one_or_none(self):
+        return self._values[0] if self._values else None
+
+    def scalars(self):
+        return self
+
+    def all(self):
+        return list(self._values)
+
+
+class _FakeDB:
+    def __init__(self, responses=()):
+        self.responses = list(responses)
+        self.executed: list[object] = []
+        self.added: list[object] = []
+        self.flushed = False
+
+    async def execute(self, statement, params=None):
+        self.executed.append(statement)
+        if self.responses:
+            return self.responses.pop(0)
+        return _FakeResult()
+
+    def add(self, obj):
+        self.added.append(obj)
+
+    async def flush(self):
+        self.flushed = True
+
+
+@pytest.mark.asyncio
+async def test_list_maintainers_returns_rows() -> None:
+    agent_id = uuid.uuid4()
+    m1 = AgentMaintainer(agent_id=agent_id, user_id=uuid.uuid4())
+    m2 = AgentMaintainer(agent_id=agent_id, user_id=uuid.uuid4())
+    db = _FakeDB(responses=[_FakeResult([m1, m2])])
+
+    result = await maintainer_service.list_maintainers(db, agent_id)
+
+    assert list(result) == [m1, m2]
+
+
+@pytest.mark.asyncio
+async def test_add_maintainer_inserts_row_with_created_by_and_flushes() -> None:
+    agent_id = uuid.uuid4()
+    user_id = uuid.uuid4()
+    created_by = uuid.uuid4()
+    db = _FakeDB()
+
+    maintainer = await maintainer_service.add_maintainer(
+        db, agent_id=agent_id, user_id=user_id, created_by=created_by
+    )
+
+    assert db.flushed is True
+    assert len(db.added) == 1
+    assert db.added[0].agent_id == agent_id
+    assert db.added[0].user_id == user_id
+    assert db.added[0].created_by == created_by
+    assert maintainer is db.added[0]
+
+
+@pytest.mark.asyncio
+async def test_remove_maintainer_returns_true_and_deletes() -> None:
+    agent_id = uuid.uuid4()
+    user_id = uuid.uuid4()
+    row_id = uuid.uuid4()
+    db = _FakeDB(responses=[_FakeResult([row_id]), _FakeResult()])
+
+    result = await maintainer_service.remove_maintainer(db, agent_id=agent_id, user_id=user_id)
+
+    assert result is True
+    # first execute = SELECT id, second = DELETE
+    assert len(db.executed) == 2
+
+
+@pytest.mark.asyncio
+async def test_remove_maintainer_returns_false_when_missing() -> None:
+    db = _FakeDB(responses=[_FakeResult([])])
+
+    result = await maintainer_service.remove_maintainer(
+        db, agent_id=uuid.uuid4(), user_id=uuid.uuid4()
+    )
+
+    assert result is False
+    # only the SELECT ran, no DELETE
+    assert len(db.executed) == 1

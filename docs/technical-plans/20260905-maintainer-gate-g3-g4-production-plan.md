@@ -270,9 +270,10 @@ P0 先 commit/stash 并行会话的工作区改动（开工前 git status 核对
 |---|---|---|
 | S1 | autonomy_policy 的 delete_files/write_workspace_files 键未清理（grill 决策 6 / §3.2 原写「f077 显式迁移」） | **故意移出迁移**（backend/alembic/AGENTS.md §2 禁数据操作）→ 转 out-of-band 脚本，**待办** |
 | S2 | 3 条 pending delete_files 审批未 resolve（雷 1 / §8.2） | 同上，转 out-of-band resolve 脚本（reject + resume run 告知「门控已接管」），**待办** |
-| S3 | `agent_maintainers` 管理 API（GET/POST/DELETE `/api/agents/{id}/maintainers`，鉴权含 org_admin）未实现（雷 3 / 验收红线） | §3.4 原标 P2，属**验收红线残留**——`is_maintainer` 分支目前只有 creator 隐式可达，名单写入口缺失。**待办** |
+| S3 | `agent_maintainers` 管理 API（GET/POST/DELETE `/api/agents/{id}/maintainers`，鉴权含 org_admin）未实现（雷 3 / 验收红线） | ✅ **已实现**（`20260907-agent-maintainers-management-api-production-plan.md`，commit 见该方案 Phase 5）——`is_maintainer` 分支可达、名单可写、鉴权含 org_admin |
 | S4 | 前缀判定用 `normalize_workspace_path`（非 symlink 感知）替换了 §2/§3.3/§3.6 要求的 `safe_agent_path` | **拍板偏离**（grill 决策 1 / G-4：治理层非硬安全，symlink 需先经 `execute_code` 种入=已接受绕过面），代码 docstring 已记录；本表（S4）即为 spec↔代码同步记录 |
 | S5 | legacy `execute_tool` 门控只传 `actor_user_id`、缺 `actor_agent_id` → a2a 规则在 legacy/ACP 链式路径不生效 | durable runtime 路径（`_maintainer_file_gate`）已正确传 `actor_agent_id`；legacy seam 无该参数，且 a2a 文件写走 durable runtime，**记待办**（若 legacy seam 复用于 a2a 再补参） |
+| S6 | 前端「维护人员」tab 未实现（名单管理 UI） | **待办（P2）**。**阻塞性前置依赖**：依赖 S3 管理 API 的 admin 角色门控；**禁复用 `canManage`**（`canManage` ⊃ admin 含 creator，会与 admin-only 后端错位→creator 看到 tab 却 GET 403）——tab 必须按 **admin 角色**（platform_admin/org_admin）门控。S3 已交付，本票可开做 |
 
 核对无误：creator 隐式维护者 ✓、actor-None/heartbeat 回退 creator ✓、group-scoped delete 保留 L3 ✓、A3 正确延期（零实现）✓。
 
@@ -282,5 +283,5 @@ P0 先 commit/stash 并行会话的工作区改动（开工前 git status 核对
 |---|---|
 | 落地后 approval_requests 不再新增 delete_files | ✅ 已达成（非 group delete 短路 + 门控接管） |
 | 3 条 pending 已 resolve | ⬜ 待办（out-of-band 脚本，S2） |
-| agent_maintainers 管理 API 鉴权含 org_admin | ⬜ 待办（P2，S3） |
+| agent_maintainers 管理 API 鉴权含 org_admin | ✅ 已达成（`20260907-agent-maintainers-management-api-production-plan.md`，S3） |
 | 非维护人员 edit_file 被 tool_permission_denied 拦截 | ✅ 已达成（`_maintainer_file_gate` GATED_DENIED → error_code） |
