@@ -1041,19 +1041,17 @@ def _compact_messages(
     plus the compaction instruction.
 
     Order: system (byte-identical to the live request) → covered history
-    messages (main-request form, filtered by id) → collapsed prior-Run note
-    (when the covered interval spans prior-Run content) → prior-checkpoint
-    background (batch 2+) → exact inputs (current/resume, main-request form) →
-    the deterministic ledger segment (completed_actions/files_read — never in
-    the cache-stable prefix) → the instruction, which is always last (F1).
+    messages (main-request form, filtered by id) → prior-checkpoint
+    background (batch 2+) → collapsed prior-Run note (when the covered
+    interval spans prior-Run content) → exact inputs (current/resume,
+    main-request form) → the deterministic ledger segment
+    (completed_actions/files_read — never in the cache-stable prefix) → the
+    instruction, which is always last (F1).
     """
     messages = [LLMMessage(role="system", content=shape.system_content)]
     for entry in shape.history:
         if entry.state_message_id in covered_ids:
             messages.append(entry.message)
-    prior_run_note = _prior_run_covered_note(shape, covered_ids)
-    if prior_run_note is not None:
-        messages.append(prior_run_note.message)
     if summary_text:
         messages.append(
             LLMMessage(
@@ -1061,6 +1059,9 @@ def _compact_messages(
                 content=f"{_CHECKPOINT_PREAMBLE}\n\n{summary_text}",
             )
         )
+    prior_run_note = _prior_run_covered_note(shape, covered_ids)
+    if prior_run_note is not None:
+        messages.append(prior_run_note.message)
     for entry in shape.history:
         if entry.state_message_id in exact_ids:
             messages.append(entry.message)
@@ -1112,11 +1113,11 @@ def _compact_dynamic_tokens(
         for entry in shape.history
         if entry.state_message_id in covered_ids
     ]
+    if summary_text:
+        parts.append(f"{_CHECKPOINT_PREAMBLE}\n\n{summary_text}")
     prior_run_note = _prior_run_covered_note(shape, covered_ids)
     if prior_run_note is not None:
         parts.append(prior_run_note.message.to_openai_format())
-    if summary_text:
-        parts.append(f"{_CHECKPOINT_PREAMBLE}\n\n{summary_text}")
     parts.extend(
         entry.message.to_openai_format()
         for entry in shape.history
