@@ -160,7 +160,7 @@ async def resolve_file_modify_permission(db, *, tool_name, arguments, agent,
 
 | 信号 | 来源 | 口径 |
 |---|---|---|
-| 固化率 | `agent_tool_executions`（write/edit 到 `memory/` 前缀）÷ 有 workspace 写的 run | 只读聚合，零新埋点 |
+| 固化率 | `agent_tool_executions`（既写 `workspace/` 又写 `memory/` 的 run，交集口径）÷ 有 workspace 写的 run | 只读聚合，零新埋点；交集口径避免「只固化 memory 的后台 run」把比率顶破 100% |
 | 跳过率 | `memory_consolidation_skipped` 事件 ÷ 完成 run 数 | 已存在 |
 | 拒绝率（新增观察） | `agent_tool_executions` 中 `tool_permission_denied` 计数 + actor 分布 | 验证 ① 门控效果 |
 
