@@ -6,6 +6,7 @@ import inspect
 import uuid
 
 import pytest
+from loguru import logger
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.exc import IntegrityError
 
@@ -114,6 +115,7 @@ def _command(
     claimant: str | None = None,
     attempt_count: int = 0,
     created_at: datetime | None = None,
+    claim_expires_at: datetime | None = None,
 ) -> AgentRunCommand:
     return AgentRunCommand(
         id=uuid.uuid4(),
@@ -126,6 +128,7 @@ def _command(
         claimed_by=claimant,
         attempt_count=attempt_count,
         created_at=created_at or datetime(2026, 7, 13, 10, 0, tzinfo=UTC),
+        claim_expires_at=claim_expires_at,
     )
 
 
@@ -637,6 +640,45 @@ async def test_claim_makes_exhausted_command_visible_for_explicit_quarantine():
     assert command.applied_at is None
     assert db.flush_count == 1
     assert len(db.statements) == 1
+
+
+@pytest.mark.asyncio
+async def test_reclaim_logs_expired_claim_observation():
+    now = datetime(2026, 7, 13, 12, 0, tzinfo=UTC)
+    expired_at = datetime(2026, 7, 13, 11, 59, 30, tzinfo=UTC)
+    command = _command(
+        tenant_id=uuid.uuid4(),
+        run_id=uuid.uuid4(),
+        status="claimed",
+        claimant="dead-worker",
+        claim_expires_at=expired_at,
+    )
+    db = _FakeSession(command)
+
+    captured: list[str] = []
+    sink_id = logger.add(captured.append, level="INFO")
+    try:
+        claimed = await persistence.claim_next_command(
+            db,
+            claimant="worker-2",
+            claim_ttl_seconds=60,
+            max_attempts=5,
+            clock=lambda: now,
+        )
+    finally:
+        logger.remove(sink_id)
+
+    assert claimed is command
+    assert command.claimed_by == "worker-2"
+    assert len(captured) == 1
+    message = captured[0]
+    assert "Runtime command re-claimed after claim expiry" in message
+    assert f"run_id={command.run_id}" in message
+    assert f"command_id={command.id}" in message
+    assert "type=resume" in message
+    assert "previous_claimant=dead-worker" in message
+    assert "new_claimant=worker-2" in message
+    assert "expired_ago_seconds=30.0" in message
 
 
 @pytest.mark.asyncio

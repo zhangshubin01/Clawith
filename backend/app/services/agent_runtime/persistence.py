@@ -7,6 +7,8 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, Callable
 import uuid
 
+from loguru import logger
+
 from sqlalchemy import and_, exists, or_, select, tuple_, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -729,6 +731,25 @@ async def claim_next_command(
         )
     ):
         return None
+
+    if command.status == "claimed":
+        # Re-claim of an expired claim: the previous worker's TTL lapsed and a
+        # new worker is taking over. Observation-only (no enforcement) — this is
+        # the precondition for a "late write from a stale owner" and is otherwise
+        # silent, so log it to measure how often that window's precondition occurs.
+        expired_ago = None
+        if command.claim_expires_at is not None:
+            expired_ago = (now - command.claim_expires_at).total_seconds()
+        logger.info(
+            "Runtime command re-claimed after claim expiry run_id={} command_id={} "
+            "type={} previous_claimant={} expired_ago_seconds={} new_claimant={}",
+            command.run_id,
+            command.id,
+            command.command_type,
+            command.claimed_by,
+            expired_ago,
+            claimant,
+        )
 
     command.claimed_by = claimant
     command.status = "claimed"
