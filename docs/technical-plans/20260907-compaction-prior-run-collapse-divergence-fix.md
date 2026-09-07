@@ -91,7 +91,7 @@ F2 之前 `_payload`/`_summary_ready_blocks`（`git show a928f0b2~1`）把 prior
 
 改 `backend/app/services/agent_runtime/run_compactor.py` 三处，不动其它文件：
 
-1. **`_compact_messages`（:988）**：计算 orphan 集合 `covered_ids - {entry.state_message_id for entry in shape.history}`；非空（= 覆盖到 prior-run）时，从 `shape.history` 提取 `state_message_id` 以 `prior-run-summary:` 前缀开头的条目，把其 `message` 追加到**非缓存前缀尾段**（covered history 之后、summary 背景之前）。system + covered history 前缀不变，缓存行为不受影响。
+1. **`_compact_messages`（:988）**：计算 orphan 集合 `covered_ids - {entry.state_message_id for entry in shape.history}`；非空（= 覆盖到 prior-run）时，从 `shape.history` 提取 `state_message_id` 以 `prior-run-summary:` 前缀开头的条目，把其 `message` 追加到**非缓存前缀尾段**（covered history 之后、summary 背景之后）。system + covered history 前缀不变，缓存行为不受影响。
 2. **`_compact_dynamic_tokens`（:1052）**：同样条件下把 `prior_run_summary` 计入动态段 token 预算（保持一致记账）。
 3. **`_compact_batch`（:1264-1273）shrink 校验基线**：把 `prior_run_summary` 计入 `covered_tokens`（「输入实际所见」口径），避免额外输入使 shrink 校验变松。
 
