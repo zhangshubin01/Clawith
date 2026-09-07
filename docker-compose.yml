@@ -23,7 +23,11 @@ services:
       - pgdata:/var/lib/postgresql/data
     # M1/8GB 调优参数（通过 ${PG_TUNING:-default} 控制）
     # 设为 "m1" 使用 M1 保守参数，默认不覆盖 PG 内置值
-    command: ${PG_COMMAND:-}
+    # 死对端快速探测：被 SIGKILL 的客户端（per-session MCP 容器等）连接无 FIN，
+    # PG 默认走 OS keepalive（~2.2h）才回收，僵尸累积曾打满 max_connections=100。
+    # 追加 tcp_keepalives 把死对端检测压缩到 ~150s（评审 docs/technical-plans/
+    # 20260906-pg-zombie-connection-leak-fix-review.md）。
+    command: ${PG_COMMAND:-} -c tcp_keepalives_idle=60 -c tcp_keepalives_interval=30 -c tcp_keepalives_count=3
     shm_size: 256m
     healthcheck:
       test: [ "CMD-SHELL", "pg_isready -U clawith" ]
