@@ -1,7 +1,7 @@
 # 生产级修复方案：自进化缺口闭合二期（Maintainer 门控 → G3 技能沉淀 → G4 评估）
 
 日期：2026-09-05
-状态：ready-for-implementation（8 个 grill 决策点已全部拍板；§8 边界已折入；Phase 4 七角度评审已通过[有条件]，见 `20260905-maintainer-gate-g3-g4-phase4-review.md`）
+状态：implemented（核心门控已落地 `aa539999`；Phase 5 code-review 双轴已跑，2 项硬违规已修 `后续 commit`；symlink 偏离按 G-4 拍板记录在案；剩余验收红线项见文末「Phase 5 审查结论」）
 前置：`20260902-self-evolution-gap-closure-plan.md`（G1 已取消、G1' 已落地），
       `20260819-agent-maintainers-implementation-plan.md` + `-permission-model.md`（本方案重出核对表，其待确认 A/B/C/D 均已定）。
 
@@ -245,3 +245,42 @@ P0 先 commit/stash 并行会话的工作区改动（开工前 git status 核对
 **遗留（不阻塞本期）**：若要写工具恢复人肉确认，方向 = IDE 插件把 `fs/write_text_file`/`fs/edit_text_file` 也接 `requestPermissions`（仿 `fs/safe_delete`），后端可先行补 `requires_approval`——对齐标准 ACP 协议，属独立加固项，另行立项。
 
 **验收红线**：① 落地后 `approval_requests` 不再新增 delete_files 记录；3 条 pending 已 resolve；`agent_maintainers` 管理 API 鉴权含 org_admin；非维护人员 edit_file（最大量、现零门控）被 `tool_permission_denied` 拦截。
+
+---
+
+## 9. Phase 5 审查结论（code-review 双轴，2026-09-05 已跑）
+
+双轴并行子代理审查实现 diff（`bf69441e` + `aa539999`）对照本方案，结论与处置如下。
+
+### 9.1 Standards 轴
+
+| # | 发现 | 定性 | 处置 |
+|---|---|---|---|
+| 1 | `execute_tool` 门控 catch 把裸异常 `{e}` 灌入模型上下文 | 硬违规（backend/AGENTS.md 模型契约） | **已修**：`logger.exception` 记日志，模型只见通用话术 |
+| 2 | 门控两处 `except Exception` 兜整个 resolve（含开 session） | 判断项 | 保留（fail-closed 边界，故意兜底） |
+| 3 | 模型未声明 `agent_id` 索引，f077 只在 `_exists()` 后建 `ix_agent_maintainers_agent_id` → 全新环境 `001 create_all` 建表无索引、f077 早退 → 索引永不建 | **硬违规/真 bug**（模型与迁移分歧） | **已修**：模型 `agent_id` 加 `index=True`，auto 名 `ix_agent_maintainers_agent_id` 与迁移一致，新旧环境均得索引 |
+| 4 | 两 seam（execute_tool / tool_step_service）拒绝话术措辞漂移 | 判断项（模型可见措辞=行为） | 保留（execute_tool 是字符串返回给模型、tool_step_service 是 outcome.error_code，语义一致、形态本就不同） |
+| 5 | `_maintainer_file_gate` 返回 `tuple[outcome, JsonObject|None]` 但第二元素恒 None | 判断项（投机通用性） | 保留（对齐 `_delete_autonomy_gate` 返回形态，调用点对称） |
+| 6 | `_delete_autonomy_details` 早退后紧跟 `if is_group_delete:` 冗余 | 判断项 | 保留（冗余但自文档化块边界，扁平化收益低） |
+| 7 | `_classify_path` 返回裸字符串而模块已有 `FileModifyDecision` 枚举 | 判断项（Primitive Obsession） | 保留（bucket 是路径分类内部词汇，与门控决策枚举语义不同层） |
+
+### 9.2 Spec 轴
+
+| # | 发现 | 处置 |
+|---|---|---|
+| S1 | autonomy_policy 的 delete_files/write_workspace_files 键未清理（grill 决策 6 / §3.2 原写「f077 显式迁移」） | **故意移出迁移**（backend/alembic/AGENTS.md §2 禁数据操作）→ 转 out-of-band 脚本，**待办** |
+| S2 | 3 条 pending delete_files 审批未 resolve（雷 1 / §8.2） | 同上，转 out-of-band resolve 脚本（reject + resume run 告知「门控已接管」），**待办** |
+| S3 | `agent_maintainers` 管理 API（GET/POST/DELETE `/api/agents/{id}/maintainers`，鉴权含 org_admin）未实现（雷 3 / 验收红线） | §3.4 原标 P2，属**验收红线残留**——`is_maintainer` 分支目前只有 creator 隐式可达，名单写入口缺失。**待办** |
+| S4 | 前缀判定用 `normalize_workspace_path`（非 symlink 感知）替换了 §2/§3.3/§3.6 要求的 `safe_agent_path` | **拍板偏离**（grill 决策 1 / G-4：治理层非硬安全，symlink 需先经 `execute_code` 种入=已接受绕过面），代码 docstring 已记录；本表（S4）即为 spec↔代码同步记录 |
+| S5 | legacy `execute_tool` 门控只传 `actor_user_id`、缺 `actor_agent_id` → a2a 规则在 legacy/ACP 链式路径不生效 | durable runtime 路径（`_maintainer_file_gate`）已正确传 `actor_agent_id`；legacy seam 无该参数，且 a2a 文件写走 durable runtime，**记待办**（若 legacy seam 复用于 a2a 再补参） |
+
+核对无误：creator 隐式维护者 ✓、actor-None/heartbeat 回退 creator ✓、group-scoped delete 保留 L3 ✓、A3 正确延期（零实现）✓。
+
+### 9.3 验收红线对照（诚实口径）
+
+| 红线子项 | 状态 |
+|---|---|
+| 落地后 approval_requests 不再新增 delete_files | ✅ 已达成（非 group delete 短路 + 门控接管） |
+| 3 条 pending 已 resolve | ⬜ 待办（out-of-band 脚本，S2） |
+| agent_maintainers 管理 API 鉴权含 org_admin | ⬜ 待办（P2，S3） |
+| 非维护人员 edit_file 被 tool_permission_denied 拦截 | ✅ 已达成（`_maintainer_file_gate` GATED_DENIED → error_code） |

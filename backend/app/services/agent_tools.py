@@ -6217,11 +6217,11 @@ async def execute_tool(
                             "cannot modify its workspace or skills files. "
                             "(tool_permission_denied)"
                         )
-        except Exception as e:
-            logger.exception(f"[Maintainer] Gate check failed: {e}")
+        except Exception:
+            logger.exception("[Maintainer] Gate check failed")
             return (
-                f"⚠️ Maintainer check failed ({e}). Operation blocked for safety. "
-                f"Please retry or contact admin."
+                "⚠️ Maintainer check could not be completed. Operation blocked "
+                "for safety. Please retry or contact an admin."
             )
 
     # ── Autonomy boundary check (execute_code / execute_command) ──
