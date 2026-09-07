@@ -114,6 +114,12 @@ class Settings(BaseSettings):
     # instead of poisoning the pool for hours. 30 minutes is far above any
     # single run's duration, so healthy connections are never recycled mid-run.
     DB_POOL_RECYCLE_SECONDS: int = 1800
+    # Verify a pooled connection with SELECT 1 before checkout when it may have
+    # gone stale (idle beyond pool_recycle). Client-side complement to C1's
+    # server-side tcp_keepalives: pre_ping makes the backend detect and reconnect
+    # after a PostgreSQL restart / network blip instead of handing out a dead
+    # socket. Lazy — SQLAlchemy only pings when the connection may be stale.
+    DB_POOL_PRE_PING: bool = True
     # Connections reserved for consumers the backend does not own (per-session
     # MCP runtimes, admin tooling, migration jobs). Used by the startup budget
     # check to warn before PostgreSQL max_connections is exhausted.
