@@ -77,7 +77,7 @@ def test_engine_pool_pre_ping_enabled() -> None:
 ### 回归测试与影响面
 
 - **回归测试**：1 条单元测试锁配置（根因路径即「配置已开启」；终态即「engine 的 pool 带 pre_ping」）。行为层（模拟死连接→重连）是 SQLAlchemy 官方成熟机制，不重复自验，故不做集成测试。
-- **影响面**：`engine` 的三个 session 入口（`get_db` / `transaction` / `bind_session_context`，均走 `async_session`）全部受益、无契约变化；**checkpoint pool 是独立的 `AsyncPostgresSaver` 连接（`CHECKPOINT_POOL_*`），不走 `database.py` engine，不受影响**。惰性 ping 仅在连接可能失效时发生，不增加每次 checkout 的 `SELECT 1`。
+- **影响面**：`engine` 的三个 session 入口（`get_db` / `transaction` / `bind_session_context`，均走 `async_session`）全部受益、无契约变化；**checkpoint pool 是独立的 `AsyncPostgresSaver` 连接（`CHECKPOINT_POOL_*`），不走 `database.py` engine，不受影响**。⚠️ **成本更正（2026-09-07 复审）**：pre_ping **并非惰性**——SQLAlchemy 2.0 在**复用（非 fresh）连接每次 checkout** 时执行一次 `SELECT 1`，仅 fresh 连接（新建/回收重建后首次）跳过（源码 `pool/base.py:1285-1324`，`fresh` 见 :667/:898/:1299-1300，与 recycle 时间无关）。即每次复用连接增加一次本机 PG 往返（<1ms），非零成本；但正因每次复用都 ping，PG 重启后的死连接在**下一次 checkout 立即**被发现（不依赖 1800s recycle），核心论点反而更强。
 - **回退**：删 `pool_pre_ping` 参数 + `DB_POOL_PRE_PING` 一行即回退，零迁移。
 
 ---
@@ -94,7 +94,7 @@ def test_engine_pool_pre_ping_enabled() -> None:
 
 3. **参考的资料是否正确？** ✅ 通过。
    - 正向依据：复用上游 ≥12 项目对比，LangBot/bisheng 同栈（SQLAlchemy+asyncpg）真实源码，非 README 摘要。
-   - 负向探针（反例测试）：「我找了一个可能引用错的点——asyncpg 下 `pool_pre_ping` 是否真的生效、是否每次 checkout 都 `SELECT 1`？核对 SQLAlchemy 2.0 源码 `pool/base.py:1286/1302`：pre_ping 仅在连接『可能失效』（idle 超 recycle / 首次）时 ping，非每次；asyncpg dialect 提供 `do_ping`。无误」。
+   - 负向探针（反例测试）：「我找了一个可能引用错的点——asyncpg 下 `pool_pre_ping` 是否真的生效、是否每次 checkout 都 `SELECT 1`？核对 SQLAlchemy 2.0.52 源码 `pool/base.py`：`_checkout`（:1285-1324）按 `connection_is_fresh` 决定是否 ping，`fresh` 初始 False（:667）、`__connect__` 后 True（:898）、checkout 读出后置 False（:1299-1300）；`fresh` 与 recycle 时间**无关**（recycle 丢弃在 `get_connection` :838-846，重建后 `fresh=True` 反而跳过 ping）。故真实语义是**复用连接每次 checkout 都 ping、fresh 首次跳过**，并非『惰性非每次』——**初版此处核错，已更正**。asyncpg dialect 提供 `do_ping`（:1163），pre_ping 在 asyncpg 下生效。」。
 
 4. **副作用与爆炸半径是否排查完？** ✅ 通过。
    - 正向依据：①副作用面——无外部写、无缓存、无权限边界变化，仅加一个内置连接参数；②影响面——engine 三入口受益，checkpoint 独立池不受影响（`CHECKPOINT_POOL_*` 走 `AsyncPostgresSaver`）。
