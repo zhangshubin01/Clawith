@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections import deque
+from contextlib import ExitStack
 from dataclasses import replace
 from datetime import UTC, datetime
 from types import SimpleNamespace
@@ -22,6 +23,7 @@ from app.services.agent_runtime.heartbeat_completion import (
     HeartbeatRuntimeCompletionError,
     HeartbeatRuntimeCompletionHandler,
     HeartbeatSeedFocusHandler,
+    _classify_seed_kinds,
     _extract_seed_lines,
 )
 from app.services.focus_service import slugify_focus_key
@@ -566,3 +568,165 @@ async def test_invalid_agent_identity_projects_nothing_without_raising() -> None
         await handler.handle(run=run, checkpoint=checkpoint)
 
     get_storage.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# Seed classification gate (P1): task vs learning, monotonic completed
+# ---------------------------------------------------------------------------
+
+
+def _classification_context(handler, *, kinds, items, content):
+    upsert = AsyncMock(return_value={"key": "seed"})
+    complete = AsyncMock(return_value={"key": "stale"})
+    list_items = AsyncMock(return_value=items)
+    storage = _focus_storage(content)
+    patches = [
+        patch(
+            "app.services.agent_runtime.heartbeat_completion.get_storage_backend",
+            return_value=storage,
+        ),
+        patch(
+            "app.services.agent_runtime.heartbeat_completion.upsert_focus_item",
+            upsert,
+        ),
+        patch(
+            "app.services.agent_runtime.heartbeat_completion.complete_focus_item",
+            complete,
+        ),
+        patch(
+            "app.services.agent_runtime.heartbeat_completion.list_focus_items",
+            list_items,
+        ),
+        patch.object(
+            handler,
+            "_classifier_model",
+            AsyncMock(return_value=SimpleNamespace()),
+        ),
+        patch(
+            "app.services.agent_runtime.heartbeat_completion._classify_seed_kinds",
+            AsyncMock(return_value=kinds),
+        ),
+    ]
+    return upsert, complete, list_items, patches
+
+
+@pytest.mark.asyncio
+async def test_learning_seed_projects_as_completed_and_task_stays_active() -> None:
+    run, checkpoint, _ = _records()
+    handler = HeartbeatSeedFocusHandler(session_factory=_SessionFactory())  # type: ignore[arg-type]
+    upsert, complete, list_items, patches = _classification_context(
+        handler,
+        kinds=["learning", "task"],
+        items=[],
+        content=_seed_reflections("- ✅ 已验证：探针", "- 下周期动作"),
+    )
+
+    with ExitStack() as stack:
+        for p in patches:
+            stack.enter_context(p)
+        await handler.handle(run=run, checkpoint=checkpoint)
+
+    statuses = {call.kwargs["key"]: call.kwargs["status"] for call in upsert.await_args_list}
+    assert statuses[slugify_focus_key("✅ 已验证：探针")] == "completed"
+    assert statuses[slugify_focus_key("下周期动作")] == "in_progress"
+    # 结论与动作都在 Seeds 里，故无 stale 退休。
+    complete.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_classification_uncertainty_falls_back_to_in_progress() -> None:
+    run, checkpoint, _ = _records()
+    handler = HeartbeatSeedFocusHandler(session_factory=_SessionFactory())  # type: ignore[arg-type]
+    upsert, _, _, patches = _classification_context(
+        handler,
+        kinds=None,
+        items=[],
+        content=_seed_reflections("- 种子 A"),
+    )
+
+    with ExitStack() as stack:
+        for p in patches:
+            stack.enter_context(p)
+        await handler.handle(run=run, checkpoint=checkpoint)
+
+    assert upsert.await_count == 1
+    assert upsert.await_args.kwargs["status"] == "in_progress"
+
+
+@pytest.mark.asyncio
+async def test_completed_heartbeat_item_is_not_reopened_by_reclassification() -> None:
+    run, checkpoint, _ = _records()
+    handler = HeartbeatSeedFocusHandler(session_factory=_SessionFactory())  # type: ignore[arg-type]
+    seed_text = "已完成的探针动作"
+    done_key = slugify_focus_key(seed_text)
+    upsert, _, _, patches = _classification_context(
+        handler,
+        kinds=["task"],  # LLM 反悔：把已完成的项重新判为 task
+        items=[{"key": done_key, "source": "heartbeat", "status": "completed"}],
+        content=_seed_reflections(f"- {seed_text}"),
+    )
+
+    with ExitStack() as stack:
+        for p in patches:
+            stack.enter_context(p)
+        await handler.handle(run=run, checkpoint=checkpoint)
+
+    # 单调护栏：已完成项即使被判 task 也不回退。
+    assert upsert.await_count == 1
+    assert upsert.await_args.kwargs["status"] == "completed"
+
+
+@pytest.mark.asyncio
+async def test_classify_seed_kinds_parses_structured_output() -> None:
+    model = SimpleNamespace()
+    step = SimpleNamespace(
+        content='[{"index": 0, "kind": "learning"}, {"index": 1, "kind": "task"}]'
+    )
+    with patch(
+        "app.services.agent_runtime.heartbeat_completion.complete_llm_once",
+        AsyncMock(return_value=step),
+    ) as complete:
+        kinds = await _classify_seed_kinds(model, ["结论 A", "动作 B"], uuid.uuid4())
+
+    complete.assert_awaited_once()
+    assert kinds == ["learning", "task"]
+
+
+@pytest.mark.asyncio
+async def test_classify_seed_kinds_strips_code_fence() -> None:
+    model = SimpleNamespace()
+    step = SimpleNamespace(
+        content='```json\n[{"index": 0, "kind": "learning"}]\n```'
+    )
+    with patch(
+        "app.services.agent_runtime.heartbeat_completion.complete_llm_once",
+        AsyncMock(return_value=step),
+    ):
+        kinds = await _classify_seed_kinds(model, ["结论 A"], uuid.uuid4())
+
+    assert kinds == ["learning"]
+
+
+@pytest.mark.asyncio
+async def test_classify_seed_kinds_unparseable_returns_none() -> None:
+    model = SimpleNamespace()
+    step = SimpleNamespace(content="not json at all")
+    with patch(
+        "app.services.agent_runtime.heartbeat_completion.complete_llm_once",
+        AsyncMock(return_value=step),
+    ):
+        kinds = await _classify_seed_kinds(model, ["结论 A"], uuid.uuid4())
+
+    assert kinds is None
+
+
+@pytest.mark.asyncio
+async def test_classify_seed_kinds_call_failure_returns_none() -> None:
+    model = SimpleNamespace()
+    with patch(
+        "app.services.agent_runtime.heartbeat_completion.complete_llm_once",
+        AsyncMock(side_effect=RuntimeError("boom")),
+    ):
+        kinds = await _classify_seed_kinds(model, ["结论 A"], uuid.uuid4())
+
+    assert kinds is None

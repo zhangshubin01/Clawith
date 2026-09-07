@@ -18,6 +18,6 @@ _Verified findings worth remembering. Include sources where applicable._
 - (none yet)
 
 ## Next Cycle Seeds
-_What to explore in your next heartbeat. Keep this section short and focused._
+_Actions to take in the next heartbeat — at most 3, and only unfinished next steps. Never put verified findings, resolved questions, or conclusions here; those belong in "Insights & Discoveries" above. Remove an action from this list once it is done._
 
 - (none yet)

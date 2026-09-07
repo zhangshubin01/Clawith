@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from collections.abc import Mapping
 from typing import Callable
+import json
 import logging
 import uuid
 
@@ -24,6 +25,9 @@ from app.services.focus_service import (
     slugify_focus_key,
     upsert_focus_item,
 )
+from app.services.llm.client import LLMMessage
+from app.services.llm.model_resolution import load_active_model
+from app.services.llm.single_step import complete_llm_once
 from app.services.storage import get_storage_backend, normalize_storage_key
 
 logger = logging.getLogger(__name__)
@@ -304,6 +308,83 @@ def _extract_seed_lines(content: str) -> list[str] | None:
     return seeds
 
 
+_SEED_CLASSIFY_SYSTEM = (
+    "Classify each seed from an agent's reflections log into exactly one "
+    "kind:\n"
+    '- "task": a concrete next-cycle action to take (investigate, verify, '
+    "follow up, implement, test, etc.) that is NOT yet finished;\n"
+    '- "learning": a finished result — a verified conclusion, resolved '
+    "question, discovered fact, or completed item (often marked "
+    "✅ 已验证 / 收尾完成 / 已解决).\n"
+    "Reply with ONLY a JSON array: "
+    '[{"index": <int>, "kind": "task"|"learning"}, ...] — one entry per seed, '
+    "covering every seed index exactly once."
+)
+
+
+def _strip_code_fence(text: str) -> str:
+    """Remove a single optional ``` ... ``` fence around a JSON reply."""
+    value = text.strip()
+    if value.startswith("```"):
+        newline = value.find("\n")
+        if newline != -1:
+            value = value[newline + 1 :]
+        if value.rstrip().endswith("```"):
+            value = value.rstrip()[: -3]
+    return value.strip()
+
+
+async def _classify_seed_kinds(
+    model,
+    seeds: list[str],
+    agent_id: uuid.UUID,
+) -> list[str] | None:
+    """Batch-classify seeds as task|learning with one structured LLM call.
+
+    Returns a ``list[str]`` aligned with ``seeds`` (``"task"``/``"learning"``),
+    or ``None`` when the model is unavailable, the call fails, or the output is
+    unparseable. ``None`` means "uncertain" and callers fall back to the
+    current treat-as-task behaviour (no-op on uncertainty).
+    """
+    indexed = "\n".join(f"{index}. {text}" for index, text in enumerate(seeds))
+    messages = [
+        LLMMessage(role="system", content=_SEED_CLASSIFY_SYSTEM),
+        LLMMessage(role="user", content=indexed),
+    ]
+    try:
+        step = await complete_llm_once(
+            model,
+            messages,
+            agent_id=agent_id,
+            thinking_disabled=True,
+            max_output_tokens=256,
+        )
+    except Exception:
+        return None
+    try:
+        data = json.loads(_strip_code_fence(step.content or ""))
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(data, list):
+        return None
+
+    kinds = ["task"] * len(seeds)
+    seen: set[int] = set()
+    for entry in data:
+        if not isinstance(entry, dict):
+            continue
+        try:
+            index = int(entry.get("index"))
+        except (TypeError, ValueError):
+            continue
+        if index < 0 or index >= len(seeds) or index in seen:
+            continue
+        seen.add(index)
+        if entry.get("kind") == "learning":
+            kinds[index] = "learning"
+    return kinds
+
+
 class HeartbeatSeedFocusHandler:
     """Project a completed heartbeat's Next Cycle Seeds into Focus items.
 
@@ -339,7 +420,11 @@ class HeartbeatSeedFocusHandler:
         except Exception:
             return
         try:
-            await self._project_seeds(agent_id)
+            await self._project_seeds(
+                agent_id,
+                model_id=run.model_id,
+                tenant_id=run.tenant_id,
+            )
         except Exception as exc:
             logger.warning(
                 "Heartbeat seed→Focus projection failed for agent %s: %s",
@@ -347,7 +432,31 @@ class HeartbeatSeedFocusHandler:
                 exc,
             )
 
-    async def _project_seeds(self, agent_id: uuid.UUID) -> None:
+    async def _classifier_model(self, model_id: str | None, tenant_id: uuid.UUID | None):
+        """Resolve the agent's active model for classification; None on failure."""
+        if not model_id:
+            return None
+        try:
+            model_uuid = uuid.UUID(model_id)
+        except (TypeError, ValueError):
+            return None
+        try:
+            async with self._session_factory() as db:
+                return await load_active_model(
+                    db,
+                    model_id=model_uuid,
+                    tenant_id=tenant_id,
+                )
+        except Exception:
+            return None
+
+    async def _project_seeds(
+        self,
+        agent_id: uuid.UUID,
+        *,
+        model_id: str | None = None,
+        tenant_id: uuid.UUID | None = None,
+    ) -> None:
         storage = get_storage_backend()
         reflections_key = normalize_storage_key(
             f"{agent_id}/memory/reflections.md"
@@ -368,19 +477,42 @@ class HeartbeatSeedFocusHandler:
         if seeds is None:
             return
 
+        # Classify each seed as a next action vs a finished learning. Any
+        # failure falls back to "task" (current behaviour) — never blocks the
+        # projection and never mis-routes on uncertainty.
+        model = await self._classifier_model(model_id, tenant_id)
+        kinds: list[str] | None = None
+        if model is not None and seeds:
+            try:
+                kinds = await _classify_seed_kinds(model, seeds, agent_id)
+            except Exception:
+                kinds = None
+        if kinds is None:
+            kinds = ["task"] * len(seeds)
+
         seed_keys = {slugify_focus_key(text) for text in seeds}
         items = await list_focus_items(agent_id, include_completed=True)
         heartbeat_keys = {
             item["key"] for item in items if item.get("source") == "heartbeat"
         }
+        # Monotonic guard: a heartbeat item already completed must never be
+        # reopened by a later re-classification as "task".
+        heartbeat_completed_keys = {
+            item["key"]
+            for item in items
+            if item.get("source") == "heartbeat"
+            and item.get("status") == "completed"
+        }
 
-        for text in seeds:
+        for text, kind in zip(seeds, kinds):
+            key = slugify_focus_key(text)
+            is_completed = kind == "learning" or key in heartbeat_completed_keys
             await upsert_focus_item(
                 agent_id,
-                key=slugify_focus_key(text),
+                key=key,
                 title=text[:200],
                 description=text,
-                status="in_progress",
+                status="completed" if is_completed else "in_progress",
                 kind="normal",
                 source="heartbeat",
             )

@@ -48,6 +48,7 @@ Format for curiosity_journal.md entries:
    - Read the **Follow-up** entries and **Active Questions** in `memory/curiosity_journal.md`, preferring entries not yet marked `→promoted`.
    - Promote the ones genuinely worth pursuing (at most 3) into Next Cycle Seeds.
    - Mark each promoted journal entry with `→promoted YYYY-MM-DD` at the end of its line; do not delete journal entries.
+   - Seeds are **next actions only, never conclusions**: verified findings, resolved open questions, and `- ✅` verdicts belong in Insights & Discoveries — not Next Cycle Seeds. Remove an action from Seeds once it is done; do not accumulate finished items here.
    - If no journal entry is worth promoting, leave Next Cycle Seeds unchanged and say so in your summary.
    - Then list: what to explore next if time allows, which hypothesis is most worth testing next, and any user tasks that need proactive follow-up.
 
