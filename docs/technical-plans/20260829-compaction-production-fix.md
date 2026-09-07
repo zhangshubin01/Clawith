@@ -217,6 +217,7 @@ def _compact_messages(
 - exact_ids：protected 集合中 `runtime_input in {"current","resume"}` 的消息（现 `compact_if_needed:1369-1375` 已算 exact_inputs，改为传 id 集合）。
 - 摘要背景消息的 `_CHECKPOINT_PREAMBLE` 是 §3.2 定义的**新常量**（run-boundary 硬约束措辞），随 F2 落地为 run_compactor.py 模块级常量。
 - **completed_actions/files_read 是复审新发现的压缩输入**（`_payload` 517 现含这两段；`build_completed_actions`/`build_files_read` 625/697 产出）。F2 切换消息形态时**必须携带**——但作为压缩专用段放在 cache-stable 前缀之后、指令之前，不得并入前缀（它们随批变化会破坏缓存）。
+- **外部印证（参考项目范式，2026-09-05）**：`completed_actions`/`files_read` 放「指令之前的独立 user 段」而非「并进指令」的三点依据——① deepseek-harness（`summarizer.ts` COMPACTION_INSTRUCTION 为模块级常量、`summarizeWithLlm` 把它追加为 replayed 前缀后的最后一条 user 消息，前缀逐字节重放吃 KV cache）；② DeepSeek-Reasonix（`session_context.go`：静态策略留 system，易变运行时快照走独立 `<session-context>` 消息放 user turn 前，物理分离、稳者居前）；③ deepagents（摘要走 HumanMessage+背景框定；`_prompt_caching.py` 仅 Anthropic/Bedrock/Fireworks 挂 cache_control，DeepSeek 不在列，印证自动前缀缓存路线）。尾段内部顺序对缓存无影响，只影响「ABOVE」语义与指令常量性。
 - `_compact_batch` 的 `_completion` 调用（1145-1152）改为：`tools=list(shape.provider_tools)`、`supports_vision=model.supports_vision`、`max_output_tokens=summary_output_limit` 不变，且**保留 `thinking_disabled=True`**（0c43ce61 新增）。
 
 **D. `_payload`（517）与 JSON 序列化路径删除**：`_summary_from_step` 输出改为纯 checkpoint 文本；`_payload`、`project_multimodal_for_summary` 调用（541）删除。但 `_payload` 现含的 `completed_actions`/`files_read` 两段**保留**并迁入 `_compact_messages`（见 C，非前缀段），仅 covered/exact/summary 三块改为主请求形态。`RunCompactResult.thread_summary` 形状**保持** `{"format": _SUMMARY_FORMAT, "text": ...}`（state 与 context_builder 消费方零改动）。
