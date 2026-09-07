@@ -25,7 +25,6 @@ from app.plugins.clawith_acp.turn_budget import (
     PERMISSION_GATED_METHODS,
     get_turn_budget,
 )
-from app.services.llm.tool_execution_policy import WORKSPACE_WRITE_TOOLS
 from app.plugins.clawith_acp.acp_routes import ACP_METHOD_MAP
 from app.plugins.clawith_acp.coalesce_keys import METHODS_FOR_COALESCE, normalize_coalesce_key
 from app.plugins.clawith_acp.search_dedup import (
@@ -980,23 +979,19 @@ class AcpRateLimiter:
 
 _RATE_LIMITER = AcpRateLimiter(default_limit=120)  # 读工具限速 120次/min
 
-# 内联导入：_DANGEROUS_BASH_ALWAYS 和 check_tool_autonomy 引用 agent_tools，
+# 内联导入：_DANGEROUS_BASH_ALWAYS / _DANGEROUS_BASH_NETWORK 引用 agent_tools，
 # 延迟导入避免循环依赖（agent_tools 也可能回引用本模块）
 _INLINE_IMPORTED: dict[str, Any] = {}
 
 def _lazy_import_agent_tools():
-    """延迟加载 agent_tools 中的安全常量和函数，避免模块加载时循环依赖。"""
-    if "check_tool_autonomy" not in _INLINE_IMPORTED:
+    """延迟加载 agent_tools 中的安全常量，避免模块加载时循环依赖。"""
+    if "_DANGEROUS_BASH_ALWAYS" not in _INLINE_IMPORTED:
         from app.services.agent_tools import (
             _DANGEROUS_BASH_ALWAYS as _bash_always,
             _DANGEROUS_BASH_NETWORK as _bash_network,
-            check_tool_autonomy as _check_autonomy,
         )
         _INLINE_IMPORTED["_DANGEROUS_BASH_ALWAYS"] = _bash_always
         _INLINE_IMPORTED["_DANGEROUS_BASH_NETWORK"] = _bash_network
-        _INLINE_IMPORTED["check_tool_autonomy"] = _check_autonomy
-        from app.services.agent_tools import _TOOL_AUTONOMY_MAP as _autonomy_map
-        _INLINE_IMPORTED["_TOOL_AUTONOMY_MAP"] = _autonomy_map
 
 def _is_within_path(root: str, candidate: str) -> bool:
     """用 commonpath 判断路径边界, 避免 /project2 误匹配 /project。"""
@@ -1225,26 +1220,6 @@ def _guard_acp_dangerous_command(command: str) -> str | None:
         if pattern in lower_cmd:
             return f"❌ 网络命令已被拦截: pattern={pattern}"
     return None
-
-
-# 方案4: Autonomy blocked 阈值 — 同工具被拦截 3 次后引导 LLM 停止重试
-_AUTONOMY_STOP_THRESHOLD = 3
-_autonomy_counts: dict[str, int] = {}
-
-def _handle_autonomy_blocked(tool_name: str, reason: str) -> str:
-    """同工具被 autonomy 反复拦截时, 反馈 LLM 停止重试而非死循环。"""
-    c = _autonomy_counts.get(tool_name, 0) + 1
-    _autonomy_counts[tool_name] = c
-    if c >= _AUTONOMY_STOP_THRESHOLD:
-        return (
-            f"操作 '{tool_name}' 已被拦截 {c} 次, 请立即停止重试。"
-            f"改用其他方式完成目标。拦截原因: {reason[:100]}"
-        )
-    return (
-        f"'{tool_name}' 需要审批 (第 {c}/{_AUTONOMY_STOP_THRESHOLD} 次)。"
-        f"已提交审批请求。请勿重复尝试, 先执行其他任务。"
-    )
-
 
 
 def _list_cache_key_for(session_id: str, cwd: str, path: str, args: dict | None) -> str:
@@ -1534,35 +1509,6 @@ async def _try_acp_execute(tool_name: str, args: dict, handler) -> str | None:
         "normalize project path",
         {"tool": tool_name, "rawPath": raw_path, "normalizedPath": path, "cwd": _cwd},
     )
-
-    # Autonomy 闸门: 写操作需要经过 check_tool_autonomy 检查
-    # 删除类工具由 ACP 插件 DeletePermissionRow 把关，跳过后端 L3 web 审批阻断
-    _DELETE_TOOLS_PLUGIN_GATED = frozenset({"delete_file", "safe_delete"})
-    if tool_name in WORKSPACE_WRITE_TOOLS and tool_name not in _DELETE_TOOLS_PLUGIN_GATED:
-        _lazy_import_agent_tools()
-        # 确保 agent_tools.py 的 _TOOL_AUTONOMY_MAP 包含 ACP 写工具映射 (安全审计 V2)
-        _autonomy_map = _INLINE_IMPORTED.get("_TOOL_AUTONOMY_MAP", {})
-        _acp_autonomy_entries = {
-            "edit_file": "write_workspace_files",
-            "refactor_rename": "write_workspace_files",
-            "safe_delete": "delete_files",
-            "reformat_code": "write_workspace_files",
-            "optimize_imports": "write_workspace_files",
-            "convert_java_to_kotlin": "write_workspace_files",
-            "execute_command": "execute_code",
-        }
-        for k, v in _acp_autonomy_entries.items():
-            if k not in _autonomy_map:
-                _autonomy_map[k] = v
-        _check_fn = _INLINE_IMPORTED.get("check_tool_autonomy")
-        if _check_fn is not None:
-            _agent_id = getattr(handler, "agent_id", None)
-            _user_id = getattr(handler, "user_id", None)
-            if _agent_id is not None and _user_id is not None:
-                _block = await _check_fn(tool_name, args, _agent_id, _user_id, notify=False)
-                if _block is not None:
-                    logger.warning(f"[ACP] autonomy blocked: {tool_name} reason={_block[:60]}")
-                    return _handle_autonomy_blocked(tool_name, _block)
 
     if not method:
         return None
@@ -1970,17 +1916,6 @@ async def _try_acp_terminal(
     if policy is None:
         policy = resolve_terminal_policy(command)
 
-    # P0-3: autonomy 审批闸门
-    agent_id = getattr(handler, "agent_id", None)
-    user_id = getattr(handler, "user_id", None)
-    if agent_id is not None and user_id is not None:
-        _check_fn = _INLINE_IMPORTED.get("check_tool_autonomy")
-        if _check_fn is not None:
-            block = await _check_fn("execute_command", args, agent_id, user_id, notify=False)
-            if block is not None:
-                logger.warning(f"[ACP] autonomy blocked: cmd={command[:80]} reason={block[:60]}")
-                return _handle_autonomy_blocked("execute_command", block)
-
     session_id = getattr(handler, "session_id", "")
     conn_id = getattr(handler, "conn_id", "?")
     terminal_id = ""
@@ -2120,21 +2055,6 @@ async def _try_acp_terminal_streaming(
             return int(es["exitCode"])
         code = resp.get("exitCode") if isinstance(resp, dict) else None
         return int(code) if code is not None else None
-
-    # P2-2: autonomy 检查 (ACP 会话 notify=False 跳过外部通知)
-    _lazy_import_agent_tools()
-    agent_id = getattr(handler, "agent_id", None)
-    user_id = getattr(handler, "user_id", None)
-    if agent_id is not None and user_id is not None:
-        _check_fn = _INLINE_IMPORTED.get("check_tool_autonomy")
-        if _check_fn is not None:
-            block = await _check_fn("execute_command", args, agent_id, user_id, notify=False)
-            if block is not None:
-                logger.warning(
-                    f"[ACP-PERF] terminal-streaming autonomy blocked conn={conn_id} "
-                    f"cmd={command[:80]} reason={block[:60]}"
-                )
-                return block
 
     logger.info(
         f"[ACP-PERF] terminal-streaming START conn={conn_id} "

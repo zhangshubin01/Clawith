@@ -2892,23 +2892,6 @@ async def _create_git_bundles(
 
 # ─── Tool Executors ─────────────────────────────────────────────
 
-# Mapping from tool_name to autonomy action_type used for policy lookup and notifications.
-# Each tool name maps to the action_type key in the agent's autonomy_policy dict.
-# Using the tool's own name avoids misleading notification titles (e.g. showing
-# "send_feishu_message" when the agent actually called send_message_to_agent).
-_TOOL_AUTONOMY_MAP = {
-    "write_file": "write_workspace_files",
-    "move_file": "write_workspace_files",
-    "delete_file": "delete_files",
-    "send_feishu_message": "send_feishu_message",
-    "send_message_to_agent": "send_message_to_agent",  # A2A messaging — distinct from feishu
-    "send_file_to_agent": "send_file_to_agent",          # A2A file transfer
-    "web_search": "web_search",
-    "execute_code": "execute_code",
-    "execute_code_e2b": "execute_code",
-}
-
-
 def _is_enterprise_info_path(path: str | None) -> bool:
     normalized = str(path or "").replace("\\", "/").strip().strip("/")
     return normalized == "enterprise_info" or normalized.startswith("enterprise_info/")
@@ -29662,8 +29645,16 @@ async def _neon_create_database(agent_id: uuid.UUID, arguments: dict) -> str:
     )
 
 
-# ─── ACP 自主权闸门 ──────────────────────────────────────────────
-
+# ─── Tool autonomy map (single fact source) ──────────────────────
+# The ONLY tool_name -> autonomy action_type map in this module. It serves the
+# legacy ``execute_tool`` seam (and chained ACP dispatch falling back to it).
+# Typed durable tools (write/edit/move/delete/execute_code/web_search/
+# send_file_to_agent/send_message_to_agent/…) never read this map: file tools
+# are gated by the Maintainer gate (``resolve_file_modify_permission``), and the
+# send_*/web_search tools are typed or A2A-settled. Do NOT add a second
+# module-level definition of this name — Python resolves re-assignment to the
+# LAST value, so a duplicate would silently shadow this one (regression covered
+# by tests/test_tool_autonomy_map.py).
 _TOOL_AUTONOMY_MAP: dict[str, str] = {
     "write_file": "write_workspace_files",
     "edit_file": "write_workspace_files",
@@ -29671,39 +29662,3 @@ _TOOL_AUTONOMY_MAP: dict[str, str] = {
     "execute_code": "execute_code",
     "execute_command": "execute_code",
 }
-
-
-async def check_tool_autonomy(
-    tool_name: str,
-    args: dict,
-    agent_id: uuid.UUID,
-    user_id: uuid.UUID,
-    *,
-    notify: bool = False,
-) -> str | None:
-    """检查工具调用是否需要自主权审批。返回 None 表示允许，返回字符串表示阻止原因。
-
-    ACP 路径下的工具自主权闸门。IDE 插件端的 DeletePermissionRow 已处理删除审批，
-    此处仅处理写文件和执行代码两类高风险操作的审批检查。
-    """
-    category = _TOOL_AUTONOMY_MAP.get(tool_name)
-    if category is None:
-        return None  # ACP 只检查已注册的写/执行操作
-
-    from app.models.agent import Agent
-    from app.database import async_session
-    from sqlalchemy import select
-
-    async with async_session() as db:
-        result = await db.execute(select(Agent).where(Agent.id == agent_id))
-        agent = result.scalar_one_or_none()
-
-    if agent is None:
-        return f"Agent {agent_id} not found"
-
-    # 检查 Agent 自主策略是否允许此操作
-    policy = agent.autonomy_policy or {}
-    allowed = policy.get(category, True)
-    if allowed:
-        return None
-    return f"Autonomy policy blocks {tool_name} (category: {category})"
