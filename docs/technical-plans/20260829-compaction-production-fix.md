@@ -163,7 +163,7 @@ supports_vision = model.supports_vision（与主请求一致）
 class CompactRequestShape:
     """The business request's cache-stable prefix, assembled by the same
     pipeline that builds the live model request."""
-    system_content: str                      # static_prompt + _MESSAGE_LAYOUT_NOTE
+    system_content: str                      # static_prompt + _MESSAGE_LAYOUT_NOTE + LIST_NUMBERING_CONTRACT
     provider_tools: tuple[dict, ...]         # _provider_tools(tools) 产物
     history: tuple[CompactHistoryMessage, ...]  # 主请求 history 段，带 state message id
 

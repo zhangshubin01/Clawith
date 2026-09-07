@@ -3165,6 +3165,44 @@ async def test_onboarding_invalid_output_is_not_sent_to_model_repair() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("onboarding_phase", "expects_wait"),
+    [
+        (None, True),
+        ("greeted", False),
+    ],
+)
+async def test_compact_inputs_gates_user_wait_like_the_main_request(
+    onboarding_phase: str | None,
+    expects_wait: bool,
+) -> None:
+    """F-A: compact_inputs must mirror complete_once's tool gating — onboarding
+    runs omit the user_wait tool in the cached prefix exactly as the main
+    request does, keeping the prefix byte-identical (no cache miss)."""
+    from app.services.agent_runtime.model_step_service import _RUNTIME_WAIT_TOOL_NAME
+
+    tenant_id = uuid.uuid4()
+    model = _model(tenant_id)
+    agent = _agent(tenant_id)
+    state = _state(tenant_id, model, agent)
+    if onboarding_phase is not None:
+        state["snapshots"].initial_input["onboarding_target_phase"] = onboarding_phase
+
+    inputs = await _service(
+        model,
+        agent,
+        _ContextBuilder(_build()),
+        completion=AsyncMock(),
+    ).compact_inputs(state, _context(state))
+
+    assert inputs.request_shape is not None
+    tool_names = {
+        tool["function"]["name"] for tool in inputs.request_shape.provider_tools
+    }
+    assert (_RUNTIME_WAIT_TOOL_NAME in tool_names) is expects_wait
+
+
+@pytest.mark.asyncio
 async def test_retryable_primary_error_recovers_on_same_model_before_fallback() -> None:
     tenant_id = uuid.uuid4()
     model = _model(tenant_id)
