@@ -207,6 +207,7 @@ _RESULT_METADATA_KEYS = frozenset(
         "original_status",
         "original_completed_at",
         "workspace_resolution_action",
+        "abandoned",
         "workspace_conflict_details",
         "sandbox_output",
     }
@@ -2152,6 +2153,58 @@ async def mark_tool_execution_unknown(
         metadata=metadata,
         clock=clock,
     )
+
+
+async def mark_tool_execution_abandoned(
+    db: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    execution_id: uuid.UUID,
+    result_summary: str,
+    error_code: str = "tool_outcome_abandoned",
+    metadata: dict[str, Any] | None = None,
+    clock: Callable[[], datetime] | None = None,
+) -> AgentToolExecution:
+    """Downgrade an uncertain receipt to a settled failure once its owner ends.
+
+    ``unknown`` is the only terminal receipt with no automated exit: it waits
+    for a human reconciliation that can never arrive after the owning Run is
+    terminal. This primitive closes that gap under the lease reconciler's row
+    lock, reusing the same normalization/bounding/supersede helpers as the
+    other terminal setters. Only an ``unknown`` receipt may be abandoned; any
+    other status is a terminal conflict, and the receipt is never re-executed.
+    """
+    normalized_summary, _, _, _ = _normalize_text(result_summary, redact=True)
+    execution = await _get_locked_execution(
+        db,
+        tenant_id=tenant_id,
+        execution_id=execution_id,
+    )
+    if execution.status != "unknown":
+        raise ToolExecutionError(
+            "tool_execution_terminal_conflict",
+            "only an unknown receipt can be marked abandoned",
+        )
+    execution.status = "failed"
+    execution.result_summary = normalized_summary
+    execution.result_metadata = _bounded_result_metadata(
+        {
+            **(metadata or {}),
+            "error_code": error_code,
+            "retryable": False,
+            "abandoned": True,
+        }
+    )
+    execution.lease_expires_at = None
+    execution.completed_at = (clock or (lambda: datetime.now(UTC)))()
+    await db.flush()
+    await _supersede_stale_resume_commands(
+        db,
+        tenant_id=execution.tenant_id,
+        run_id=execution.run_id,
+        tool_call_id=execution.tool_call_id,
+    )
+    return execution
 
 
 async def reconcile_unknown_tool_execution(

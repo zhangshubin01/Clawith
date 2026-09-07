@@ -133,6 +133,16 @@ _HEARTBEAT_PLAZA_LIMITS = {
     "plaza_create_post": 1,
     "plaza_add_comment": 2,
 }
+# Builtin exceptions that carry a deterministic, known outcome for a write:
+# the operation did not (or cannot) take effect, so the receipt settles
+# ``failed`` with an actionable result instead of parking ``unknown``.
+_DETERMINISTIC_FAILURE = (
+    FileNotFoundError,
+    NotADirectoryError,
+    FileExistsError,
+    IsADirectoryError,
+    PermissionError,
+)
 LEGACY_TOOL_CONTEXT_DELETE_GATE = (
     "zero legacy pending batches observed for one full supported release, with the rollback window closed"
 )
@@ -1766,8 +1776,10 @@ class RuntimeToolStepService:
         policy: ToolPolicy,
         exc: Exception,
     ) -> ToolExecutionOutcome:
-        known_failure = policy.side_effect_classification == "read" or isinstance(
-            exc, (GroupRuntimeToolError, ToolExecutionError)
+        known_failure = (
+            policy.side_effect_classification == "read"
+            or isinstance(exc, (GroupRuntimeToolError, ToolExecutionError))
+            or isinstance(exc, _DETERMINISTIC_FAILURE)
         )
         return await self._settle_outcome(
             tenant_id=tenant_id,

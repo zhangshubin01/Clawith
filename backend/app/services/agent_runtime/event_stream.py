@@ -313,6 +313,38 @@ async def run_is_terminal(
     return row is not None and row.event_type in _TERMINAL_EVENT_TYPES
 
 
+async def run_terminal_on_db(
+    db: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    run_id: uuid.UUID,
+) -> bool:
+    """True when the Run's newest non-delivery lifecycle event is terminal.
+
+    Transaction-scoped twin of ``run_is_terminal`` for callers already holding
+    a ``db`` session — e.g. the lease reconciler inside its row-lock scope —
+    which must not open a second session. It reads the same durable facts (the
+    newest non-delivery event, same tenant/run filter and ordering) that
+    ``_latest_lifecycle_row`` shares with the keep-alive and waiting probes.
+    """
+    row = (
+        await db.execute(
+            select(AgentRunEvent.event_type)
+            .where(
+                AgentRunEvent.tenant_id == tenant_id,
+                AgentRunEvent.run_id == run_id,
+                AgentRunEvent.event_type.notin_(_DELIVERY_EVENT_TYPES),
+            )
+            .order_by(
+                AgentRunEvent.created_at.desc(),
+                AgentRunEvent.id.desc(),
+            )
+            .limit(1)
+        )
+    ).one_or_none()
+    return row is not None and row.event_type in _TERMINAL_EVENT_TYPES
+
+
 async def current_start_command_status(
     *,
     session_factory: RuntimeSessionFactory,

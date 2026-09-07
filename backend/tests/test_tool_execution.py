@@ -1519,3 +1519,46 @@ def test_bounded_result_metadata_keeps_workspace_conflict_forensics_keys():
     assert metadata["workspace_conflict_details"][0]["operation"] == "write"
     assert metadata["sandbox_output"] == "tail output"
     assert "not_in_whitelist" not in metadata
+
+
+@pytest.mark.asyncio
+async def test_mark_tool_execution_abandoned_only_accepts_unknown():
+    """An uncertain receipt from a dead Run degrades to a settled failure via a
+    dedicated primitive; any other status is a terminal conflict."""
+    tenant_id = uuid.uuid4()
+    run_id = uuid.uuid4()
+
+    unknown = _execution(tenant_id=tenant_id, run_id=run_id, status="unknown")
+    unknown_db = _FakeSession(unknown)
+    abandoned = await tool_execution.mark_tool_execution_abandoned(
+        unknown_db,
+        tenant_id=tenant_id,
+        execution_id=unknown.id,
+        result_summary="owner ended before reconciliation",
+        clock=lambda: _NOW,
+    )
+    assert abandoned.status == "failed"
+    assert abandoned.lease_expires_at is None
+    assert abandoned.result_metadata["error_code"] == "tool_outcome_abandoned"
+    assert abandoned.result_metadata["abandoned"] is True
+    assert abandoned.result_metadata["retryable"] is False
+    # The supersede pass clears any stale resume command for this receipt.
+    supersede_updates = [
+        statement
+        for statement in unknown_db.statements
+        if "agent_run_commands" in str(statement)
+    ]
+    assert len(supersede_updates) == 1
+
+    for status in ("started", "succeeded", "failed"):
+        execution = _execution(tenant_id=tenant_id, run_id=run_id, status=status)
+        db = _FakeSession(execution)
+        with pytest.raises(tool_execution.ToolExecutionError) as exc_info:
+            await tool_execution.mark_tool_execution_abandoned(
+                db,
+                tenant_id=tenant_id,
+                execution_id=execution.id,
+                result_summary="owner ended before reconciliation",
+                clock=lambda: _NOW,
+            )
+        assert exc_info.value.code == "tool_execution_terminal_conflict"

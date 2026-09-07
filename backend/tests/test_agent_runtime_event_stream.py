@@ -23,6 +23,7 @@ from app.services.agent_runtime.event_stream import (
     current_lane_admission,
     current_start_command_status,
     run_is_terminal,
+    run_terminal_on_db,
 )
 
 
@@ -863,6 +864,33 @@ async def test_run_is_terminal_matches_newest_lifecycle_event() -> None:
     empty_session = _LaneProbeSession(_Result(one=None))
     assert not await run_is_terminal(
         session_factory=lambda: empty_session, handle=handle  # type: ignore[arg-type]
+    )
+
+
+@pytest.mark.asyncio
+async def test_run_terminal_on_db_matches_newest_lifecycle_event() -> None:
+    _, handle = _run()
+    terminal_session = _LaneProbeSession(
+        _Result(one=SimpleNamespace(event_type="run_completed"))
+    )
+    assert await run_terminal_on_db(
+        terminal_session,  # type: ignore[arg-type]
+        tenant_id=handle.tenant_id,
+        run_id=handle.run_id,
+    )
+    open_session = _LaneProbeSession(
+        _Result(one=SimpleNamespace(event_type="waiting_started"))
+    )
+    assert not await run_terminal_on_db(
+        open_session,  # type: ignore[arg-type]
+        tenant_id=handle.tenant_id,
+        run_id=handle.run_id,
+    )
+    empty_session = _LaneProbeSession(_Result(one=None))
+    assert not await run_terminal_on_db(
+        empty_session,  # type: ignore[arg-type]
+        tenant_id=handle.tenant_id,
+        run_id=handle.run_id,
     )
 
 

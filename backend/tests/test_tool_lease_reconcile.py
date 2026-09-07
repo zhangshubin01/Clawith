@@ -38,6 +38,9 @@ class _Result:
     def scalar_one_or_none(self):
         return self._values[0] if len(self._values) == 1 else None
 
+    def one_or_none(self):
+        return self._values[0] if len(self._values) == 1 else None
+
 
 class _Session:
     def __init__(
@@ -60,6 +63,10 @@ class _Session:
     async def execute(self, statement):
         self.statements.append(statement)
         text = str(statement)
+        if "event_type" in text:
+            # run_terminal_on_db probe: newest non-delivery lifecycle event.
+            event_type = "run_completed" if self.owner_terminal else "waiting_started"
+            return _Result([SimpleNamespace(event_type=event_type)])
         if "scheduling_lane_key" in text:
             # Owner-run liveness probe.
             return _Result([(not self.owner_terminal, "lane-key")])
@@ -303,7 +310,7 @@ async def test_concurrent_reconciler_ownership_skips_settlement(monkeypatch) -> 
 
 
 @pytest.mark.asyncio
-async def test_existing_resume_command_yields_idle_without_rescheduling(
+async def test_existing_resume_command_settles_without_rescheduling(
     monkeypatch,
 ) -> None:
     execution = _execution(lease_expires_at=_NOW - timedelta(seconds=1))
@@ -332,7 +339,9 @@ async def test_existing_resume_command_yields_idle_without_rescheduling(
 
     result = await _scheduler(session).run_once()
 
-    assert result.status == "idle"
+    # The receipt is settled even though its resume already exists; the
+    # scheduler must not re-enqueue a duplicate resume command.
+    assert result.status == "settled"
 
 
 @pytest.mark.asyncio
@@ -513,3 +522,211 @@ async def test_terminal_owner_settlement_wakes_thread_holder(monkeypatch) -> Non
     assert wakes[0]["owner_run_id"] == execution.run_id
     assert wakes[0]["tool_call_id"] == execution.tool_call_id
     assert wakes[0]["reason"] == "tool_execution_lease_expired"
+
+
+@pytest.mark.asyncio
+async def test_batch_settlement_clears_null_lease_read_then_write_orphan(
+    monkeypatch,
+) -> None:
+    """One iteration settles every candidate, not just the queue head.
+
+    A NULL-lease safe read whose owning Run is dead sorts first (``nulls_first``)
+    and used to park the whole scan behind a never-settled receipt. With the
+    owner now detected terminal via its lifecycle event, the read settles
+    ``failed`` and the loop continues to the write orphan behind it.
+    """
+    read_orphan = _execution(
+        effect="read",
+        retry_policy="safe",
+        lease_expires_at=None,
+        tool_call_id="call-read-orphan",
+    )
+    write_orphan = _execution(
+        effect="write",
+        retry_policy="conditional",
+        lease_expires_at=_NOW - timedelta(seconds=1),
+        tool_call_id="call-write-orphan",
+    )
+    session = _Session([read_orphan, write_orphan], owner_terminal=True)
+    settles = []
+
+    async def takeover(db, **kwargs):
+        assert db is session
+        return SimpleNamespace(acquired=True, active=False, terminal_outcome=None)
+
+    async def settle(db, **kwargs):
+        assert db is session
+        settles.append(kwargs)
+        return read_orphan if kwargs["execution_id"] == read_orphan.id else write_orphan
+
+    async def enqueue(db, **kwargs):
+        del db, kwargs
+        return object()
+
+    async def wake(db, **kwargs):
+        del db, kwargs
+        return None
+
+    monkeypatch.setattr(
+        tool_lease_reconcile,
+        "takeover_tool_execution_for_reconciliation",
+        takeover,
+    )
+    monkeypatch.setattr(
+        tool_lease_reconcile,
+        "mark_tool_execution_failed",
+        settle,
+    )
+    monkeypatch.setattr(tool_lease_reconcile, "enqueue_resume", enqueue)
+    monkeypatch.setattr(
+        tool_lease_reconcile,
+        "enqueue_thread_holder_reconcile_wake",
+        wake,
+    )
+
+    result = await _scheduler(session).run_once()
+
+    assert result.status == "settled"
+    assert [s["execution_id"] for s in settles] == [read_orphan.id, write_orphan.id]
+    assert settles[0]["result_summary"] == tool_lease_reconcile._ORPHAN_READ_FAILED_SUMMARY
+    assert settles[1]["result_summary"] == tool_lease_reconcile._ORPHAN_FAILED_SUMMARY
+
+
+@pytest.mark.asyncio
+async def test_reconcilable_write_with_terminal_owner_settles_failed(monkeypatch) -> None:
+    """A user-reconcilable receipt has nobody left to confirm it once the owner
+    Run ends, so the scheduler settles it failed instead of leaving it unknown."""
+    execution = _execution(
+        tool_name="write_file",
+        effect="write",
+        retry_policy="conditional",
+        lease_expires_at=_NOW - timedelta(seconds=1),
+    )
+    session = _Session([execution], owner_terminal=True)
+    failed_calls = []
+    unknown_calls = []
+
+    async def takeover(db, **kwargs):
+        del db
+        return SimpleNamespace(acquired=True, active=False, terminal_outcome=None)
+
+    async def mark_failed(db, **kwargs):
+        del db
+        failed_calls.append(kwargs)
+        return execution
+
+    async def mark_unknown(db, **kwargs):
+        del db
+        unknown_calls.append(kwargs)
+        return execution
+
+    async def enqueue(db, **kwargs):
+        del db, kwargs
+        return object()
+
+    async def wake(db, **kwargs):
+        del db, kwargs
+        return None
+
+    monkeypatch.setattr(
+        tool_lease_reconcile,
+        "takeover_tool_execution_for_reconciliation",
+        takeover,
+    )
+    monkeypatch.setattr(
+        tool_lease_reconcile,
+        "mark_tool_execution_failed",
+        mark_failed,
+    )
+    monkeypatch.setattr(
+        tool_lease_reconcile,
+        "mark_tool_execution_unknown",
+        mark_unknown,
+    )
+    monkeypatch.setattr(tool_lease_reconcile, "enqueue_resume", enqueue)
+    monkeypatch.setattr(
+        tool_lease_reconcile,
+        "enqueue_thread_holder_reconcile_wake",
+        wake,
+    )
+
+    result = await _scheduler(session).run_once()
+
+    assert result.status == "settled"
+    assert len(failed_calls) == 1
+    assert len(unknown_calls) == 0
+    assert failed_calls[0]["result_summary"] == tool_lease_reconcile._ORPHAN_FAILED_SUMMARY
+
+
+@pytest.mark.asyncio
+async def test_unknown_receipt_with_terminal_owner_is_abandoned(monkeypatch) -> None:
+    """An already-unknown receipt from a dead Run degrades to failed without a
+    lease takeover and without re-driving the dead Run; a newer Thread holder
+    is woken instead."""
+    execution = _execution(status="unknown", lease_expires_at=None)
+    session = _Session([execution], owner_terminal=True)
+    abandoned = []
+    resumes = []
+    wakes = []
+
+    async def abandon(db, **kwargs):
+        assert db is session
+        abandoned.append(kwargs)
+        return execution
+
+    async def enqueue(db, **kwargs):
+        resumes.append(kwargs)
+        return object()
+
+    async def wake(db, **kwargs):
+        wakes.append(kwargs)
+        return None
+
+    monkeypatch.setattr(
+        tool_lease_reconcile,
+        "mark_tool_execution_abandoned",
+        abandon,
+    )
+    monkeypatch.setattr(tool_lease_reconcile, "enqueue_resume", enqueue)
+    monkeypatch.setattr(
+        tool_lease_reconcile,
+        "enqueue_thread_holder_reconcile_wake",
+        wake,
+    )
+
+    result = await _scheduler(session).run_once()
+
+    assert result.status == "settled"
+    assert len(abandoned) == 1
+    assert abandoned[0]["execution_id"] == execution.id
+    assert abandoned[0]["result_summary"] == tool_lease_reconcile._ORPHAN_ABANDONED_SUMMARY
+    assert len(resumes) == 0
+    assert len(wakes) == 1
+    assert wakes[0]["tool_call_id"] == execution.tool_call_id
+
+
+@pytest.mark.asyncio
+async def test_unknown_receipt_with_active_owner_stays_unknown(monkeypatch) -> None:
+    """An unknown receipt whose owner is still active keeps awaiting the human
+    reconciliation flow; the scheduler neither abandons nor re-drives it."""
+    execution = _execution(status="unknown", lease_expires_at=None)
+    session = _Session([execution], owner_terminal=False)
+
+    async def forbidden_abandon(*args, **kwargs):
+        del args, kwargs
+        raise AssertionError("an active owner must not abandon an unknown receipt")
+
+    async def forbidden_enqueue(*args, **kwargs):
+        del args, kwargs
+        raise AssertionError("an active owner must not re-drive an unknown receipt")
+
+    monkeypatch.setattr(
+        tool_lease_reconcile,
+        "mark_tool_execution_abandoned",
+        forbidden_abandon,
+    )
+    monkeypatch.setattr(tool_lease_reconcile, "enqueue_resume", forbidden_enqueue)
+
+    result = await _scheduler(session).run_once()
+
+    assert result.status == "idle"

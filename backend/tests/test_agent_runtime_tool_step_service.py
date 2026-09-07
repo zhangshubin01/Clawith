@@ -4301,6 +4301,63 @@ async def test_write_exception_is_unknown_and_preserves_the_unresolved_batch(
 
 
 @pytest.mark.asyncio
+async def test_write_failure_with_deterministic_exception_is_failed(
+    monkeypatch,
+) -> None:
+    """A write tool raising a deterministic failure (e.g. FileNotFoundError)
+    settles failed and is returned to the model instead of parking unknown."""
+    tenant_id = uuid.uuid4()
+    agent = _agent(tenant_id)
+    call = _call("call-write-fail", "write_file")
+    state = _state(tenant_id, agent, (call,))
+    execution = _execution(
+        tenant_id,
+        uuid.UUID(state["registry"].run_id),
+        "call-write-fail",
+        "write_file",
+    )
+
+    async def reserve(db, **kwargs):
+        del db
+        assert kwargs["side_effect_classification"] == "write"
+        return _reservation(execution)
+
+    async def execute(*args, **kwargs):
+        del args, kwargs
+        raise FileNotFoundError("no such file")
+
+    async def mark_failed(db, **kwargs):
+        del db
+        execution.status = "failed"
+        execution.result_summary = kwargs["result_summary"]
+        return execution
+
+    async def forbidden_mark_unknown(*args, **kwargs):
+        del args, kwargs
+        raise AssertionError("a deterministic write failure must not become unknown")
+
+    monkeypatch.setattr(tool_step_service, "reserve_tool_execution", reserve)
+    monkeypatch.setattr(tool_step_service, "mark_tool_execution_failed", mark_failed)
+    monkeypatch.setattr(
+        tool_step_service,
+        "mark_tool_execution_unknown",
+        forbidden_mark_unknown,
+    )
+
+    result = await _service(agent, _CancelSource(None), execute).execute_pending(
+        state,
+        _context(state),
+        (call,),
+    )
+
+    assert result.error is None
+    assert result.waiting_request is None
+    assert result.messages[0]["execution_status"] == "failed"
+    assert result.messages[0]["content"] == "FileNotFoundError: tool execution failed"
+    assert "no such file" not in str(result.messages[0])
+
+
+@pytest.mark.asyncio
 async def test_cancel_between_calls_stops_before_reserving_the_next_tool(
     monkeypatch,
 ) -> None:
