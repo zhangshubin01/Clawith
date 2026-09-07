@@ -310,3 +310,111 @@ async def test_runtime_approval_resolution_resumes_the_original_run(
     assert notifications[0]["body"] == (
         "Result: Original Agent Run queued to resume"
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("resume_message", "expected_content"),
+    [
+        (None, "File deletion rejected. Do not execute the pending tool call."),
+        ("文件删除的 L3 审批流程已被维护者门控取代", "文件删除的 L3 审批流程已被维护者门控取代"),
+    ],
+)
+async def test_resolve_approval_resume_message_override(
+    monkeypatch,
+    resume_message,
+    expected_content,
+) -> None:
+    tenant_id = uuid.uuid4()
+    run_id = uuid.uuid4()
+    creator_id = uuid.uuid4()
+    approval_id = uuid.uuid4()
+    correlation_id = f"approval:{approval_id}"
+    approval = ApprovalRequest(
+        id=approval_id,
+        agent_id=uuid.uuid4(),
+        action_type="delete_files",
+        status="pending",
+        details={
+            "tool": "delete_file",
+            "args": {"path": "workspace/remove-me.md"},
+            "runtime_scope": {
+                "tenant_id": str(tenant_id),
+                "run_id": str(run_id),
+                "session_id": str(uuid.uuid4()),
+                "workspace_scope": "agent",
+                "tool_call_id": "call-delete",
+                "approval_correlation_id": correlation_id,
+            },
+        },
+    )
+    agent = Agent(
+        id=approval.agent_id,
+        tenant_id=tenant_id,
+        creator_id=creator_id,
+        name="Approval Agent",
+        status="idle",
+        is_expired=False,
+        access_mode="company",
+    )
+    user = User(
+        id=creator_id,
+        tenant_id=tenant_id,
+        display_name="Creator",
+        role="member",
+        is_active=True,
+    )
+
+    class _DB:
+        def __init__(self) -> None:
+            self.results = iter((approval, agent))
+            self.added = []
+
+        async def execute(self, _statement):
+            return _ScalarResult(next(self.results))
+
+        def add(self, value) -> None:
+            self.added.append(value)
+
+        async def flush(self) -> None:
+            return None
+
+    db = _DB()
+    resumed = []
+
+    class _RuntimeCommandIntake:
+        def __init__(self, db_arg) -> None:
+            assert db_arg is db
+
+        async def resume_run(self, command):
+            resumed.append(command)
+
+    async def send_notification(db_arg, **kwargs):
+        assert db_arg is db
+
+    monkeypatch.setattr(
+        "app.services.agent_runtime.adapter.RuntimeCommandIntake",
+        _RuntimeCommandIntake,
+    )
+    monkeypatch.setattr(
+        "app.services.notification_service.send_notification",
+        send_notification,
+    )
+    monkeypatch.setattr(
+        autonomy_module.AutonomyService,
+        "_execute_approved_action",
+        None,
+    )
+
+    resolved = await autonomy_module.AutonomyService().resolve_approval(
+        db,
+        approval_id,
+        user,  # type: ignore[arg-type]
+        "reject",
+        resume_message=resume_message,
+    )
+
+    assert resolved.status == "rejected"
+    assert len(resumed) == 1
+    assert resumed[0].payload["payload"]["content"] == expected_content
+    assert resumed[0].payload["payload"]["decision"] == "rejected"

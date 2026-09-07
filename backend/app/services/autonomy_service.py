@@ -166,9 +166,20 @@ class AutonomyService:
         return {"allowed": False, "level": "unknown", "message": "Unknown autonomy level"}
 
     async def resolve_approval(
-        self, db: AsyncSession, approval_id: uuid.UUID, user: User, action: str
+        self,
+        db: AsyncSession,
+        approval_id: uuid.UUID,
+        user: User,
+        action: str,
+        resume_message: str | None = None,
     ) -> ApprovalRequest:
-        """Approve or reject a pending approval request."""
+        """Approve or reject a pending approval request.
+
+        ``resume_message``, when set, replaces the hardcoded resume content fed
+        back to the waiting Run (used by out-of-band reconciliation, e.g. the
+        Maintainer-gate orphan cleanup telling the model the gate took over).
+        Default ``None`` preserves the historical wording.
+        """
         result = await query_dao.execute(db, 
             select(ApprovalRequest).where(ApprovalRequest.id == approval_id)
         )
@@ -218,11 +229,15 @@ class AutonomyService:
                         "correlation_id": runtime_resume["correlation_id"],
                         "payload": {
                             "content": (
-                                "File deletion approved. Continue the "
-                                "pending tool call."
-                                if approval.status == "approved"
-                                else "File deletion rejected. Do not "
-                                "execute the pending tool call."
+                                resume_message
+                                if resume_message is not None
+                                else (
+                                    "File deletion approved. Continue the "
+                                    "pending tool call."
+                                    if approval.status == "approved"
+                                    else "File deletion rejected. Do not "
+                                    "execute the pending tool call."
+                                )
                             ),
                             "approval_id": str(approval.id),
                             "decision": approval.status,
