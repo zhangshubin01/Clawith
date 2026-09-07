@@ -108,6 +108,7 @@ from app.services.sandbox.local.run_workspace import (
 )
 from app.services.sandbox.local.shared import refresh_sandbox_staging_path
 from app.services.sandbox.run_scope import sandbox_run_scope_id
+from app.services.sandbox.security import detect_git_side_effect_commands
 from app.services.sandbox.config import (
     ANDROID_BUILD_MAX_TIMEOUT_SECONDS,
     CODE_EXECUTION_DEFAULT_TIMEOUT_SECONDS,
@@ -13446,6 +13447,17 @@ async def _execute_code_outcome(
             f"Unsupported language: {language}. Use python, bash, or node.",
             "invalid_tool_arguments",
         )
+    # 方向 5: recall-only 识别 git 探索命令副作用（checkout/reset/restore/clean/switch）。
+    # 只告警 + 记账，不拦截（触发层宁滥勿缺，语义交 LLM）。
+    git_side_effect_commands = detect_git_side_effect_commands(language, code)
+    if git_side_effect_commands:
+        logger.warning(
+            "[GitSideEffectCommand] run_id={} agent_id={} language={} subcommands={}",
+            sandbox_run_scope_id.get().strip() or None,
+            agent_id,
+            language,
+            ",".join(git_side_effect_commands),
+        )
     if requested_timeout is not None:
         try:
             requested_timeout = int(requested_timeout)
@@ -13609,13 +13621,20 @@ async def _execute_code_outcome(
                 if result.success and result.exit_code == 0
                 else f"Code execution failed with exit code {result.exit_code}."
             )
-        output_metadata: dict[str, str] = {}
+        output_metadata: dict[str, object] = {}
         if sandbox_config.workspace_mode == "isolated_output" and publish_paths:
             output_path = normalize_workspace_path(publish_paths[0])
             output_metadata["workspace_path"] = output_path
             summary = (
                 f"{summary}\n\nPersistent output directory: {output_path} "
                 "(Agent-relative; use this exact path with file tools)."
+            )
+        if git_side_effect_commands:
+            output_metadata["git_side_effect_commands"] = git_side_effect_commands
+            summary += (
+                "\n\n[git 副作用提示] 检测到 git "
+                + ", ".join(git_side_effect_commands)
+                + " 命令；若它改动/回退了工作区 source 文件，请确认是否为预期操作。"
             )
         if result.error and result.error.startswith("sandbox_publication_unknown:"):
             return _typed_workspace_publication_failure(

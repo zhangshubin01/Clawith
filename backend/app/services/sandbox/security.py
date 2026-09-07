@@ -7,6 +7,8 @@ isolation boundary is the sandbox itself (bubblewrap / container / remote
 API).  Never rely on this module to keep untrusted code from the host.
 """
 
+import re
+
 from loguru import logger
 
 _DANGEROUS_BASH_ALWAYS = [
@@ -104,3 +106,28 @@ def check_code_safety(language: str, code: str, allow_network: bool = False) -> 
                     return f"Blocked: network operation not allowed ({pattern.strip()})"
 
     return None
+
+
+# git subcommands that can mutate/rewind the working tree — direction-5
+# "side-effect commands" that a model might invoke while exploring a repo
+# (checkout / reset / restore / clean / switch).  This is a recall-only,
+# over-inclusive detector (see plan §4.1): string matching is trivially
+# bypassable, so semantics stay with the LLM — we only flag and record.
+_GIT_SIDE_EFFECT_RE = re.compile(
+    r"\bgit\s+(checkout|reset|restore|clean|switch)\b",
+    re.IGNORECASE,
+)
+
+
+def detect_git_side_effect_commands(language: str, code: str) -> list[str]:
+    """Return the git side-effect subcommands present in ``code``.
+
+    Only ``bash`` is scanned — Python/Node subprocess arg-lists are out of
+    scope by design.  Results are deduplicated, lowercased and sorted so the
+    value is deterministic for metadata/bookkeeping.  Over-inclusive on
+    purpose: false positives are preferred over false negatives (a "git
+    checkout" in an echoed string still gets flagged).
+    """
+    if language != "bash" or not code:
+        return []
+    return sorted({m.group(1).lower() for m in _GIT_SIDE_EFFECT_RE.finditer(code)})
