@@ -179,14 +179,16 @@
 | 验收 | 结果 | 证据 |
 |---|---|---|
 | 1 pending delete_files = 0 | ✅ | `--apply` 后 3 条全 `status=rejected`（`resolved_at=14:05 UTC`、`resolved_by=creator 16820bb9`）；dry-run 重跑 `0 target` |
-| 2 三 run 脱离 waiting_user | ⚠️ 部分（如实） | 见下 |
+| 2 三 run 脱离 waiting_user | ✅ 全闭环（含 cancel 收尾） | 见下 |
 | 3 无新增审批 / group 未受影响 | ✅ | `SELECT count(*) … pending delete_files` = 0；无 group pending |
 | 4 回归测试全绿 | ✅ | resolve_approval 相关 pytest 22 passed（autonomy 集 31 passed） |
 
 **验收 2 逐 run 实测**：
 
 - `1211274c` ✅ **run_completed**（14:08:13）：resume 一次模型推理后直接收敛（wait 节点消费，checkpoint step 619→706，末事件 `run_completed`）。
-- `5c8dc096` ⏳ **resume 后重新活跃执行**：从 14:08 起持续改代码 + `android_compile`，至 15:43 仍在工具调用/流式输出（16 天前「优化 android 项目」任务被 resume 续跑，非「一次推理即止」）。
-- `8ea0a5a3` ⚠️ **resume 被 worker 拒绝为 `thread_not_started`**：其 graph 从未在共享 thread `10c52b04` 上落 checkpoint（该 thread 全部 `clawith_run_id=5c8dc096`，属「多 run 共 thread」历史遗留）。审批 `3ae339cc` 已 rejected（孤儿已清），但 run 事件仍停 `waiting_started`（虚等待，无 graph interrupt 可 resume）。
+- `5c8dc096` ✅ **run_cancelled**（15:52:38）：resume 后重新活跃执行（14:08 起改代码 + `android_compile`，16 天前「优化 android 项目」任务被续跑），后经 `cancel_run` 收尾停掉（见下）。
+- `8ea0a5a3` ✅ **run_cancelled**（15:52:39）：resume 被 worker 拒绝为 `thread_not_started`（其 graph 从未在共享 thread `10c52b04` 上落 checkpoint，该 thread 全部 `clawith_run_id=5c8dc096`，属「多 run 共 thread」历史遗留），后经 `cancel_run` 终结虚 `waiting_started` 事件流。
 
-**与方案预估的两处偏差（如实记录）**：① Q2 预估 resume 成本「~3 次 token」，实测 `5c8dc096` 触发完整任务续跑（>1.5h，模型继续 Android 任务），成本被低估一个量级；② §2.2 假设「两 thread 各 3 checkpoint」未识别 thread `10c52b04` 被 `5c8dc096`/`8ea0a5a3` 共享、checkpoint 全属前者，故 `8ea0a5a3` 无 graph 可 resume。两者均不影响核心目标（3 孤儿审批已 rejected、无新孤儿、门控接管），但 `8ea0a5a3` 的虚 `waiting_user` 事件残留为「共 thread 幽灵 run」遗留（可选 `cancel_run` 终结，非本票必需）。
+**cancel 收尾（2026-09-07 15:52）**：对 resume 副作用的两个 run（`5c8dc096` 复活续跑、`8ea0a5a3` 虚 waiting）经 `RuntimeCommandIntake.cancel_run`（复用 web 取消同路径，幂等键 `cancel:orphan-cleanup:{run_id}`，actor=creator）补发协作式取消，两条命令均 `applied`，两 run 末事件均 `run_cancelled`。至此验收 2 三 run 全部到达终态。注：`5c8dc096` 的续跑在 15:48 被一次并行会话的部署重启（容器 `StartedAt=15:48:08`）自然中断，随后 cancel 将其状态正式收敛。
+
+**与方案预估的两处偏差（如实记录）**：① Q2 预估 resume 成本「~3 次 token」，实测 `5c8dc096` 触发完整任务续跑（14:08–15:48 ≈ 1.7h，模型继续 Android 任务），成本被低估一个量级——此为方案 Q5 候选 A「reject+resume」的固有属性，代价已由后续 `cancel_run` 收尾吸收；② §2.2 假设「两 thread 各 3 checkpoint」未识别 thread `10c52b04` 被 `5c8dc096`/`8ea0a5a3` 共享、checkpoint 全属前者，故 `8ea0a5a3` 无 graph 可 resume。两者均不影响核心目标（3 孤儿审批已 rejected、无新孤儿、门控接管）。
