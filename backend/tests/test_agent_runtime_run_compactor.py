@@ -20,8 +20,11 @@ from app.services.agent_runtime.run_compactor import (
     RunCompactorError,
     RuntimeRunCompactorService,
     TransientRunCompactorError,
+    _compact_messages,
+    _prior_run_covered_note,
     settle_step_messages,
 )
+from app.services.agent_runtime.thread_visibility import bound_current_run_window
 from app.services.llm.client import LLMMessage
 from app.services.agent_runtime.state import (
     JsonObject,
@@ -200,6 +203,52 @@ def _request_shape(messages: list[JsonObject]) -> CompactRequestShape:
         system_content="test-system-prompt",
         provider_tools=(),
         history=history,
+    )
+
+
+async def _collapsed_request_shape(
+    messages: list[JsonObject],
+    *,
+    current_run_id: str,
+) -> CompactRequestShape:
+    """Rebuild the cache-stable prefix the way the live request does for a
+    multi-Run Thread: ``bound_current_run_window`` collapses prior-Run messages
+    into one ``prior-run-summary:{run_id}`` note, and the current-Run window
+    stays raw."""
+    prior_run_summary, current = await bound_current_run_window(
+        messages,
+        current_run_id=current_run_id,
+    )
+    history: list[CompactHistoryMessage] = []
+    if prior_run_summary is not None:
+        history.append(
+            CompactHistoryMessage(
+                message=LLMMessage(
+                    role="user",
+                    content=cast(str, prior_run_summary.get("content")),
+                ),
+                state_message_id=prior_run_summary.get("id"),
+            )
+        )
+    for message in current:
+        role = message.get("role")
+        if role not in {"user", "assistant", "tool"}:
+            continue
+        history.append(
+            CompactHistoryMessage(
+                message=LLMMessage(
+                    role=cast(Any, role),
+                    content=message.get("content"),
+                ),
+                state_message_id=(
+                    message.get("id") if isinstance(message.get("id"), str) else None
+                ),
+            )
+        )
+    return CompactRequestShape(
+        system_content="test-system-prompt",
+        provider_tools=(),
+        history=tuple(history),
     )
 
 
@@ -1361,3 +1410,122 @@ async def test_nonrepairable_compact_outputs_are_rejected_atomically(
     assert raised.value.code == "invalid_thread_compact_output"
     assert "thread_summary" not in state
     assert "summary_covered_through_message_id" not in state
+
+
+def test_compact_messages_single_run_is_byte_identical_without_prior_run() -> None:
+    # A single-Run shape carries no ``prior-run-summary:`` entry, so the
+    # prior-Run note must not be injected: the compact request is byte-identical
+    # to the pre-fix order (system → covered history → exact input → instruction).
+    shape = _request_shape(
+        [
+            _normal("old-safe", "old " * 300),
+            {**_normal("current", "EXACT CURRENT INPUT"), "runtime_input": "current"},
+        ]
+    )
+    messages = _compact_messages(
+        shape,
+        covered_ids=frozenset({"old-safe"}),
+        summary_text=None,
+        exact_ids=frozenset({"current"}),
+    )
+    assert [message.role for message in messages] == ["system", "user", "user", "user"]
+    assert messages[1].content == "old " * 300
+    assert messages[2].content == "EXACT CURRENT INPUT"
+    assert messages[3].content == _COMPACTION_INSTRUCTION
+
+
+def test_prior_run_covered_note_not_injected_without_orphan_covered_ids() -> None:
+    # A collapsed note exists, but every covered id is representable in the
+    # cache-stable history (current-Run content): no orphan → no injection.
+    shape = CompactRequestShape(
+        system_content="sys",
+        provider_tools=(),
+        history=(
+            CompactHistoryMessage(
+                message=LLMMessage(role="user", content="历史上下文（非当前任务）：上一轮已完成"),
+                state_message_id="prior-run-summary:abc",
+            ),
+            CompactHistoryMessage(
+                message=LLMMessage(role="user", content="old"),
+                state_message_id="old-1",
+            ),
+            CompactHistoryMessage(
+                message=LLMMessage(role="user", content="current"),
+                state_message_id="current",
+            ),
+        ),
+    )
+    assert _prior_run_covered_note(shape, frozenset({"old-1"})) is None
+
+
+@pytest.mark.asyncio
+async def test_prior_run_is_recorded_via_collapsed_note_not_silently_lost() -> None:
+    prior_run_id = str(uuid.uuid4())
+    goal = "PRIOR GOAL " * 300
+    raw_fact = "PRIOR RAW TOOL FACT " * 200
+    messages = [
+        {
+            **_normal("prior-input", goal),
+            "runtime_input": "current",
+            "runtime_run_id": prior_run_id,
+        },
+        {
+            **_assistant("prior-assist-1", "prior-call-1"),
+            "runtime_run_id": prior_run_id,
+        },
+        {
+            **_tool_result("prior-tool-1", "prior-call-1", content=raw_fact),
+            "runtime_run_id": prior_run_id,
+            "result_ref": "tool-result://prior-artifact",
+        },
+        {
+            **_normal("current", "EXACT CURRENT INPUT"),
+            "runtime_input": "current",
+        },
+    ]
+    state, context, tenant_id = _state(messages)
+    state["messages"][-1]["runtime_run_id"] = context.run_id  # type: ignore[index]
+    model = _model(tenant_id)
+    prompts: list[list] = []
+
+    async def load(
+        _state: RuntimeGraphState,
+        _context: RuntimeContext,
+    ) -> RunCompactInputs:
+        shape = await _collapsed_request_shape(
+            list(_state["messages"]),  # type: ignore[typeddict-item]
+            current_run_id=_context.run_id,
+        )
+        return RunCompactInputs(
+            model=model,
+            ledger={},
+            effective_input_budget=1_000,
+            current_input_tokens=900,
+            request_shape=shape,
+        )
+
+    async def complete(_model, prompt, **_kwargs):
+        prompts.append(prompt)
+        return _step()
+
+    result = await RuntimeRunCompactorService(
+        settings=_settings(),
+        completion=complete,
+        input_loader=load,
+    ).compact_if_needed(state, context)
+
+    serialized = _serialize_prompt(prompts[0])
+    # The collapsed prior-Run note is re-fed (goal + artifact survive)...
+    assert "历史上下文（非当前任务）" in serialized
+    assert "PRIOR GOAL" in serialized
+    assert "tool-result://prior-artifact" in serialized
+    # ...while the prior-Run raw tool facts never leak back into the request.
+    assert "PRIOR RAW TOOL FACT" not in serialized
+    # The current input stays exact, the watermark crosses the prior Run, and
+    # only the current-Run message survives as recent.
+    assert "EXACT CURRENT INPUT" in serialized
+    assert result.covered_through_message_id == "prior-tool-1"
+    assert result.recent_messages is not None
+    assert [message["id"] for message in result.recent_messages] == ["current"]
+    assert result.thread_summary is not None
+    assert "degraded" not in result.thread_summary

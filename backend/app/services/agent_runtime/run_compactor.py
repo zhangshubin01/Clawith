@@ -985,6 +985,49 @@ def detect_loop(events: Sequence[LoopFingerprintEvent]) -> int:
     return loop_confirmations
 
 
+def _prior_run_summary_entry(
+    shape: CompactRequestShape,
+) -> CompactHistoryMessage | None:
+    """The collapsed prior-Run note in the cache-stable history, if present.
+
+    ``bound_current_run_window`` collapses a prior Run's messages into one
+    ``prior-run-summary:{run_id}`` user note (see ``thread_visibility``) that
+    carries the prior Run's goal and produced artifacts in main-request form.
+    """
+    for entry in shape.history:
+        if (
+            entry.state_message_id is not None
+            and entry.state_message_id.startswith("prior-run-summary:")
+        ):
+            return entry
+    return None
+
+
+def _prior_run_covered_note(
+    shape: CompactRequestShape,
+    covered_ids: frozenset[str],
+) -> CompactHistoryMessage | None:
+    """Re-feed the collapsed prior-Run note when the covered interval spans
+    prior-Run content that the cache-stable history collapses away.
+
+    The covered ids come from the FULL visible thread (``_thread_messages``),
+    where a prior Run's messages keep their original ids. The cache-stable
+    ``shape.history`` replaces those with a single ``prior-run-summary:{run_id}``
+    entry whose id is NOT among the covered ids. Without this note both the
+    prior Run's original tool facts and its collapsed summary would silently
+    vanish from the compact request (F2 regression). Re-feed the collapsed note
+    whenever any covered id has no representation in the history, restoring the
+    "model-visible ⟺ recorded" invariant.
+    """
+    entry = _prior_run_summary_entry(shape)
+    if entry is None:
+        return None
+    history_ids = {e.state_message_id for e in shape.history}
+    if not (covered_ids - history_ids):
+        return None
+    return entry
+
+
 def _compact_messages(
     shape: CompactRequestShape,
     *,
@@ -998,15 +1041,19 @@ def _compact_messages(
     plus the compaction instruction.
 
     Order: system (byte-identical to the live request) → covered history
-    messages (main-request form, filtered by id) → prior-checkpoint background
-    (batch 2+) → exact inputs (current/resume, main-request form) → the
-    deterministic ledger segment (completed_actions/files_read — never in the
-    cache-stable prefix) → the instruction, which is always last (F1).
+    messages (main-request form, filtered by id) → collapsed prior-Run note
+    (when the covered interval spans prior-Run content) → prior-checkpoint
+    background (batch 2+) → exact inputs (current/resume, main-request form) →
+    the deterministic ledger segment (completed_actions/files_read — never in
+    the cache-stable prefix) → the instruction, which is always last (F1).
     """
     messages = [LLMMessage(role="system", content=shape.system_content)]
     for entry in shape.history:
         if entry.state_message_id in covered_ids:
             messages.append(entry.message)
+    prior_run_note = _prior_run_covered_note(shape, covered_ids)
+    if prior_run_note is not None:
+        messages.append(prior_run_note.message)
     if summary_text:
         messages.append(
             LLMMessage(
@@ -1065,6 +1112,9 @@ def _compact_dynamic_tokens(
         for entry in shape.history
         if entry.state_message_id in covered_ids
     ]
+    prior_run_note = _prior_run_covered_note(shape, covered_ids)
+    if prior_run_note is not None:
+        parts.append(prior_run_note.message.to_openai_format())
     if summary_text:
         parts.append(f"{_CHECKPOINT_PREAMBLE}\n\n{summary_text}")
     parts.extend(
@@ -1268,6 +1318,9 @@ class RuntimeRunCompactorService:
                     if entry.state_message_id in covered_ids
                 ]
             )
+            prior_run_note = _prior_run_covered_note(shape, covered_ids)
+            if prior_run_note is not None:
+                covered_tokens += _message_tokens([prior_run_note.message])
             if summary is not None:
                 covered_tokens += _estimate_tokens(summary)
             if _estimate_tokens(result["text"]) >= covered_tokens:
