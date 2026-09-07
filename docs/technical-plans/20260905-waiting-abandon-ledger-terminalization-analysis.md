@@ -106,6 +106,14 @@ if unknown_with_side_effect:
 
 ## 4. 方案3 修复设计（待实施，未动代码）
 
+> **注意（2026-09-05 复审后）**：本节的 A/B/C 是「第一版设计草图」，已由
+> `20260905-waiting-abandon-ledger-terminalization-fix-plan.md` 收敛为精确方案
+> （X 白名单 / Z2 `run_terminal_on_db` / Z3a 批量 / Z3b settle 补守卫 / Z3c 扫描降级
+> / 新原语 `mark_tool_execution_abandoned`），并更正两点：①「ledger 终态化 + channel 回写
+> 必须成对」不成立（`tool_exchange.py:406-424` 已有 `failed→summarize` 兜底，ledger-only 即解屏障，
+> channel 回写是可选增强）；② `unknown→failed` 不能复用 `mark_tool_execution_failed`
+> （`_mark_terminal` 拒 terminal→terminal）。**以 fix-plan.md 为准**，本节保留作根因→方案映射记录。
+
 ### 修复点 A —— run 边界终态化（遗弃→failed+completed 标注）
 
 在 run 达到终态时兜底结算名下残留 receipt。候选落点：`SchedulingLaneCompletionHandler.handle`（`scheduling_lane.py`，覆盖 completed/cancelled/failed 的 lane 释放）。
@@ -182,3 +190,28 @@ if unknown_with_side_effect:
 - 改动点：`scheduling_lane.py`（或等价 run 终态钩子）、`tool_step_service.py::_mark_exception`、可能 `tool_execution.py`（abandoned 结算 helper）、channel 回写。
 - 风险：run 终态兜底若误伤「run 已完成且 receipt 已 succeeded」→ 必须严格只动 `unknown`/`started` 且附 abandoned 标注；与租约对账竞态需用同一 `owner_terminal` 判定 + 行锁（`with_for_update`）。
 - 与「feishu waiting 卡片观察」（`20260827-feishu-waiting-card-observation.md`）相互独立：那个是前端呈现缺失，这个是 ledger 终态化。
+
+---
+
+## 6. 代码核对（2026-09-05 复查，方案3 仍未实施）
+
+当前代码逻辑核对结论：**三个缺陷的核心代码逻辑均未变，方案3 的 A/B/C 三点均未落地**。逐条核实（行号为当前 `backend/app/services/agent_runtime/` 下的实际行号）：
+
+**缺陷② `_mark_exception` 未修** — `tool_step_service.py:1760-1792`
+`known_failure = policy.side_effect_classification == "read" or isinstance(exc, (GroupRuntimeToolError, ToolExecutionError))`（1769-1771 行），write 工具抛普通 Python 异常（如 `FileNotFoundError`）仍 → `status="unknown"`（1778 行）。一字未变。
+
+**缺陷① lease reconcile 未修** — `tool_lease_reconcile.py:154 / 203-231`
+仍只扫 `AgentToolExecution.status == "started"`（154 行）的孤儿收据；`is_user_reconcilable_unknown_execution` 的收据（213-214 行）仍 → `mark_tool_execution_unknown`（写孤儿留 `unknown`，永等人工对账）。
+
+**缺陷③ compactor 硬屏障未变** — `tool_exchange.py:372-388` + `run_compactor.py:300-309`
+`_resolve_incomplete_exchange` 中 unknown + may_have_side_effect → `require_confirmation`/`blocked=True`（372-388 行）；`any(status in {"started","unknown"})` → `block_reconcile`/`blocked=True`（389 行）。`_guard_observed_results`（`tool_exchange.py:279-308`）对「已观察到 result 但 receipt 为 unknown」同样硬屏障。`_safe_compact_block`（`run_compactor.py:300-309`）对这两类 `blocked=True` 的块返回 False → 在 `_compactable_prefix`（380-387 行）仍是硬屏障，悬空 tool_call 之后的消息无法摘要。
+
+**新证据：`run_ended_before_execution` 不覆盖缺陷①（是相邻缺口，非同一条路径）**
+- `model_step_service.py:2270-2279`：context build 时为「前一个 run **从未预留**（没有 started 收据）」的 call 合成 `status="not_started"` + `run_ended_before_execution=True` 的 ledger 条目。
+- `tool_exchange.py:467-489`：识别该标记 → `summarize` → retry model（而非硬屏障）。
+- **但**：这一路只覆盖 `not_started`（「从未预留」）；缺陷① 是「预留后（started）被遗弃 → reconcile 落 `unknown`」。unknown 在 372-388 / 389 行**先于** 467 行被硬屏障拦截，且两者 key 的是不同 status（`unknown` vs `not_started`），互不重叠。故 `run_ended_before_execution` / `cancelled_before_execution`（443-465 行）只终态化了「从未跑起来」的调用，**未覆盖「跑起来后被遗弃」的核心场景**。
+
+**`build_completed_actions` 不软化屏障** — `run_compactor.py:625-668`
+仅 `succeeded` 执行进入（643 行 `if str(execution.status) != "succeeded": continue`）。它控制**摘要 payload 内容**（completed_actions 事实流），不参与块分类；unknown 收据依旧在块层成为硬屏障。
+
+**结论**：`57c2e5b2`（completed_actions 流水/进度锚点）、`6f43d25b`（replay divergence 复用 ledger 结局）、`ff8f297b`（waiting 文案）以及 `run_ended_before_execution` 分支，都是**相邻的终态化补丁**，针对「从未预留/取消在跑前」的调用；它们都**不触碰**「预留后被遗弃 → `unknown` → 硬屏障」这条主线。方案3 的 B（异常白名单）、C（遗弃回写 channel）、A（run 终态兜底清理）仍需实施。
