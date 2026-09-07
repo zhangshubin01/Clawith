@@ -1557,6 +1557,65 @@ async def test_typed_write_outcome_without_run_id_skips_refresh(monkeypatch, tmp
     assert storage.files[storage_key] == b"new"
 
 
+@pytest.mark.asyncio
+async def test_refresh_warns_on_missing_run_id(monkeypatch):
+    """Direction 4: run-link loss must be visible, not silent. When neither an
+    explicit run_id nor the run-scope contextvar is present, the refresh no-op
+    logs at WARNING (was INFO), so any future non-context call path surfaces
+    instead of silently dropping the ADR-0011 sync."""
+    from loguru import logger
+
+    token = sandbox_run_scope_id.set("")
+    captured: list[str] = []
+    sink_id = logger.add(lambda message: captured.append(str(message)), level="WARNING")
+    try:
+        await agent_tools._refresh_run_workspace_after_direct_write(
+            uuid.uuid4(),
+            "workspace/notes.txt",
+        )
+    finally:
+        logger.remove(sink_id)
+        sandbox_run_scope_id.reset(token)
+    assert any(
+        "RunWorkspaceRefreshSkipped" in message and "no_run_id" in message
+        for message in captured
+    ), f"expected a no_run_id WARNING, got: {captured}"
+
+
+@pytest.mark.asyncio
+async def test_flush_warns_on_missing_run_id(monkeypatch):
+    """Direction 4: flush with no run_id (legacy approval path) warns
+    [WorkspaceFlushNoRunId] instead of silently skipping the ADR-0011 sync; the
+    write itself still succeeds (behavior unchanged)."""
+    from loguru import logger
+
+    agent_id = uuid.uuid4()
+    storage_key = f"{agent_id}/workspace/notes.txt"
+    storage = MemoryStorageBackend({storage_key: b"old"})
+    monkeypatch.setattr(agent_tools, "get_storage_backend", lambda: storage)
+
+    token = sandbox_run_scope_id.set("")
+    captured: list[str] = []
+    sink_id = logger.add(lambda message: captured.append(str(message)), level="WARNING")
+    try:
+        temp_ws = await agent_tools._prepare_temp_workspace(agent_id, paths=["workspace"])
+        try:
+            (temp_ws.root / "workspace" / "notes.txt").write_text("new", encoding="utf-8")
+            result = await agent_tools.flush_temp_workspace(temp_ws)
+        finally:
+            temp_ws.cleanup()
+    finally:
+        logger.remove(sink_id)
+        sandbox_run_scope_id.reset(token)
+
+    assert any("WorkspaceFlushNoRunId" in message for message in captured), (
+        f"expected a [WorkspaceFlushNoRunId] WARNING, got: {captured}"
+    )
+    # Behavior unchanged: the flush still publishes without a run_id.
+    assert "workspace/notes.txt" in result["updated"]
+    assert storage.files[storage_key] == b"new"
+
+
 # --- ADR-0011 fix three: conflicted flush discards the run workspace ---
 
 

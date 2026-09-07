@@ -2155,6 +2155,11 @@ async def flush_temp_workspace(
     cas_files.update(await _create_git_bundles(temp_workspace.root, git_repos))
     local_files = {**cas_files, **overwrite_files}
     run_id = sandbox_run_scope_id.get().strip() or None
+    if not run_id:
+        logger.warning(
+            "[WorkspaceFlushNoRunId] agent_id={}",
+            temp_workspace.agent_id,
+        )
     git_head_hashes = temp_workspace.git_head_hashes
 
     updated: list[str] = []
@@ -2436,12 +2441,14 @@ async def flush_temp_workspace(
             await _refresh_run_workspace_after_direct_write(
                 temp_workspace.agent_id,
                 rel_path,
+                run_id=run_id,
                 skip_workspace=temp_workspace,
             )
         for rel_path in deleted:
             await _refresh_run_workspace_after_direct_write(
                 temp_workspace.agent_id,
                 rel_path,
+                run_id=run_id,
                 deleted=True,
                 skip_workspace=temp_workspace,
             )
@@ -2471,14 +2478,15 @@ async def _refresh_run_workspace_after_direct_write(
 
     ``run_id`` explicitly passed by the typed tool outcomes takes precedence;
     ``None`` falls back to the run-scope contextvar (approval post-processing
-    has neither and stays a no-op). No-op before the run workspace
-    materializes. Best-effort: failures are logged and the previous conflict
-    protection remains the safety net.
+    has neither, stays a no-op, and logs a warning so the missing run link is
+    visible rather than silent). No-op before the run workspace materializes.
+    Best-effort: failures are logged and the previous conflict protection
+    remains the safety net.
     """
     if run_id is None:
         run_id = sandbox_run_scope_id.get().strip() or None
     if not run_id:
-        logger.info(
+        logger.warning(
             "[RunWorkspaceRefreshSkipped] path={} reason=no_run_id",
             rel_path,
         )
