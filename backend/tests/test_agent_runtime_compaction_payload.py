@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime
 from types import SimpleNamespace
+from typing import Any, cast
 import uuid
 
 import pytest
@@ -18,6 +19,8 @@ import pytest
 from app.config import Settings
 from app.models.llm import LLMModel
 from app.services.agent_runtime.run_compactor import (
+    CompactHistoryMessage,
+    CompactRequestShape,
     RunCompactInputs,
     RuntimeRunCompactorService,
     build_completed_actions,
@@ -29,6 +32,7 @@ from app.services.agent_runtime.state import (
     RuntimeContext,
     RuntimeGraphState,
 )
+from app.services.llm.client import LLMMessage
 from app.services.llm.single_step import LLMCompletionStep
 from app.services.token_tracker import TokenUsage
 
@@ -190,7 +194,7 @@ def _service(
     executions: list | None = None,
 ) -> RuntimeRunCompactorService:
     async def load(
-        _state: RuntimeGraphState,
+        state: RuntimeGraphState,
         _context: RuntimeContext,
     ) -> RunCompactInputs:
         return RunCompactInputs(
@@ -199,6 +203,7 @@ def _service(
             effective_input_budget=effective_budget,
             current_input_tokens=current_tokens,
             executions=executions or [],
+            request_shape=_request_shape(list(state["messages"])),  # type: ignore[typeddict-item]
         )
 
     return RuntimeRunCompactorService(
@@ -219,16 +224,56 @@ def _compacting_messages() -> list[JsonObject]:
     ]
 
 
+def _request_shape(messages: list[JsonObject]) -> CompactRequestShape:
+    """A minimal cache-stable prefix reconstructed from the state messages."""
+    history = tuple(
+        CompactHistoryMessage(
+            message=LLMMessage(
+                role=cast(Any, message.get("role")),
+                content=message.get("content"),
+            ),
+            state_message_id=(
+                message.get("id") if isinstance(message.get("id"), str) else None
+            ),
+        )
+        for message in messages
+        if message.get("role") in {"user", "assistant", "tool"}
+    )
+    return CompactRequestShape(
+        system_content="test-system-prompt",
+        provider_tools=(),
+        history=history,
+    )
+
+
+def _serialize_prompt(messages: list[LLMMessage]) -> str:
+    return json.dumps(
+        [message.to_openai_format() for message in messages],
+        ensure_ascii=False,
+    )
+
+
+def _ledger_message(messages: list[LLMMessage]) -> LLMMessage | None:
+    """The deterministic ledger segment: a user message whose content starts
+    with the completed_actions heading."""
+    for message in messages:
+        if (
+            message.role == "user"
+            and isinstance(message.content, str)
+            and message.content.startswith("## completed_actions\n")
+        ):
+            return message
+    return None
+
+
 @pytest.mark.asyncio
 async def test_payload_always_carries_completed_actions_key() -> None:
-    """No executions yet: the key is present and an empty list, never absent."""
+    """No executions yet: the prompt carries no ``completed_actions`` ledger segment."""
     state, context, tenant_id = _state(_compacting_messages())
-    payloads: list[dict] = []
     prompts: list[list] = []
 
     async def complete(_model, prompt, **_kwargs):
         prompts.append(prompt)
-        payloads.append(json.loads(prompt[0].content))
         return _step()
 
     result = await _service(
@@ -239,15 +284,15 @@ async def test_payload_always_carries_completed_actions_key() -> None:
     ).compact_if_needed(state, context)
 
     assert result.compacted is True
-    assert payloads, "compaction must have issued at least one payload"
-    for payload in payloads:
-        assert "completed_actions" in payload
-        assert payload["completed_actions"] == []
+    assert prompts, "compaction must have issued at least one prompt"
+    for prompt in prompts:
+        serialized = _serialize_prompt(prompt)
+        assert "## completed_actions" not in serialized
 
 
 @pytest.mark.asyncio
 async def test_payload_completed_actions_match_deterministic_pipeline() -> None:
-    """Payload pipeline equals build_completed_actions over the same ledger."""
+    """The ledger segment replays build_completed_actions over the same ledger."""
     executions = [
         _execution(execution_id="e1", call_id="c1", summary="First edit"),
         _execution(
@@ -265,10 +310,10 @@ async def test_payload_completed_actions_match_deterministic_pipeline() -> None:
         ),
     ]
     state, context, tenant_id = _state(_compacting_messages())
-    payloads: list[dict] = []
+    prompts: list[list] = []
 
     async def complete(_model, prompt, **_kwargs):
-        payloads.append(json.loads(prompt[0].content))
+        prompts.append(prompt)
         return _step()
 
     await _service(
@@ -279,11 +324,13 @@ async def test_payload_completed_actions_match_deterministic_pipeline() -> None:
         executions=executions,
     ).compact_if_needed(state, context)
 
-    assert payloads
+    assert prompts
     expected = build_completed_actions(executions)
     assert [entry["call_id"] for entry in expected] == ["c1", "c3"]
-    for payload in payloads:
-        assert payload["completed_actions"] == expected
+    for prompt in prompts:
+        ledger = _ledger_message(prompt)
+        assert ledger is not None
+        assert json.loads(ledger.content[len("## completed_actions\n") :]) == expected
 
 
 @pytest.mark.asyncio
@@ -305,11 +352,13 @@ async def test_instruction_carries_pipeline_precedence_rules() -> None:
 
     assert prompts
     for prompt in prompts:
-        assert len(prompt) == 2
-        instruction = prompt[1].content
-        assert isinstance(instruction, str)
+        assert prompt[0].role == "system"
+        instruction = prompt[-1]
+        assert instruction.role == "user"
+        content = instruction.content
+        assert isinstance(content, str)
         for sentinel in _PIPELINE_PRECEDENCE_SENTINELS:
-            assert sentinel in instruction
+            assert sentinel in content
 
 
 @pytest.mark.asyncio
@@ -330,7 +379,9 @@ async def test_instruction_keeps_all_eight_section_headings() -> None:
     ).compact_if_needed(state, context)
 
     assert prompts
-    instruction = prompts[0][1].content
-    assert isinstance(instruction, str)
+    instruction = prompts[0][-1]
+    assert instruction.role == "user"
+    content = instruction.content
+    assert isinstance(content, str)
     for heading in _COMPACTION_SECTION_HEADINGS:
-        assert heading in instruction
+        assert heading in content

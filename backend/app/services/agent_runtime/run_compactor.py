@@ -31,7 +31,6 @@ from app.services.agent_runtime.tool_exchange import (
     MessageBlock,
     ToolExchangeIntegrityError,
     build_message_blocks,
-    select_recent_blocks,
     summary_for_exchange,
     validate_tool_exchange_integrity,
 )
@@ -44,7 +43,6 @@ from app.services.llm.failover import (
 from app.services.llm.multimodal_content import (
     MultimodalContentError,
     estimate_multimodal_tokens,
-    project_multimodal_for_summary,
 )
 from app.services.llm.utils import get_max_tokens
 
@@ -138,6 +136,16 @@ Rules:
   drop stale ones, and merge newer information into a single consolidated
   summary under the same structure."""
 
+# F2 background frame for batch 2+ checkpoints: user role, background framing,
+# no imperative/goal sentence ([[direct-chat-run-boundary-fix]] hard constraint).
+# The prior summary travels as a background message so it can never be read as
+# a new directive, while the cache-stable prefix stays byte-identical.
+_CHECKPOINT_PREAMBLE = """This is an automatically generated checkpoint condensing an earlier span of
+the conversation to free up context. Treat the captured context as
+established background and build on it without restating it. Continue the
+task directly from the messages that follow, without acknowledging this
+checkpoint."""
+
 # The checkpoint's fixed section headings. Structure validation (F1.5) is
 # deliberately lenient: weak models occasionally merge a section, and the cost
 # of one retry outweighs the cost of a slightly merged checkpoint.
@@ -225,6 +233,33 @@ class RunCompactResult:
 
 
 @dataclass(frozen=True, slots=True)
+class CompactHistoryMessage:
+    """One history message in the business request's cache-stable prefix.
+
+    ``message`` is the exact ``LLMMessage`` the live model request sends for
+    this history position; ``state_message_id`` is the runtime message id used
+    to pick covered/exact spans by id in ``_compact_messages``.
+    """
+
+    message: LLMMessage
+    state_message_id: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class CompactRequestShape:
+    """The business request's cache-stable prefix, assembled by the same
+    pipeline that builds the live model request (system + tools + history).
+
+    Reusing this verbatim as the compact request's prefix lets the auxiliary
+    call hit the provider's warm prefix cache (F2).
+    """
+
+    system_content: str
+    provider_tools: tuple[dict, ...]
+    history: tuple[CompactHistoryMessage, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class RunCompactInputs:
     """Request facts required by one Thread Compact attempt."""
 
@@ -235,6 +270,9 @@ class RunCompactInputs:
     # Full execution ledger for the deterministic completed-actions pipeline
     # (A) — duck-typed so the loader can pass AgentToolExecution records.
     executions: Sequence[CompletedActionSource] = ()
+    # The business request's cache-stable prefix (system + tools + history),
+    # snapshotted by the same pipeline that builds the live model request.
+    request_shape: CompactRequestShape | None = None
 
 
 class RunCompactCompletionPort(Protocol):
@@ -464,83 +502,40 @@ def _watermark(blocks: Sequence[MessageBlock]) -> str:
     return value
 
 
-def _summary_ready_blocks(
-    blocks: Sequence[MessageBlock],
-    *,
-    ledger: Ledger,
-) -> tuple[MessageBlock, ...]:
-    """Replace settled exchanges with bounded, reference-backed facts."""
-    prepared: list[MessageBlock] = []
-    for block in blocks:
-        summary = block.compaction_summary
-        needs_structured_summary = block.action != "emit"
-        if block.kind == "tool_exchange":
-            selection = select_recent_blocks(
-                [block],
-                target_messages=None,
-                token_budget=0,
-                token_counter=lambda values: _estimate_tokens(values),
-                tool_execution_ledger=ledger,
-            )
-            summary = (
-                selection.compaction_summaries[0]
-                if selection.compaction_summaries
-                else None
-            )
-            needs_structured_summary = True
-        if not needs_structured_summary:
-            prepared.append(block)
-            continue
-        if summary is None:
-            raise RunCompactorError(
-                "unsafe_tool_exchange_summary",
-                "Tool Exchange cannot enter Thread Summary without stable execution facts",
-            )
-        message_id = block.message_ids[-1]
-        synthetic: JsonObject = {
-            "id": message_id,
-            "role": "user",
-            "content": {
-                "historical_tool_exchange": cast(JsonObject, asdict(summary)),
-            },
-        }
-        prepared.append(
-            MessageBlock(
-                kind="normal",
-                messages=(synthetic,),
-                message_ids=(message_id,),
+def _render_deterministic_ledger(
+    completed_actions: Sequence[JsonObject],
+    files_read: Sequence[JsonObject],
+) -> str:
+    """Render the settled-ledger facts as one bounded user segment.
+
+    These two pipelines are compact-specific inputs (they vary per batch and
+    must never enter the cache-stable prefix). They ride as a single user
+    message right before the instruction.
+    """
+    sections: list[str] = []
+    if completed_actions:
+        sections.append(
+            "## completed_actions\n"
+            + json.dumps(
+                [dict(entry) for entry in completed_actions],
+                ensure_ascii=False,
+                allow_nan=False,
+                sort_keys=True,
+                separators=(",", ":"),
             )
         )
-    return tuple(prepared)
-
-
-def _payload(
-    summary: JsonObject | None,
-    blocks: Sequence[MessageBlock],
-    exact_inputs: Sequence[JsonObject],
-    completed_actions: Sequence[JsonObject] = (),
-    files_read: Sequence[JsonObject] = (),
-) -> JsonObject:
-    payload: JsonObject = {
-        "schema_version": "thread_running_summary_v1",
-        "existing_thread_summary": dict(summary) if summary is not None else None,
-        "authoritative_exact_inputs": [dict(message) for message in exact_inputs],
-        "covered_messages": [
-            dict(message) for block in blocks for message in block.messages
-        ],
-        # Deterministic completed-actions pipeline (A): settled ledger facts
-        # (每条 "succeeded" 是该工具在结算时刻确实成功的账本事实) — always
-        # present; an empty list means "nothing settled yet".
-        "completed_actions": [dict(entry) for entry in completed_actions],
-        # Files-read pipeline (P1): always present — an empty list is a
-        # meaningful statement ("no file read yet"). Only read_file entries
-        # carry a content_hash, which is the "unchanged since last read" signal.
-        "files_read": [dict(entry) for entry in files_read],
-    }
-    try:
-        return cast(JsonObject, project_multimodal_for_summary(payload))
-    except MultimodalContentError as exc:
-        raise RunCompactorError(exc.code, str(exc)) from exc
+    if files_read:
+        sections.append(
+            "## files_read\n"
+            + json.dumps(
+                [dict(entry) for entry in files_read],
+                ensure_ascii=False,
+                allow_nan=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        )
+    return "\n\n".join(sections)
 
 
 # ---------------------------------------------------------------------------
@@ -990,20 +985,96 @@ def detect_loop(events: Sequence[LoopFingerprintEvent]) -> int:
     return loop_confirmations
 
 
-def _prompt_messages(payload: JsonObject) -> list[LLMMessage]:
-    return [
-        LLMMessage(
-            role="user",
-            content=json.dumps(
-                payload,
-                ensure_ascii=False,
-                allow_nan=False,
-                sort_keys=True,
-                separators=(",", ":"),
-            ),
-        ),
-        LLMMessage(role="user", content=_COMPACTION_INSTRUCTION),
+def _compact_messages(
+    shape: CompactRequestShape,
+    *,
+    covered_ids: frozenset[str],
+    summary_text: str | None,
+    exact_ids: frozenset[str],
+    completed_actions: Sequence[JsonObject] = (),
+    files_read: Sequence[JsonObject] = (),
+) -> list[LLMMessage]:
+    """Assemble the compact request as the main request's cache-stable prefix
+    plus the compaction instruction.
+
+    Order: system (byte-identical to the live request) → covered history
+    messages (main-request form, filtered by id) → prior-checkpoint background
+    (batch 2+) → exact inputs (current/resume, main-request form) → the
+    deterministic ledger segment (completed_actions/files_read — never in the
+    cache-stable prefix) → the instruction, which is always last (F1).
+    """
+    messages = [LLMMessage(role="system", content=shape.system_content)]
+    for entry in shape.history:
+        if entry.state_message_id in covered_ids:
+            messages.append(entry.message)
+    if summary_text:
+        messages.append(
+            LLMMessage(
+                role="user",
+                content=f"{_CHECKPOINT_PREAMBLE}\n\n{summary_text}",
+            )
+        )
+    for entry in shape.history:
+        if entry.state_message_id in exact_ids:
+            messages.append(entry.message)
+    if completed_actions or files_read:
+        messages.append(
+            LLMMessage(
+                role="user",
+                content=_render_deterministic_ledger(completed_actions, files_read),
+            )
+        )
+    messages.append(LLMMessage(role="user", content=_COMPACTION_INSTRUCTION))
+    return messages
+
+
+def _covered_ids(blocks: Sequence[MessageBlock]) -> frozenset[str]:
+    """All message ids spanned by the given blocks (the compactable interval)."""
+    return frozenset(
+        message_id for block in blocks for message_id in block.message_ids
+    )
+
+
+def _summary_text(summary: JsonObject | None) -> str | None:
+    if summary is None:
+        return None
+    text = summary.get("text")
+    if not isinstance(text, str) or not text:
+        return None
+    return text
+
+
+def _message_tokens(messages: Sequence[LLMMessage]) -> int:
+    """Estimate tokens over the provider-visible form of the messages."""
+    return _estimate_tokens([message.to_openai_format() for message in messages])
+
+
+def _compact_dynamic_tokens(
+    shape: CompactRequestShape,
+    *,
+    covered_ids: frozenset[str],
+    summary_text: str | None,
+    exact_ids: frozenset[str],
+    completed_actions: Sequence[JsonObject],
+    files_read: Sequence[JsonObject],
+) -> int:
+    """Estimate the compact request's per-batch dynamic segment (everything
+    except the static system + instruction, which `_budget` reserves)."""
+    parts: list[object] = [
+        entry.message.to_openai_format()
+        for entry in shape.history
+        if entry.state_message_id in covered_ids
     ]
+    if summary_text:
+        parts.append(f"{_CHECKPOINT_PREAMBLE}\n\n{summary_text}")
+    parts.extend(
+        entry.message.to_openai_format()
+        for entry in shape.history
+        if entry.state_message_id in exact_ids
+    )
+    if completed_actions or files_read:
+        parts.append(_render_deterministic_ledger(completed_actions, files_read))
+    return _estimate_tokens(parts)
 
 
 class _RepairableCompactOutput(RunCompactorError):
@@ -1058,13 +1129,25 @@ class RuntimeRunCompactorService:
         self._completion = completion
         self._input_loader = input_loader
 
-    def _budget(self, model: LLMModel, *, summary_output_limit: int):
+    def _budget(
+        self,
+        model: LLMModel,
+        *,
+        summary_output_limit: int,
+        shape: CompactRequestShape,
+    ):
+        # Reserve the cache-stable prefix (system + tools) plus the final
+        # instruction: those never vary per batch, so they must not consume the
+        # dynamic batch budget (covered + summary + exact + ledger). A large
+        # system prompt would otherwise misreport thread_summary_too_large.
         try:
             return ModelCapabilityResolver.runtime_budget(
                 model,
                 requested_max_output_tokens=summary_output_limit,
-                static_prompt_tokens=_estimate_tokens(_COMPACTION_INSTRUCTION),
-                tool_schema_tokens=0,
+                static_prompt_tokens=_estimate_tokens(
+                    [shape.system_content, _COMPACTION_INSTRUCTION]
+                ),
+                tool_schema_tokens=_estimate_tokens(shape.provider_tools),
                 reserved_runtime_tokens=2048,
                 safety_margin_tokens=256,
                 settings=self._settings,
@@ -1131,23 +1214,31 @@ class RuntimeRunCompactorService:
         *,
         model: LLMModel,
         agent_id: uuid.UUID | None,
+        shape: CompactRequestShape,
         summary: JsonObject | None,
         batch: Sequence[MessageBlock],
-        exact_inputs: Sequence[JsonObject],
+        exact_ids: frozenset[str],
         completed_actions: Sequence[JsonObject] = (),
         files_read: Sequence[JsonObject] = (),
         summary_budget: int,
         summary_output_limit: int,
     ) -> JsonObject:
-        payload = _payload(summary, batch, exact_inputs, completed_actions, files_read)
-        messages = _prompt_messages(payload)
+        covered_ids = _covered_ids(batch)
+        messages = _compact_messages(
+            shape,
+            covered_ids=covered_ids,
+            summary_text=_summary_text(summary),
+            exact_ids=exact_ids,
+            completed_actions=completed_actions,
+            files_read=files_read,
+        )
         try:
             step = await self._completion(
                 model,
                 messages,
-                tools=[],
+                tools=list(shape.provider_tools),
                 agent_id=agent_id,
-                supports_vision=False,
+                supports_vision=bool(model.supports_vision),
                 max_output_tokens=summary_output_limit,
                 thinking_disabled=True,
             )
@@ -1165,14 +1256,18 @@ class RuntimeRunCompactorService:
             result = _summary_from_step(step)
             # Shrink safety net: the merged checkpoint must be strictly smaller
             # than the input the model actually saw. The baseline is the
-            # projected covered messages (image binaries already reduced to
-            # bounded metadata in the prompt) plus, for an incremental merge
-            # (batch 2+), the prior summary — comparing against the raw batch
-            # alone would misclassify every tail batch, and against the
-            # unprojected batch would let oversized images mask a non-shrunk
-            # output. The deterministic degraded checkpoint below guarantees
+            # covered history messages replayed in main-request form plus, for
+            # an incremental merge (batch 2+), the prior summary — comparing
+            # against the raw batch alone would misclassify every tail batch.
+            # The deterministic degraded checkpoint below guarantees
             # boundedness only, not shrinking.
-            covered_tokens = _estimate_tokens(payload["covered_messages"])
+            covered_tokens = _message_tokens(
+                [
+                    entry.message
+                    for entry in shape.history
+                    if entry.state_message_id in covered_ids
+                ]
+            )
             if summary is not None:
                 covered_tokens += _estimate_tokens(summary)
             if _estimate_tokens(result["text"]) >= covered_tokens:
@@ -1188,9 +1283,10 @@ class RuntimeRunCompactorService:
                 first = await self._compact_batch(
                     model=model,
                     agent_id=agent_id,
+                    shape=shape,
                     summary=summary,
                     batch=batch[:midpoint],
-                    exact_inputs=exact_inputs,
+                    exact_ids=exact_ids,
                     completed_actions=completed_actions,
                     files_read=files_read,
                     summary_budget=summary_budget,
@@ -1199,9 +1295,10 @@ class RuntimeRunCompactorService:
                 second = await self._compact_batch(
                     model=model,
                     agent_id=agent_id,
+                    shape=shape,
                     summary=first,
                     batch=batch[midpoint:],
-                    exact_inputs=exact_inputs,
+                    exact_ids=exact_ids,
                     completed_actions=completed_actions,
                     files_read=files_read,
                     summary_budget=summary_budget,
@@ -1224,9 +1321,10 @@ class RuntimeRunCompactorService:
         *,
         model: LLMModel,
         agent_id: uuid.UUID | None,
+        shape: CompactRequestShape,
         existing_summary: JsonObject | None,
         blocks: Sequence[MessageBlock],
-        exact_inputs: Sequence[JsonObject],
+        exact_ids: frozenset[str],
         completed_actions: Sequence[JsonObject] = (),
         files_read: Sequence[JsonObject] = (),
         batch_budget: int,
@@ -1244,8 +1342,15 @@ class RuntimeRunCompactorService:
 
         while remaining:
             batch: list[MessageBlock] = []
-            base = _payload(summary, batch, exact_inputs, completed_actions, files_read)
-            if _estimate_tokens(base) > batch_budget:
+            base = _compact_dynamic_tokens(
+                shape,
+                covered_ids=frozenset(),
+                summary_text=_summary_text(summary),
+                exact_ids=exact_ids,
+                completed_actions=completed_actions,
+                files_read=files_read,
+            )
+            if base > batch_budget:
                 raise RunCompactorError(
                     "thread_summary_too_large",
                     "existing Thread Summary does not fit the compact model",
@@ -1253,8 +1358,13 @@ class RuntimeRunCompactorService:
             while remaining:
                 proposed = [*batch, remaining[0]]
                 if (
-                    _estimate_tokens(
-                        _payload(summary, proposed, exact_inputs, completed_actions, files_read)
+                    _compact_dynamic_tokens(
+                        shape,
+                        covered_ids=_covered_ids(proposed),
+                        summary_text=_summary_text(summary),
+                        exact_ids=exact_ids,
+                        completed_actions=completed_actions,
+                        files_read=files_read,
                     )
                     > batch_budget
                 ):
@@ -1268,9 +1378,10 @@ class RuntimeRunCompactorService:
             summary = await self._compact_batch(
                 model=model,
                 agent_id=agent_id,
+                shape=shape,
                 summary=summary,
                 batch=batch,
-                exact_inputs=exact_inputs,
+                exact_ids=exact_ids,
                 completed_actions=completed_actions,
                 files_read=files_read,
                 summary_budget=summary_budget,
@@ -1308,6 +1419,12 @@ class RuntimeRunCompactorService:
         if not _should_compact(inputs):
             return RunCompactResult()
 
+        if inputs.request_shape is None:
+            raise RunCompactorError(
+                "missing_request_shape",
+                "Thread Compact requires the business request's cache-stable prefix",
+            )
+        shape = inputs.request_shape
         assert inputs.effective_input_budget is not None
         budgets = compact_context_budgets(inputs.effective_input_budget)
         blocks = build_message_blocks(messages, inputs.ledger)
@@ -1358,31 +1475,30 @@ class RuntimeRunCompactorService:
             self._budget(
                 inputs.model,
                 summary_output_limit=summary_output_limit,
+                shape=shape,
             ).effective_runtime_budget,
-        )
-        summary_blocks = _summary_ready_blocks(
-            compactable,
-            ledger=inputs.ledger,
         )
         completed_actions = build_completed_actions(inputs.executions)
         files_read = build_files_read(inputs.executions)
-        exact_inputs = tuple(
-            dict(message)
+        exact_ids = frozenset(
+            message.get("id")
             for block in retained
             if _protected_block(block, protected_ids)
             for message in block.messages
             if message.get("runtime_input") in {"current", "resume"}
+            and isinstance(message.get("id"), str)
         )
         summary = await self._compact_batches(
             model=inputs.model,
             agent_id=agent_id,
+            shape=shape,
             existing_summary=(
                 dict(cast(Mapping[str, JsonValue], raw_summary))
                 if raw_summary is not None
                 else None
             ),
-            blocks=summary_blocks,
-            exact_inputs=exact_inputs,
+            blocks=compactable,
+            exact_ids=exact_ids,
             completed_actions=completed_actions,
             files_read=files_read,
             batch_budget=compact_model_budget,

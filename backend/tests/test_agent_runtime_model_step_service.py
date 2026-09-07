@@ -22,6 +22,7 @@ from app.services.agent_runtime.group_handoff import GroupAgentHandoffError, Gro
 from app.services.agent_runtime.model_step_service import (
     RuntimeModelCallError,
     RuntimeModelStepService,
+    _build_history_messages,
     _complete_skill_read,
     _group_mention_mismatches,
     _message_token_counter,
@@ -470,6 +471,73 @@ def test_prompt_messages_restore_provider_tool_call_pairing() -> None:
     assert assistant.tool_calls[0]["id"] == "provider-call-1"
     assert "provider_call_id" not in assistant.tool_calls[0]
     assert tool.tool_call_id == "provider-call-1"
+
+
+@pytest.mark.parametrize(
+    "initial_input",
+    [
+        {"message_id": "current-image", "input_content": "Inspect it"},
+        {
+            "message_id": "current-image",
+            "input_content": "Begin the onboarding flow",
+            "onboarding_target_phase": "kickoff",
+        },
+    ],
+)
+def test_build_history_messages_is_byte_deterministic_across_calls(
+    initial_input: dict,
+) -> None:
+    """The cache-stable history prefix serializes byte-identically across
+    repeated calls — no leaked seen-id / provider-call-id state and no per-call
+    randomness — including for onboarding runs."""
+    build = _build(
+        current_run={"run_id": str(uuid.uuid4()), "goal": "Inspect"},
+        recent_session_messages_snapshot=(),
+        recent_thread_messages=(
+            {
+                "id": "assistant-1",
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call-instance-1",
+                        "type": "function",
+                        "function": {
+                            "name": "read_file",
+                            "arguments": '{"path":"README.md"}',
+                        },
+                    }
+                ],
+                "provider_call_ids": {"call-instance-1": "provider-call-1"},
+            },
+            {
+                "id": "tool-result-1",
+                "role": "tool",
+                "tool_call_id": "call-instance-1",
+                "content": "contents",
+            },
+            {
+                "id": "current-image",
+                "role": "user",
+                "content": initial_input["input_content"],
+                "runtime_input": "current",
+            },
+        ),
+        initial_input=initial_input,
+    )
+
+    def serialized() -> str:
+        entries = _build_history_messages(build)
+        return json.dumps(
+            [entry.message.to_openai_format() for entry in entries],
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+
+    first = serialized()
+    assert first
+    assert serialized() == first
+    assert serialized() == first
 
 
 @pytest.mark.parametrize(

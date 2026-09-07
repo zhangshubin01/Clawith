@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from typing import Any, cast
 
 import pytest
 
@@ -29,6 +30,8 @@ from app.services.agent_runtime.node_executor import (
     ToolStepResult,
 )
 from app.services.agent_runtime.run_compactor import (
+    CompactHistoryMessage,
+    CompactRequestShape,
     RunCompactInputs,
     RuntimeRunCompactorService,
     settle_step_messages,
@@ -43,6 +46,7 @@ from app.services.agent_runtime.state import (
 from app.services.agent_runtime.tool_exchange import (
     validate_tool_exchange_integrity,
 )
+from app.services.llm.client import LLMMessage
 from app.services.llm.single_step import LLMCompletionStep
 from app.services.token_tracker import TokenUsage
 
@@ -246,10 +250,10 @@ async def test_settlement_and_compaction_interleave_without_double_synthesis() -
     # Real Thread Compact over the settled history.
     state = _compact_state(run_id, list(settlement.messages))
     context = _context(run_id, state)
-    payloads: list[dict] = []
+    prompts: list[list] = []
 
     async def complete(_model, prompt, **_kwargs):
-        payloads.append(json.loads(prompt[0].content))
+        prompts.append(prompt)
         return _step()
 
     compact_result = await _compact_service(complete).compact_if_needed(
@@ -258,7 +262,7 @@ async def test_settlement_and_compaction_interleave_without_double_synthesis() -
     )
     assert compact_result.compacted is True
     assert compact_result.recent_messages is not None
-    covered = json.dumps(payloads, ensure_ascii=False)
+    covered = "".join(_serialize_prompt(prompt) for prompt in prompts)
     assert "historical_tool_exchange" in covered  # settled facts feed the summary
 
     # Settlement over the post-compact history.
@@ -613,7 +617,7 @@ def _context(
 
 def _compact_service(completion) -> RuntimeRunCompactorService:
     async def load(
-        _state: RuntimeGraphState,
+        state: RuntimeGraphState,
         _context: RuntimeContext,
     ) -> RunCompactInputs:
         from app.models.llm import LLMModel
@@ -634,6 +638,7 @@ def _compact_service(completion) -> RuntimeRunCompactorService:
             effective_input_budget=1000,
             current_input_tokens=900,
             executions=[],
+            request_shape=_request_shape(list(state["messages"])),  # type: ignore[typeddict-item]
         )
 
     from app.config import Settings
@@ -642,4 +647,33 @@ def _compact_service(completion) -> RuntimeRunCompactorService:
         settings=Settings(_env_file=None),
         completion=completion,
         input_loader=load,
+    )
+
+
+def _request_shape(messages: list[JsonObject]) -> CompactRequestShape:
+    """A minimal cache-stable prefix reconstructed from the state messages."""
+    history = tuple(
+        CompactHistoryMessage(
+            message=LLMMessage(
+                role=cast(Any, message.get("role")),
+                content=message.get("content"),
+            ),
+            state_message_id=(
+                message.get("id") if isinstance(message.get("id"), str) else None
+            ),
+        )
+        for message in messages
+        if message.get("role") in {"user", "assistant", "tool"}
+    )
+    return CompactRequestShape(
+        system_content="test-system-prompt",
+        provider_tools=(),
+        history=history,
+    )
+
+
+def _serialize_prompt(messages: list[LLMMessage]) -> str:
+    return json.dumps(
+        [message.to_openai_format() for message in messages],
+        ensure_ascii=False,
     )

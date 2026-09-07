@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import json
 import uuid
+from typing import Any, cast
 
 import pytest
 
@@ -13,11 +14,15 @@ from app.models.llm import LLMModel
 from app.services.agent_runtime.model_capabilities import ModelCapabilityError
 from app.services.agent_runtime.run_compactor import (
     _COMPACTION_INSTRUCTION,
+    CompactHistoryMessage,
+    CompactRequestShape,
     RunCompactInputs,
     RunCompactorError,
     RuntimeRunCompactorService,
     TransientRunCompactorError,
+    settle_step_messages,
 )
+from app.services.llm.client import LLMMessage
 from app.services.agent_runtime.state import (
     JsonObject,
     RunInputSnapshots,
@@ -176,6 +181,35 @@ def _step(**overrides: str) -> LLMCompletionStep:
     )
 
 
+def _request_shape(messages: list[JsonObject]) -> CompactRequestShape:
+    """A minimal cache-stable prefix reconstructed from the state messages."""
+    history = tuple(
+        CompactHistoryMessage(
+            message=LLMMessage(
+                role=cast(Any, message.get("role")),
+                content=message.get("content"),
+            ),
+            state_message_id=(
+                message.get("id") if isinstance(message.get("id"), str) else None
+            ),
+        )
+        for message in messages
+        if message.get("role") in {"user", "assistant", "tool"}
+    )
+    return CompactRequestShape(
+        system_content="test-system-prompt",
+        provider_tools=(),
+        history=history,
+    )
+
+
+def _serialize_prompt(messages: list[LLMMessage]) -> str:
+    return json.dumps(
+        [message.to_openai_format() for message in messages],
+        ensure_ascii=False,
+    )
+
+
 def _service(
     *,
     model: LLMModel,
@@ -185,7 +219,7 @@ def _service(
     ledger: dict | None = None,
 ) -> RuntimeRunCompactorService:
     async def load(
-        _state: RuntimeGraphState,
+        state: RuntimeGraphState,
         _context: RuntimeContext,
     ) -> RunCompactInputs:
         return RunCompactInputs(
@@ -193,6 +227,7 @@ def _service(
             ledger=ledger or {},
             effective_input_budget=effective_budget,
             current_input_tokens=current_tokens,
+            request_shape=_request_shape(list(state["messages"])),  # type: ignore[typeddict-item]
         )
 
     return RuntimeRunCompactorService(
@@ -366,7 +401,7 @@ async def test_compact_completion_requests_thinking_disabled() -> None:
 
 
 @pytest.mark.asyncio
-async def test_large_image_base64_is_excluded_from_recent_budget_and_compact_prompt() -> None:
+async def test_large_image_base64_is_budgeted_by_context_tokens_not_char_count() -> None:
     padded_png = base64.b64encode(
         base64.b64decode(_TINY_PNG_BASE64) + b"x" * (64 * 1024)
     ).decode("ascii")
@@ -379,10 +414,10 @@ async def test_large_image_base64_is_excluded_from_recent_budget_and_compact_pro
         },
     ]
     state, context, tenant_id = _state(messages)
-    payloads: list[dict] = []
+    prompts: list[list] = []
 
     async def complete(_model, prompt, **_kwargs):
-        payloads.append(json.loads(prompt[0].content))
+        prompts.append(prompt)
         return _step()
 
     result = await _service(
@@ -395,9 +430,11 @@ async def test_large_image_base64_is_excluded_from_recent_budget_and_compact_pro
     assert result.compacted is True
     assert result.recent_messages is not None
     assert result.recent_messages[-1]["content"] == marker
-    serialized = json.dumps(payloads, ensure_ascii=False)
-    assert "base64," not in serialized
-    assert "image omitted from compact prompt" in serialized
+    # F2 replays the exact input in main-request form (no image-omission
+    # downgrade); the 64KB base64 is token-estimated via context tokens, so it
+    # must not blow the recent budget and the compaction must succeed.
+    serialized = _serialize_prompt(prompts[0])
+    assert "image_data" in serialized
 
 
 @pytest.mark.asyncio
@@ -411,10 +448,10 @@ async def test_long_single_run_compacts_safe_work_after_exact_current_input() ->
         _normal("recent", "recent result"),
     ]
     state, context, tenant_id = _state(messages)
-    payloads: list[dict] = []
+    prompts: list[list] = []
 
     async def complete(_model, prompt, **_kwargs):
-        payloads.append(json.loads(prompt[0].content))
+        prompts.append(prompt)
         return _step()
 
     result = await _service(
@@ -432,8 +469,10 @@ async def test_long_single_run_compacts_safe_work_after_exact_current_input() ->
         "recent",
     ]
     assert result.recent_messages[0]["content"] == "EXACT CURRENT INPUT"
-    assert payloads[0]["authoritative_exact_inputs"][0]["content"] == (
-        "EXACT CURRENT INPUT"
+    # The exact current input is replayed verbatim in the compact request.
+    assert any(
+        message.role == "user" and message.content == "EXACT CURRENT INPUT"
+        for message in prompts[0]
     )
 
 
@@ -503,10 +542,10 @@ async def test_prior_run_plain_candidates_and_repairs_never_enter_compact_summar
     ]
     state, context, tenant_id = _state(messages)
     state["messages"][-1]["runtime_run_id"] = context.run_id  # type: ignore[index]
-    payloads: list[dict] = []
+    prompts: list[list] = []
 
     async def complete(_model, prompt, **_kwargs):
-        payloads.append(json.loads(prompt[0].content))
+        prompts.append(prompt)
         return _step()
 
     result = await _service(
@@ -516,7 +555,7 @@ async def test_prior_run_plain_candidates_and_repairs_never_enter_compact_summar
         current_tokens=900,
     ).compact_if_needed(state, context)
 
-    serialized_payload = json.dumps(payloads, ensure_ascii=False)
+    serialized_payload = _serialize_prompt(prompts[0])
     assert "PRIVATE REPLACED DRAFT" not in serialized_payload
     assert "THREAD TERMINAL CANDIDATE" not in serialized_payload
     assert FINISH_PROTOCOL_REMINDER not in serialized_payload
@@ -551,10 +590,10 @@ async def test_current_run_repair_state_stays_raw_but_out_of_compact_prompt() ->
     state, context, tenant_id = _state(messages)
     for message in state["messages"][1:]:  # type: ignore[index]
         message["runtime_run_id"] = context.run_id
-    payloads: list[dict] = []
+    prompts: list[list] = []
 
     async def complete(_model, prompt, **_kwargs):
-        payloads.append(json.loads(prompt[0].content))
+        prompts.append(prompt)
         return _step()
 
     result = await _service(
@@ -570,11 +609,12 @@ async def test_current_run_repair_state_stays_raw_but_out_of_compact_prompt() ->
         "current-draft",
         "current-repair",
     ]
-    exact_inputs = payloads[0]["authoritative_exact_inputs"]
-    assert [message["id"] for message in exact_inputs] == ["current"]
-    serialized_payload = json.dumps(payloads, ensure_ascii=False)
-    assert "CURRENT PRIVATE DRAFT" not in serialized_payload
-    assert FINISH_PROTOCOL_REMINDER not in serialized_payload
+    # Only the current input is replayed into the compact request; the repair
+    # draft and repair reminder stay raw (retained) but out of the prompt.
+    serialized_prompt = _serialize_prompt(prompts[0])
+    assert "EXACT CURRENT INPUT" in serialized_prompt
+    assert "CURRENT PRIVATE DRAFT" not in serialized_prompt
+    assert FINISH_PROTOCOL_REMINDER not in serialized_prompt
 
 
 @pytest.mark.asyncio
@@ -714,36 +754,60 @@ async def test_cancelled_not_started_exchange_can_enter_summary() -> None:
 
 @pytest.mark.asyncio
 async def test_oversized_settled_exchange_enters_summary_as_facts_and_refs() -> None:
+    ledger = {
+        "call-1": {
+            "status": "succeeded",
+            "tool_name": "lookup",
+            "result_summary": "found the answer",
+            "result_ref": "result://call-1",
+            "request_ref": "request://call-1",
+        }
+    }
     messages = [
         _assistant("assistant-tools", "call-1"),
         _tool_result("result-1", "call-1", content="x" * 30_000),
         {**_normal("current", "exact"), "runtime_input": "current"},
     ]
-    state, context, tenant_id = _state(messages)
-    payloads: list[dict] = []
+    # Production order: the executor settles the completed exchange into a
+    # deterministic synthetic message before Thread Compact; the covered span
+    # then replays that synthetic raw (no re-synthesis in the compact prompt).
+    settlement = settle_step_messages(
+        messages,
+        ledger,
+        effective_input_budget=1_000,
+        current_input_id="current",
+        current_run_id=str(uuid.uuid4()),
+    )
+    state, context, tenant_id = _state(list(settlement.messages))
+    prompts: list[list] = []
 
     async def complete(_model, prompt, **_kwargs):
-        payloads.append(json.loads(prompt[0].content))
-        return _step()
+        prompts.append(prompt)
+        # A short summary keeps the shrink check (summary < covered synthetic)
+        # and the summary budget satisfied while the synthetic stays covered.
+        return _step(
+            **{
+                "Primary Request and Intent": "go",
+                "Key Technical Concepts": "x",
+                "Files and Code": "f",
+                "Errors and Fixes": "none",
+                "Pending Jobs": "none",
+                "Current Work": "w",
+                "Next Step": "n",
+                "Critical Context": "c",
+            }
+        )
 
     result = await _service(
         model=_model(tenant_id, input_tokens=5_000),
         completion=complete,
-        effective_budget=1_000,
-        current_tokens=900,
-        ledger={
-            "call-1": {
-                "status": "succeeded",
-                "tool_name": "lookup",
-                "result_summary": "found the answer",
-                "result_ref": "result://call-1",
-                "request_ref": "request://call-1",
-            }
-        },
+        effective_budget=400,
+        current_tokens=360,
+        ledger=ledger,
     ).compact_if_needed(state, context)
 
     assert result.compacted is True
-    serialized = json.dumps(payloads, ensure_ascii=False)
+    serialized = _serialize_prompt(prompts[0])
     assert "historical_tool_exchange" in serialized
     assert "result://call-1" in serialized
     assert "request://call-1" in serialized
@@ -947,7 +1011,7 @@ async def test_length_output_splits_batch_instead_of_repeating_same_prompt() -> 
 
 
 @pytest.mark.asyncio
-async def test_compaction_instruction_is_final_user_message_without_system() -> None:
+async def test_compaction_instruction_is_final_user_message_after_system_prefix() -> None:
     state, context, tenant_id = _state(
         [_normal("old", "old " * 300), _normal("current")]
     )
@@ -967,12 +1031,12 @@ async def test_compaction_instruction_is_final_user_message_without_system() -> 
     assert result.compacted is True
     assert len(prompts) == 1
     messages = prompts[0]
-    assert len(messages) == 2
-    assert all(message.role != "system" for message in messages)
-    assert messages[0].role == "user"
-    json.loads(messages[0].content)
-    assert messages[1].role == "user"
-    instruction = messages[1].content
+    # F2 keeps the byte-identical system message first; the instruction is
+    # still the final user message.
+    assert messages[0].role == "system"
+    assert messages[-1].role == "user"
+    instruction = messages[-1].content
+    assert isinstance(instruction, str)
     for section in (
         "## Primary Request and Intent",
         "## Key Technical Concepts",

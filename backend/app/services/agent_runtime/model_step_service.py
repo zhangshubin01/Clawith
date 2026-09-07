@@ -67,6 +67,8 @@ from app.services.agent_runtime.no_progress import (
     no_progress_message,
 )
 from app.services.agent_runtime.run_compactor import (
+    CompactHistoryMessage,
+    CompactRequestShape,
     LoopFingerprintEvent,
     RunCompactInputs,
     detect_loop,
@@ -1462,6 +1464,150 @@ def _turn_anchor_text(build: RuntimeContextBuild) -> str | None:
     return content
 
 
+def _build_history_message(
+    raw: Mapping[str, object],
+    build: RuntimeContextBuild,
+    *,
+    seen_message_ids: set[str],
+    provider_call_ids: dict[str, str],
+    read_dedup: Mapping[str, Mapping[str, Any]] | None,
+    bypass_dedup: bool = False,
+) -> LLMMessage | None:
+    """Convert one history message to its provider-visible ``LLMMessage`` form.
+
+    This is the single transformation shared by the live model request
+    (``_prompt_messages``) and the compact request shape
+    (``_build_history_messages``), so the cache-stable prefix is byte-identical
+    in both. It performs the role filter, message-id dedup, provider call-id
+    rewrite, content conversion via ``_model_message_content``, and read-dedup
+    placeholder — and nothing else. The ``initial_message_seen`` side effect
+    belongs to ``_prompt_messages``, not here.
+    """
+    role = raw.get("role")
+    if role not in {"user", "assistant", "tool"}:
+        return None
+    message_id = raw.get("id")
+    if isinstance(message_id, str) and not bypass_dedup:
+        if message_id in seen_message_ids:
+            return None
+        seen_message_ids.add(message_id)
+    raw_tool_calls = raw.get("tool_calls")
+    provider_tool_calls: list[dict] | None = None
+    raw_provider_call_ids = raw.get("provider_call_ids")
+    if not isinstance(raw_provider_call_ids, Mapping):
+        additional_kwargs = raw.get("additional_kwargs")
+        raw_provider_call_ids = (
+            additional_kwargs.get("provider_call_ids")
+            if isinstance(additional_kwargs, Mapping)
+            else {}
+        )
+    if not isinstance(raw_provider_call_ids, Mapping):
+        raw_provider_call_ids = {}
+    if isinstance(raw_tool_calls, list):
+        provider_tool_calls = []
+        for raw_call in raw_tool_calls:
+            if not isinstance(raw_call, Mapping):
+                continue
+            call = deepcopy(dict(raw_call))
+            call_instance_id = call.get("id")
+            provider_call_id = call.pop("provider_call_id", None)
+            if not isinstance(provider_call_id, str) and isinstance(
+                call_instance_id, str
+            ):
+                provider_call_id = raw_provider_call_ids.get(call_instance_id)
+            if isinstance(call_instance_id, str) and isinstance(
+                provider_call_id, str
+            ):
+                provider_call_ids[call_instance_id] = provider_call_id
+                call["id"] = provider_call_id
+            provider_tool_calls.append(call)
+    raw_tool_call_id = raw.get("tool_call_id")
+    provider_tool_call_id = (
+        provider_call_ids.get(raw_tool_call_id, raw_tool_call_id)
+        if isinstance(raw_tool_call_id, str)
+        else None
+    )
+    content = _model_message_content(raw, build)
+    if (
+        read_dedup
+        and role == "tool"
+        and isinstance(raw_tool_call_id, str)
+        and raw_tool_call_id in read_dedup
+    ):
+        # Soft placeholder: the repeated read_file body is dropped, but the
+        # tool result stays a legal tool result (tool_call_id preserved).
+        info = read_dedup[raw_tool_call_id]
+        content = read_dedup_placeholder(
+            str(info.get("path") or ""),
+            int(info.get("seen_count") or 0),
+            content if isinstance(content, str) else None,
+        )
+    return LLMMessage(
+        role=cast(str, role),  # type: ignore[arg-type]
+        content=content,
+        tool_calls=provider_tool_calls,
+        tool_call_id=provider_tool_call_id,
+        is_error=(
+            role == "tool"
+            and raw.get("execution_status") in {"failed", "unknown"}
+        ),
+        reasoning_content=(
+            cast(str, raw.get("reasoning_content")) if isinstance(raw.get("reasoning_content"), str) else None
+        ),
+    )
+
+
+def _build_history_messages(
+    build: RuntimeContextBuild,
+    *,
+    read_dedup: Mapping[str, Mapping[str, Any]] | None = None,
+) -> list[CompactHistoryMessage]:
+    """Build the business request's cache-stable history prefix.
+
+    Iterates the FULL history (session snapshot + visible thread messages,
+    including the final user message) through ``_build_history_message`` — the
+    same transformation the live request applies. The result is what the
+    compact request replays verbatim for its covered/exact spans.
+    """
+    history_raw: list[Mapping[str, object]] = list(
+        build.recent_session_messages_snapshot
+    )
+    current_run_id = build.current_run.get("run_id")
+    thread_messages = (
+        model_visible_thread_messages(
+            build.recent_thread_messages,
+            current_run_id=current_run_id,
+        )
+        if isinstance(current_run_id, str) and current_run_id
+        else build.recent_thread_messages
+    )
+    history_raw.extend(thread_messages)
+
+    seen_message_ids: set[str] = set()
+    provider_call_ids: dict[str, str] = {}
+    entries: list[CompactHistoryMessage] = []
+    for raw in history_raw:
+        message = _build_history_message(
+            raw,
+            build,
+            seen_message_ids=seen_message_ids,
+            provider_call_ids=provider_call_ids,
+            read_dedup=read_dedup,
+        )
+        if message is None:
+            continue
+        raw_message_id = raw.get("id")
+        entries.append(
+            CompactHistoryMessage(
+                message=message,
+                state_message_id=(
+                    raw_message_id if isinstance(raw_message_id, str) else None
+                ),
+            )
+        )
+    return entries
+
+
 def _prompt_messages(
     *,
     static_prompt: str,
@@ -1523,86 +1669,17 @@ def _prompt_messages(
 
     def make_message(raw: Mapping[str, object], *, bypass_dedup: bool = False) -> LLMMessage | None:
         nonlocal initial_message_seen
-        role = raw.get("role")
-        if role not in {"user", "assistant", "tool"}:
-            return None
-        message_id = raw.get("id")
-        if isinstance(message_id, str) and not bypass_dedup:
-            if message_id in seen_message_ids:
-                return None
-            seen_message_ids.add(message_id)
-        initial_message_seen = initial_message_seen or (
-            role == "user"
-            and (
-                isinstance(initial_message_id, str)
-                and message_id == initial_message_id
-                or raw.get("runtime_input") in {"current", "resume"}
-            )
+        message = _build_history_message(
+            raw,
+            build,
+            seen_message_ids=seen_message_ids,
+            provider_call_ids=provider_call_ids,
+            read_dedup=read_dedup,
+            bypass_dedup=bypass_dedup,
         )
-        raw_tool_calls = raw.get("tool_calls")
-        provider_tool_calls: list[dict] | None = None
-        raw_provider_call_ids = raw.get("provider_call_ids")
-        if not isinstance(raw_provider_call_ids, Mapping):
-            additional_kwargs = raw.get("additional_kwargs")
-            raw_provider_call_ids = (
-                additional_kwargs.get("provider_call_ids")
-                if isinstance(additional_kwargs, Mapping)
-                else {}
-            )
-        if not isinstance(raw_provider_call_ids, Mapping):
-            raw_provider_call_ids = {}
-        if isinstance(raw_tool_calls, list):
-            provider_tool_calls = []
-            for raw_call in raw_tool_calls:
-                if not isinstance(raw_call, Mapping):
-                    continue
-                call = deepcopy(dict(raw_call))
-                call_instance_id = call.get("id")
-                provider_call_id = call.pop("provider_call_id", None)
-                if not isinstance(provider_call_id, str) and isinstance(
-                    call_instance_id, str
-                ):
-                    provider_call_id = raw_provider_call_ids.get(call_instance_id)
-                if isinstance(call_instance_id, str) and isinstance(
-                    provider_call_id, str
-                ):
-                    provider_call_ids[call_instance_id] = provider_call_id
-                    call["id"] = provider_call_id
-                provider_tool_calls.append(call)
-        raw_tool_call_id = raw.get("tool_call_id")
-        provider_tool_call_id = (
-            provider_call_ids.get(raw_tool_call_id, raw_tool_call_id)
-            if isinstance(raw_tool_call_id, str)
-            else None
-        )
-        content = _model_message_content(raw, build)
-        if (
-            read_dedup
-            and role == "tool"
-            and isinstance(raw_tool_call_id, str)
-            and raw_tool_call_id in read_dedup
-        ):
-            # Soft placeholder: the repeated read_file body is dropped, but the
-            # tool result stays a legal tool result (tool_call_id preserved).
-            info = read_dedup[raw_tool_call_id]
-            content = read_dedup_placeholder(
-                str(info.get("path") or ""),
-                int(info.get("seen_count") or 0),
-                content if isinstance(content, str) else None,
-            )
-        return LLMMessage(
-            role=cast(str, role),  # type: ignore[arg-type]
-            content=content,
-            tool_calls=provider_tool_calls,
-            tool_call_id=provider_tool_call_id,
-            is_error=(
-                role == "tool"
-                and raw.get("execution_status") in {"failed", "unknown"}
-            ),
-            reasoning_content=(
-                cast(str, raw.get("reasoning_content")) if isinstance(raw.get("reasoning_content"), str) else None
-            ),
-        )
+        if message is not None and message.role == "user" and is_initial_input(raw):
+            initial_message_seen = True
+        return message
 
     def is_initial_input(raw: Mapping[str, object]) -> bool:
         message_id = raw.get("id")
@@ -2372,7 +2449,11 @@ class RuntimeModelStepService:
         """Profile the exact business request shape used by the Compact node."""
         model, agent, ledger, executions = await self._load(context, state)
         is_native_group = _is_group_agent_run(state)
-        allow_user_wait = not _is_public_group_chat_run(state)
+        # F-A: tool-construction params must mirror complete_once exactly, or
+        # onboarding runs would gain a user_wait tool here that the main request
+        # lacks — a guaranteed prefix-cache miss.
+        onboarding_run = _is_onboarding_run(state)
+        allow_user_wait = not _is_public_group_chat_run(state) and not onboarding_run
         application_tools = (
             with_group_runtime_tools(
                 await self._tool_provider(agent.id),
@@ -2451,12 +2532,20 @@ class RuntimeModelStepService:
                 ),
             }
         )
+        request_shape = CompactRequestShape(
+            system_content=(
+                static_prompt + _MESSAGE_LAYOUT_NOTE + LIST_NUMBERING_CONTRACT
+            ),
+            provider_tools=tuple(_provider_tools(tools)),
+            history=tuple(_build_history_messages(build)),
+        )
         return RunCompactInputs(
             model=model,
             ledger=ledger,
             effective_input_budget=budget.effective_runtime_budget,
             current_input_tokens=current_input_tokens,
             executions=executions,
+            request_shape=request_shape,
         )
 
     async def _prepare_messages(
