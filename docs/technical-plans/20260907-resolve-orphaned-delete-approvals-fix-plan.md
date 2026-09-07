@@ -1,7 +1,7 @@
 # 生产级修复方案：S2 —— 3 条孤儿 pending delete_files 审批的根治
 
 日期：2026-09-07
-状态：implemented（代码 + 测试 + 双轴 code-review 已落地；`--apply` 生产数据对账待用户确认执行，执行并验证 §5 验收 1/2 后回写 §9.3 红线）
+状态：implemented + `--apply` 已执行（代码 + 测试 + 双轴 code-review 落地；2026-09-07 `--apply` 生产数据已对账——3 条孤儿全 rejected、0 pending，逐 run 实测见 §5.1）
 前置：`20260905-maintainer-gate-g3-g4-production-plan.md`（§8.2 雷 1 / §9.2 S2 / §9.3 验收红线「3 条 pending 已 resolve」）；门控已落地 `aa539999`。
 裁决：**评审通过**（7 角度逐条通过；Q2/Q5 附「已知风险 + 缓解」标注）。
 
@@ -173,3 +173,20 @@
 4. `resolve_approval` 默认路径回归测试全绿（`pytest backend/tests/…resolve_approval…` 相关）。
 
 同时回写 `20260905-maintainer-gate-g3-g4-production-plan.md` §9.3 的「3 条 pending 已 resolve」为 ✅，并在此文档状态行标注 implemented + 实现 commit。
+
+### 5.1 实测结果（2026-09-07 `--apply`，生产数据）
+
+| 验收 | 结果 | 证据 |
+|---|---|---|
+| 1 pending delete_files = 0 | ✅ | `--apply` 后 3 条全 `status=rejected`（`resolved_at=14:05 UTC`、`resolved_by=creator 16820bb9`）；dry-run 重跑 `0 target` |
+| 2 三 run 脱离 waiting_user | ⚠️ 部分（如实） | 见下 |
+| 3 无新增审批 / group 未受影响 | ✅ | `SELECT count(*) … pending delete_files` = 0；无 group pending |
+| 4 回归测试全绿 | ✅ | resolve_approval 相关 pytest 22 passed（autonomy 集 31 passed） |
+
+**验收 2 逐 run 实测**：
+
+- `1211274c` ✅ **run_completed**（14:08:13）：resume 一次模型推理后直接收敛（wait 节点消费，checkpoint step 619→706，末事件 `run_completed`）。
+- `5c8dc096` ⏳ **resume 后重新活跃执行**：从 14:08 起持续改代码 + `android_compile`，至 15:43 仍在工具调用/流式输出（16 天前「优化 android 项目」任务被 resume 续跑，非「一次推理即止」）。
+- `8ea0a5a3` ⚠️ **resume 被 worker 拒绝为 `thread_not_started`**：其 graph 从未在共享 thread `10c52b04` 上落 checkpoint（该 thread 全部 `clawith_run_id=5c8dc096`，属「多 run 共 thread」历史遗留）。审批 `3ae339cc` 已 rejected（孤儿已清），但 run 事件仍停 `waiting_started`（虚等待，无 graph interrupt 可 resume）。
+
+**与方案预估的两处偏差（如实记录）**：① Q2 预估 resume 成本「~3 次 token」，实测 `5c8dc096` 触发完整任务续跑（>1.5h，模型继续 Android 任务），成本被低估一个量级；② §2.2 假设「两 thread 各 3 checkpoint」未识别 thread `10c52b04` 被 `5c8dc096`/`8ea0a5a3` 共享、checkpoint 全属前者，故 `8ea0a5a3` 无 graph 可 resume。两者均不影响核心目标（3 孤儿审批已 rejected、无新孤儿、门控接管），但 `8ea0a5a3` 的虚 `waiting_user` 事件残留为「共 thread 幽灵 run」遗留（可选 `cancel_run` 终结，非本票必需）。
