@@ -150,8 +150,6 @@
   - P1 分类门：`backend/app/services/agent_runtime/heartbeat_completion.py` 新增 `_classify_seed_kinds`（批量 LLM structured-output JSON，fail-closed→None 兜底现状 task 行为）+ 分类路由（learning→completed、task→in_progress）+ 单调护栏（heartbeat 源 completed 项不回退）+ `handle` 传 `model_id`/`tenant_id`。零新依赖。
   - 测试：`backend/tests/test_agent_runtime_heartbeat_completion.py` 新增 6 用例（learning→completed、不确定兜底、单调护栏、JSON 解析、去 code fence、调用失败→None）。
 - **Phase 5 闭环已复核**：Spec 轴（diff 逐行对照方案，无夹带、拒绝的 P2/TTL 未实现）+ Standards 轴（`ruff check` 通过、`scripts/arch-guard.sh` 通过、宪法 C1-C6 合规）。`pytest` 两文件 **30 passed**。
-- **剩余两项（待用户决定）**：
-  1. **部署**（未做）：代码未部署到生产容器 `clawith-agent-backend-1`（跑旧代码）。部署后下一个心跳分类门自动把 Seeds 里结论→completed，73 条卡死自动转入「已完成」。走 skill `clawith-prod-deploy`。
-  2. **P0-b 数据清淤（可选）**：手动把生产 reflections.md 的 Seeds 段 25+ 条结论移入 Insights（属数据卫生；P1 部署后 Focus 表已不再卡死，故非必需，且是 agent 自治记忆文件写操作，需用户点头）。
-
-请确认下一步：**（1）部署（走 clawith-prod-deploy）；（2）P0-b 数据清淤；还是（3）到此为止？**
+- **部署（已完成，2026-09-08）**：commit `cb681b8d` 上线，worktree `/tmp/clawith-deploy-cb681b8d`（勿删），回滚标签 `clawith-agent-backend:pre-cb681b8d-a53eee251af9`，registry last_deploys[0]=cb681b8d success。部署后验证全过（分类门特征 14 处命中、三处模板契约命中、alembic head=f077 无迁移、frontend 200、LAN 192.168.1.62 拒绝、health 200、沙箱冒烟 exit 0）。
+- **P0-b 数据清淤（已完成，2026-09-08）**：7 个受影响 agent 的 reflections.md 共 **43 条**结论/心跳核验记录从 Seeds 段移入 Insights 段（950a1943=21、62bc9c81=6、27d55a64=4、b1a73489=5、ddc779e3=4、b05d3a82=2、82dc9a8a=1），Seeds 段残留结论归零、只留合法动作；475264c9（7 条版本 watch）等「持续/等待型」seed 属合法动作未动。备份在容器 `/tmp/reflections-backup-20260908/` + 宿主 scratchpad `reflections-backup-20260908/`。
+- **收尾（自动，无需手动）**：下一个心跳周期，退休路径（`stale = heartbeat_keys - seed_keys`）自动把 43 条消失的 seed complete；剩余动作型 seed 由 P1 分类门判 task/learning。73 条卡死 in_progress 将在下一心跳批量转入「已完成」。
