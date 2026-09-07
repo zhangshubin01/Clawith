@@ -157,6 +157,11 @@ from app.services.agent_runtime.tool_registry import (
     STATIC_REGISTERED_TOOL_NAMES,
     resolve_registered_tool,
 )
+from app.services.maintainer_service import (
+    FILE_MODIFY_TOOL_NAMES,
+    FileModifyDecision,
+    maintainer_service,
+)
 
 _FEISHU_BASE = get_settings().FEISHU_DOMAIN
 
@@ -6181,7 +6186,45 @@ async def execute_tool(
 
     ws = _agent_workspace_root(agent_id)
 
-    # ── Autonomy boundary check ──
+    # ── Maintainer gate (workspace/skills file-modifying document tools) ──
+    # Only the agent creator (implicit) plus rows in ``agent_maintainers`` may
+    # drive write_file/edit_file/delete_file/move_file into workspace/ or
+    # skills/. This replaces the autonomy check for these four tools; the
+    # check_and_enforce path below now covers execute_code/execute_command only.
+    if tool_name in FILE_MODIFY_TOOL_NAMES:
+        try:
+            from app.models.agent import Agent as AgentModel
+            async with async_session() as _mdb:
+                _magent = (
+                    await _mdb.execute(
+                        select(AgentModel).where(AgentModel.id == agent_id)
+                    )
+                ).scalar_one_or_none()
+                if _magent is not None:
+                    decision = await maintainer_service.resolve_file_modify_permission(
+                        _mdb,
+                        tool_name=tool_name,
+                        arguments=arguments,
+                        agent=_magent,
+                        actor_user_id=user_id,
+                    )
+                    if decision is FileModifyDecision.GATED_DENIED:
+                        logger.info(
+                            f"[Maintainer] Tool {tool_name} denied: user {user_id} is not a maintainer"
+                        )
+                        return (
+                            "❌ You are not a maintainer of this agent, so you "
+                            "cannot modify its workspace or skills files. "
+                            "(tool_permission_denied)"
+                        )
+        except Exception as e:
+            logger.exception(f"[Maintainer] Gate check failed: {e}")
+            return (
+                f"⚠️ Maintainer check failed ({e}). Operation blocked for safety. "
+                f"Please retry or contact admin."
+            )
+
+    # ── Autonomy boundary check (execute_code / execute_command) ──
     action_type = _TOOL_AUTONOMY_MAP.get(tool_name)
     if action_type:
         try:
@@ -29648,17 +29691,14 @@ async def _neon_create_database(agent_id: uuid.UUID, arguments: dict) -> str:
 # ─── Tool autonomy map (single fact source) ──────────────────────
 # The ONLY tool_name -> autonomy action_type map in this module. It serves the
 # legacy ``execute_tool`` seam (and chained ACP dispatch falling back to it).
-# Typed durable tools (write/edit/move/delete/execute_code/web_search/
-# send_file_to_agent/send_message_to_agent/…) never read this map: file tools
-# are gated by the Maintainer gate (``resolve_file_modify_permission``), and the
-# send_*/web_search tools are typed or A2A-settled. Do NOT add a second
-# module-level definition of this name — Python resolves re-assignment to the
-# LAST value, so a duplicate would silently shadow this one (regression covered
-# by tests/test_tool_autonomy_map.py).
+# It now covers ONLY execute_code/execute_command: the four file-modifying
+# document tools (write_file/edit_file/delete_file/move_file) are gated by the
+# Maintainer gate (``resolve_file_modify_permission``) instead of autonomy
+# policy, and send_*/web_search tools are typed or A2A-settled. Do NOT add a
+# second module-level definition of this name — Python resolves re-assignment
+# to the LAST value, so a duplicate would silently shadow this one (regression
+# covered by tests/test_tool_autonomy_map.py).
 _TOOL_AUTONOMY_MAP: dict[str, str] = {
-    "write_file": "write_workspace_files",
-    "edit_file": "write_workspace_files",
-    "delete_file": "delete_files",
     "execute_code": "execute_code",
     "execute_command": "execute_code",
 }

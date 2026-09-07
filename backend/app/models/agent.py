@@ -3,7 +3,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, Enum, Float, ForeignKey, Index, Integer, String, Text, func, text
+from sqlalchemy import Boolean, DateTime, Enum, Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint, func, text
 from sqlalchemy.dialects.postgresql import JSON, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -205,6 +205,35 @@ class AgentPermission(Base):
     access_level: Mapped[str] = mapped_column(String(20), default="use", nullable=False)
 
     agent: Mapped["Agent"] = relationship(back_populates="permissions")
+
+
+class AgentMaintainer(Base):
+    """Named maintainers allowed to modify an agent's workspace/skills files.
+
+    The Maintainer gate (``MaintainerService.resolve_file_modify_permission``)
+    treats these rows plus the agent creator (implicit, never stored here) as
+    the set of users who may drive write_file/edit_file/delete_file/move_file
+    into ``workspace/`` and ``skills/``. No tenant_id column: ``agent_id``
+    implicitly scopes the rows (the agent already carries tenant_id).
+    """
+
+    __tablename__ = "agent_maintainers"
+    __table_args__ = (
+        UniqueConstraint("agent_id", "user_id", name="uq_agent_maintainers_agent_user"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    agent_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("agents.id", ondelete="CASCADE"), nullable=False
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    created_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
 
 
 class AgentTemplate(Base):

@@ -113,6 +113,11 @@ from app.services.agent_runtime.feishu_approval_authorization import (
     issue_feishu_approval_create_authorization,
 )
 from app.services.autonomy_service import autonomy_service
+from app.services.maintainer_service import (
+    FILE_MODIFY_TOOL_NAMES,
+    FileModifyDecision,
+    maintainer_service,
+)
 from app.services.observability import observe_tool
 from app.services.agent_tools import (
     agentbay_run_scope_id,
@@ -750,6 +755,11 @@ def _delete_autonomy_details(
             arguments,
         )
     )
+    # Agent-scoped delete_file is now gated by the Maintainer gate
+    # (_maintainer_file_gate); only group deletes still flow through the L3
+    # autonomy approval flow.
+    if not is_group_delete:
+        return None
     if is_group_delete:
         initial_input = state["snapshots"].initial_input
         group_id = initial_input.get("group_id")
@@ -1910,6 +1920,67 @@ class RuntimeToolStepService:
             ),
         )
 
+    async def _maintainer_file_gate(
+        self,
+        *,
+        state: RuntimeGraphState,
+        context: RuntimeContext,
+        agent: Agent,
+        tool_name: str,
+        arguments: Mapping[str, object],
+    ) -> tuple[ToolExecutionOutcome | None, JsonObject | None]:
+        """Resolve the Maintainer gate for agent-scoped file-modifying tools.
+
+        Returns a failed ``ToolExecutionOutcome`` on GATED_DENIED (a user who is
+        not the creator nor a listed maintainer), otherwise ``(None, None)`` so
+        the normal tool path proceeds. Group-scoped calls and non-file tools are
+        short-circuited to ``(None, None)``.
+        """
+        if tool_name not in FILE_MODIFY_TOOL_NAMES:
+            return None, None
+        is_group_scoped = _is_group_scoped_workspace_call(state, tool_name, arguments)
+        try:
+            async with self._session_factory() as db, db.begin():
+                decision = await maintainer_service.resolve_file_modify_permission(
+                    db,
+                    tool_name=tool_name,
+                    arguments=arguments,
+                    agent=agent,
+                    actor_user_id=context.actor_user_id,
+                    actor_agent_id=context.actor_agent_id,
+                    is_group_scoped=is_group_scoped,
+                )
+        except Exception as exc:
+            return (
+                ToolExecutionOutcome(
+                    status="failed",
+                    result_summary=(
+                        "File modification was blocked because the maintainer "
+                        "check could not be completed."
+                    ),
+                    result_ref=None,
+                    error_code="tool_permission_check_failed",
+                    retryable=False,
+                    metadata={"error_class": type(exc).__name__},
+                ),
+                None,
+            )
+        if decision is FileModifyDecision.GATED_DENIED:
+            return (
+                ToolExecutionOutcome(
+                    status="failed",
+                    result_summary=(
+                        "You are not a maintainer of this agent, so you cannot "
+                        "modify its workspace or skills files."
+                    ),
+                    result_ref=None,
+                    error_code="tool_permission_denied",
+                    retryable=False,
+                ),
+                None,
+            )
+        return None, None
+
     async def _delete_autonomy_gate(
         self,
         *,
@@ -2246,6 +2317,13 @@ class RuntimeToolStepService:
                         waiting_request=confirmation_wait,
                         pending_tool_calls=tool_calls[index:],
                     )
+                maintainer_outcome, _ = await self._maintainer_file_gate(
+                    state=state,
+                    context=context,
+                    agent=agent,
+                    tool_name=tool_name,
+                    arguments=arguments,
+                )
                 autonomy_outcome, approval_wait = await self._delete_autonomy_gate(
                     state=state,
                     context=context,
@@ -2261,7 +2339,9 @@ class RuntimeToolStepService:
                         pending_tool_calls=tool_calls[index:],
                         step_tool_context=step_context_update,
                     )
-                if autonomy_outcome is None:
+                if maintainer_outcome is not None:
+                    autonomy_outcome = maintainer_outcome
+                elif autonomy_outcome is None:
                     autonomy_outcome = confirmation_outcome
                 policy = (
                     ToolPolicy(

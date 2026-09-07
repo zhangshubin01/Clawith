@@ -1,7 +1,7 @@
 # 生产级修复方案：自进化缺口闭合二期（Maintainer 门控 → G3 技能沉淀 → G4 评估）
 
 日期：2026-09-05
-状态：ready-for-implementation（8 个 grill 决策点已全部拍板；§8 边界已折入）
+状态：ready-for-implementation（8 个 grill 决策点已全部拍板；§8 边界已折入；Phase 4 七角度评审已通过[有条件]，见 `20260905-maintainer-gate-g3-g4-phase4-review.md`）
 前置：`20260902-self-evolution-gap-closure-plan.md`（G1 已取消、G1' 已落地），
       `20260819-agent-maintainers-implementation-plan.md` + `-permission-model.md`（本方案重出核对表，其待确认 A/B/C/D 均已定）。
 
@@ -27,21 +27,27 @@
 | 路径防逃逸 | letta-code `memory-git` + Clawith 已有 `safe_agent_path` | 复用 `safe_agent_path`（`.resolve()` + startswith），不新写 |
 | G3 技能沉淀 | Anthropic Agent Skills / skill-creator「草稿→评测→改进」+ letta-code memory-v2 自治子代理 | 采用**草稿 + 人工移动**（human-gate，同经验库 propose→publish 已验证模式），不做自动语义聚类 |
 | G4 评估 | skill-creator `clawith_runner.py` + `aggregate_benchmark.py` + judge 平台（run_outcome/attempt_count） | 参考资料保留，但**本期不接 judge/A/B**（grill 决策 7）——先做只读门禁健康度周报，harness 留待数据积累后再启用 |
+| **ACP 写工具 IDE 端把关（新增决策点）** | claude-agent-acp `docs/permission-extension.md`（ACP 协议权限模型，2026-09-05 读真实源码） | 标准 ACP 里 Edit/Write 走 `session/request_permission`（客户端渲染 allow-once/reject 确认）；Clawith 自定义 RPC `fs/write_text_file`/`fs/edit_text_file` **直写、无权限请求**，仅 `fs/safe_delete` 走 IDE `requestPermissions` 弹窗——是**对协议的偏离**。据此「写工具裸写」定性为既存缺口、有意为之（§8.3） |
+| 多租户授权模型 | bisheng（Clawith 上游同 org，`docs/technical-plans/20260905-bisheng-study.md`）OpenFGA 细粒度授权 | 借鉴「owner>manager>editor>viewer 金字塔」思想，但本期用 **maintainer 名单**而非 OpenFGA 16 类型（最小改动，门控是治理配置非通用授权） |
+| HITL 审批 UX | langchain-ai agent-inbox（HumanInterrupt 四开关 accept/edit/respond/ignore，`20260903-agent-inbox-hitl-ux-study.md`）+ langgraph `human_in_the_loop`（interrupt 人工确认） | 审批流对照：agent-inbox 零后端纯前端、四开关比 Clawith 二元 approve/reject 通用；但 Clawith 审批流是**运行态裁决**、门控是**治理配置**，两者归属不同权限主体、不合并（§8.2 雷 3） |
+| 命令/工具风险分类 | jcode（Safe/Low/Confirm/Catastrophic 确定性 blast-radius 分类，`20260905-jcode-study.md`） | `execute_command` 已有 `_guard_acp_dangerous_command` 黑名单 = 确定性前置层；门控复用此思想（确定性判定、不引入 LLM 法官）。删 `check_tool_autonomy` **不影响**该黑名单 |
+| 所有权边界 | 12-factor-agents（ownership boundary 原则） | 门控 = 把「谁拥有 workspace/skills 写权限」显式化为 maintainer 名单，对齐 ownership boundary，而非堆审批流 |
 
-**无相关参考的类别（明示）**：多租户「非 creator 用户驱动 agent 改文件」的权限模型，参考清单里无逐字可抄项（dify 有租户权限但非 agent-actor 语义）——本方案按平台自身事实设计。
+**无相关参考的类别（明示）**：多租户「非 creator 用户驱动 agent 改文件」的**权限主体语义**，参考清单里无逐字可抄项——bisheng 有 OpenFGA 但授权主体是用户/角色、非「agent-actor」；dify 有租户权限但非 agent-actor 语义。本方案按平台自身事实设计（a2a→NOT_GATED、非 creator 驱动→门控判定），此偏离已在各决策点写明理由。
 
-## 2. 代码基线（2026-09-05 HEAD `d4a2e081` 重核，以函数名定位、不依赖行号）
+## 2. 代码基线（2026-09-06 HEAD `49806eb2` 重核，以函数名定位、行号仅作约）
 
-- 三处执行点：`RuntimeToolStepService.execute_pending`（`agent_runtime/tool_step_service.py:1993`，delete 闸门 `_delete_autonomy_gate` `:1901` 定义、`:2237` 调用）、`execute_builtin_tool_outcome`（`agent_tools.py:5511`，**无自主检查**）、`execute_tool`（`agent_tools.py:6044`，autonomy 检查 `:6092`）+ `check_tool_autonomy`（`agent_tools.py:29548`）。
-- **两份 `_TOOL_AUTONOMY_MAP` 遮蔽（bug 1）**：`:2802`（意图版：write/move/delete/send_feishu/send_message_to_agent/send_file_to_agent/web_search/execute_code/execute_code_e2b）+ `:29539`（生效版：write/edit/delete/execute_code/execute_command）。模块内重复定义，运行时名字解析到**末次赋值 `:29539`** → **6 个工具完全无自主权检查**：`move_file`、`send_feishu_message`、`send_message_to_agent`、`send_file_to_agent`、`web_search`、`execute_code_e2b`（legacy `execute_tool` 与 ACP `check_tool_autonomy` 两路径都漏）。`edit_file` 在生效版已覆盖，**不缺**（修正旧「漏 edit_file」表述）。连带后果：`autonomy_policy` 里 `send_*`/`web_search` 键的唯一 enforce 点 `check_and_enforce`（`autonomy_service.py:64`）由 MAP 驱动 → 这些键的 L2/L3 分级**静默失效**。
-- **ACP truthy bug（bug 2）**：`check_tool_autonomy` `:29578` `allowed = policy.get(category, True)`，policy 值是字符串 "L1"/"L2"/"L3" 恒真 → ACP 路径永不拦截。
+- 三处执行点：`RuntimeToolStepService.execute_pending`（`agent_runtime/tool_step_service.py:2005`，delete 闸门 `_delete_autonomy_gate` `:1913` 定义、`:2249` 调用）、`execute_builtin_tool_outcome`（`agent_tools.py:5612`，**无自主检查**）、`execute_tool`（`agent_tools.py:6145`，autonomy 检查 `:6193`）+ `check_tool_autonomy`（`agent_tools.py:29649`）。
+- **两份 `_TOOL_AUTONOMY_MAP` 遮蔽（bug 1）**：`:2890`（意图版 9 键：write/move/delete/send_feishu/send_message_to_agent/send_file_to_agent/web_search/execute_code/execute_code_e2b，注释已改「用于 policy lookup and notifications / 避免误导通知标题」）+ `:29640`（生效版 5 键：write/edit/delete/execute_code/execute_command）。模块内**同名重复定义**，运行时名字解析到**末次赋值 `:29640`** → **6 个工具完全无自主权检查**：`move_file`、`send_feishu_message`、`send_message_to_agent`、`send_file_to_agent`、`web_search`、`execute_code_e2b`（legacy `execute_tool` 与 ACP `check_tool_autonomy` 两路径都漏）。`edit_file` 在生效版已覆盖、**不缺**。连带后果：`autonomy_policy` 里 `send_*`/`web_search` 键的唯一 enforce 点 `check_and_enforce`（`autonomy_service.py:51`，`:68` `level = policy.get(action_type, "L1")`）由 MAP 驱动 → 这些键的 L2/L3 分级**静默失效**。**另注意**：`:2890` 意图版的「通知标题」目标因被 `:29640` 覆盖而**永不生效**——重复定义的表象已从「两份 MAP」升级为「看似有意、实际被覆盖」。
+- **两套自主权机制（勿混）**：legacy `execute_tool` 走 `autonomy_service.check_and_enforce`（**真分级** L1/L2/L3，缺键回退 L1）；ACP 路径走 `check_tool_autonomy`（见 bug 2，废的）。两者**解耦**——删 `check_tool_autonomy` 不影响 legacy 分级。
+- **ACP truthy bug（bug 2）**：`check_tool_autonomy` `:29679` `allowed = policy.get(category, True)`，policy 值是字符串 "L1"/"L2"/"L3" 恒真 → ACP 路径永不拦截。且 `args`/`user_id`/`notify` 三参数函数体**未使用**（`:29649-29682` 只用 `tool_name`+`agent_id`）→ 死代码。
 - `_PATH_CONVENTION_PARAMS`（`builtin_tool_definitions.py:4103`）已含 write/delete/edit/move 全部路径参数 → 门控助手复用，不造第三份清单。
 - `safe_agent_path`（`workspace_collaboration.py:107`）vs `normalize_workspace_path`（`:92`）——门控前缀判定必须走前者（symlink 感知）。
-- `_is_group_scoped_workspace_call`（`agent_runtime/tool_step_service.py:694`）现为**三条件**：`_is_group_agent_run && tool in SCOPED_WORKSPACE_TOOL_NAMES && workspace_scope=="group"`（比 08-19 plan 多第三条件，接入时以当前为准）。
+- `_is_group_scoped_workspace_call`（`agent_runtime/tool_step_service.py:704`）现为**三条件**：`_is_group_agent_run && tool in SCOPED_WORKSPACE_TOOL_NAMES && workspace_scope=="group"`（比 08-19 plan 多第三条件，接入时以当前为准）。
 - 事件白名单 `models/agent_run_event.py:36` 有 `memory_consolidation_skipped`、**无 `memory_consolidated`**（G1 取消后未补）。
-- 迁移 head = **f074**（f072=memory_consolidation_event、f073=read_dedup_n、f074=stall_guard），门控迁移编号 **f075**。
+- 迁移 head = **f076**（f072=memory_consolidation_event、f073=read_dedup_n、f074=stall_guard、f075=runtime_activity_enum、f076=no_progress_enum），门控迁移编号 **f077**（f075 已被 runtime_activity_enum 占用）。
 - actor 填充点：`heartbeat_runtime.py:198`（=triggered_by_user_id）、`channel_session.py:70`、`persistence.py`（actor_user_id/actor_agent_id 双字段）。
-- **基线漂移记录（2026-09-05）**：`tool_step_service.py` 已从 `services/` 移入 `services/agent_runtime/`；`agent_run_event.py` 移入 `models/`；死代码 `_materialize_storage_workspace` 已删（`2a36df02`）。HEAD 曾前进 `a42d0167 → d4a2e081`（read-dedup 三连 + 上下文瘦身，`2dd3d08d`/`d4a2e081`），**均不碰门控文件**，上述行号已重核零漂移。
+- **基线漂移记录（2026-09-06）**：`tool_step_service.py` 已从 `services/` 移入 `services/agent_runtime/`；`agent_run_event.py` 移入 `models/`；死代码 `_materialize_storage_workspace` 已删（`2a36df02`）。HEAD 曾 `d4a2e081 → 49806eb2`（compactor 文案/摘要修正、workspace flush、model-capabilities、activity/no-progress 枚举补值等 ~10 commit），**均不碰门控文件**；上述行号按 `49806eb2` 重核，漂移幅度 `execute_pending` +12、`execute_tool` +101、`check_tool_autonomy` +101。
 
 ---
 
@@ -60,11 +66,11 @@
 | G-3 | agent 自主删自己临时文件**不做例外**：硬拒 + 周报观察误伤率，超标再回退/调边界 | ✅ 已拍板（grill 决策 4） |
 | G-4 | 门控定位 = 治理层（接受 `execute_code` 经 `sync_back` 可绕过） | ✅ 已拍板（grill 决策 1） |
 
-### 3.2 数据模型 + 迁移（f075）
+### 3.2 数据模型 + 迁移（f077）
 
 - 新表 `agent_maintainers`（`id` uuid PK / `agent_id` FK→agents / `user_id` FK→users / `created_by` / `created_at` / `updated_at`），`UNIQUE(agent_id, user_id)`，`CASCADE`，无 tenant_id（靠 agent_id 隐式隔离）。
 - creator **不落表**、运行时隐式判定（`actor_user_id or agent.creator_id`），零回填成本。
-- **autonomy_policy 键显式迁移清理（grill 决策 6）**：门控接管 delete/edit/write/move 后，`autonomy_policy` 里的 `delete_files` / `write_workspace_files` 键不再参与这四类工具判定——**在 f075 里显式迁移**（把这 11 个 agent 的这两个键归一为哨兵值或删除），不「保留但忽略」（否则 `check_and_enforce` 死代码 + 周报口径双混乱）。`read_files`/`send_*`/`web_search`/`execute_code` 等非文件键**保留不动**（仍走 `check_and_enforce` 分级）。
+- **autonomy_policy 键显式迁移清理（grill 决策 6）**：门控接管 delete/edit/write/move 后，`autonomy_policy` 里的 `delete_files` / `write_workspace_files` 键不再参与这四类工具判定——**在 f077 里显式迁移**（把这 11 个 agent 的这两个键归一为哨兵值或删除），不「保留但忽略」（否则 `check_and_enforce` 死代码 + 周报口径双混乱）。`read_files`/`send_*`/`web_search`/`execute_code` 等非文件键**保留不动**（仍走 `check_and_enforce` 分级）。
 - DDL-only 迁移 + inspector 守卫 + 对称 downgrade（沿 `backend/alembic/AGENTS.md` 70-78 规范；C5 张力写进 commit message）。
 
 ### 3.3 `MaintainerService` + 判定助手（新 `maintainer_service.py`）
@@ -92,19 +98,19 @@ async def resolve_file_modify_permission(db, *, tool_name, arguments, agent,
 
 | 调用点 | 改为 |
 |---|---|
-| `execute_pending`（durable，`:2237` 闸门前） | 对 delete/edit/write/move 统一调 `resolve_file_modify_permission`；`GATED_DENIED`→`tool_permission_denied` 结果；`DEFER`→走既有 soul/tasks/enterprise 拒绝（见下）；`NOT_GATED`→放行；`_delete_autonomy_gate` 的 L3 审批移除 |
-| `execute_tool`（legacy，`:6092`） | `check_and_enforce` 替换为同一助手；补 edit_file（现漏） |
-| `check_tool_autonomy`（ACP，`:29578`） | **修 truthy bug**（`policy.get(category, True)` → 先解 `level in ("L1","L2")` 才放行）+ 走同一助手；补 move_file |
+| `execute_pending`（durable，`:2249` 闸门前） | 对 delete/edit/write/move 统一调 `resolve_file_modify_permission`；`GATED_DENIED`→`tool_permission_denied` 结果；`DEFER`→走既有 soul/tasks/enterprise 拒绝（见下）；`NOT_GATED`→放行；`_delete_autonomy_gate` 的 L3 审批移除 |
+| `execute_tool`（legacy，`:6193`） | `check_and_enforce` 替换为同一助手（edit_file 已在生效版 MAP，不缺） |
+| `check_tool_autonomy`（ACP，`:29649`） | **删除**（死代码：truthy bug + `args`/`user_id`/`notify` 三死参数），连带删 `tool_bridge.py` 3 处调用（`:1557`/`:1977`/`:2129`）与动态塞 MAP 键逻辑（`:1543-1556`）；ACP 写工具把关交 IDE 端 + 版本控制（§8.3）。**注意保留 `_TOOL_AUTONOMY_MAP` 生效版供 legacy `:6193` 用**（见下 bug 修复） |
 
 **`DEFER` 分支的真实落点（雷 2，勿假设 modify_soul 审批）**：`modify_soul` 仅是 `DEFAULT_AUTONOMY_POLICY` 里的键（`agent.py:30`），**零执行点**——soul.md 的实际保护靠 delete/move 工具描述拒绝（`builtin_tool_definitions.py:188`「Cannot delete soul.md or tasks.json」/ `:205`「Cannot move soul.md…enterprise_info/」）。故 `DEFER` 分支**落到这条工具描述拒绝路径**，不新增、也不假设存在 `modify_soul` 审批流。`soul.md` 的门控后续若要硬执行，另行立项，不在本期。
 
-**bug 修复（独立小票，先于门控落地）**：收敛两份 `_TOOL_AUTONOMY_MAP` 为一份，**补齐被遮蔽的 6 个工具映射**（move_file→write_workspace_files；send_feishu_message / send_message_to_agent / send_file_to_agent / web_search / execute_code_e2b → 各自 action_type），删除 `:2802` 遮蔽定义。运行时 `:6092` 与 `:29561` 都取模块末次赋值 `:29539`，故这 6 个键从未生效——收敛后 legacy 与 ACP 两路径恢复这些工具的自主权检查（连带恢复 autonomy_policy 里 send_*/web_search 的 L2/L3 分级）。
+**bug 修复（独立小票，先于门控落地；权威 spec = `20260905-p0-autonomy-map-shadowing-fix-plan.md`，已按数据面二次收窄）**：收敛两份 `_TOOL_AUTONOMY_MAP` 为一份——删 `:2890` 意图版死定义、保留 `:29640` 生效版 5 键为唯一 `_TOOL_AUTONOMY_MAP`、**不补齐 6 个被遮蔽工具映射**（该 6 工具中 send_feishu_message/web_search/execute_code_e2b 30 天零调用、move_file/send_file_to_agent 走 typed 路径、send_message_to_agent 走 A2A settle，补齐是惰性动作——宪法 II 禁止投机式加固）。**同时删 `check_tool_autonomy`（ACP truthy 死代码，连带删整条 ACP 自主权 stub：`_handle_autonomy_blocked`/`_AUTONOMY_STOP_THRESHOLD`/`_autonomy_counts`/`WORKSPACE_WRITE_TOOLS` 导入）+ `tool_bridge.py` 3 处调用 + 动态塞键逻辑**；删它不影响 legacy 分级（两套机制解耦），也不影响 `execute_command` 的 `_guard_acp_dangerous_command` 黑名单。**陷阱**：不能把 `:29640` 一起删——它是 legacy `:6193` 的唯一 MAP 来源。**另发现 A3**：`send_external_message` 孤儿键（16 agents 配 L1/L3、零代码读取）→ 另立配置清理小票，不在本票修。
 
 ### 3.5 埋点 / 可观测性
 
-- 拒绝路径走既有台账：`agent_tool_executions` 已记录每次工具调用结果（含 error_code），`tool_permission_denied` 会进入台账 + Langfuse tool span，无需新埋点。
+- 拒绝路径走既有台账：`agent_tool_executions` 已记录每次工具调用结果——**注意该表无 `error_code` 列**（2026-09-05 实核 schema），拦截证据在 `status`/`result_summary`/`result_metadata`；`tool_permission_denied` 以 result 形态进入台账 + Langfuse tool span，无需新埋点。
 - 新增**零事件**（治理层拒绝不是 run 生命周期事件，是工具结果）——避免 whitelist 膨胀。
-- 周报脚本只读聚合 `agent_tool_executions` 中 `tool_permission_denied` 的 error_code 计数 + actor 分布，用于验证「非维护人员被正确拦截、维护人员零误伤」。
+- 周报脚本只读聚合 `agent_tool_executions` 中 `tool_permission_denied` 的拦截计数（按 `status`/`result_summary` 判定，表无 error_code 列）+ actor 分布，用于验证「非维护人员被正确拦截、维护人员零误伤」。
 
 ### 3.6 测试（TDD，denial 走真实 executor/mutation 边界）
 
@@ -172,9 +178,9 @@ async def resolve_file_modify_permission(db, *, tool_name, arguments, agent,
 ## 6. 执行序 + 已拍板汇总
 
 ```
-P0 先 commit/stash 并行会话的工作区改动（agent_context.py 有未提交 read-dedup 改动，勿混叠）
- → bug 修复票：收敛两份 _TOOL_AUTONOMY_MAP（补齐 6 个被遮蔽工具映射）+ ACP truthy bug（独立、低风险、先行）
- → ① Maintainer 门控（f075 迁移[含 autonomy_policy 键清理] → MaintainerService → 三处接入 → API/前端 P2）
+P0 先 commit/stash 并行会话的工作区改动（开工前 git status 核对，勿混叠；2026-09-06 现状 = 仅 1 个 M：`docs/technical-plans/20260829-compaction-production-fix.md`，read-dedup 已提交）
+ → bug 修复票：收敛两份 `_TOOL_AUTONOMY_MAP`（删 `:2890` 死定义 + 补齐 6 个被遮蔽工具映射）+ 删 ACP `check_tool_autonomy` 死代码（truthy bug；独立、低风险、先行）
+ → ① Maintainer 门控（f077 迁移[含 autonomy_policy 键清理] → MaintainerService → 三处接入 → API/前端 P2）
  → ③ G4 门禁健康度周报脚本（只读，随时可做，不阻塞）
  → ② G3 技能沉淀（挂起；草稿发现机制=heartbeat 提示 + P2 待审列表）
 ```
@@ -209,18 +215,33 @@ P0 先 commit/stash 并行会话的工作区改动（agent_context.py 有未提�
 | 1 | `autonomy_policy` L1/L2/L3 分级 | `autonomy_service.check_and_enforce` | 按 action_type 自动执行/通知/审批 |
 | 2 | `approval_requests` 审批流（L3） | `autonomy_service.resolve_approval`（`:168`，仅 creator+platform_admin 可批） | 现仅 delete_files 在用（14 approved + **3 pending**） |
 | 3 | 工具描述拒绝 soul/tasks/enterprise | `builtin_tool_definitions.py:188/205` | 靠 LLM 遵守描述，无硬执行点 |
-| 4 | group-scoped workspace 短路 | `tool_step_service._is_group_scoped_workspace_call`（`:694`） | 组内调用不走门控 |
-| 5 | ACP 路径 `check_tool_autonomy` | `agent_tools.py:29548` | IDE 插件端，**truthy bug 致永不拦截** |
+| 4 | group-scoped workspace 短路 | `tool_step_service._is_group_scoped_workspace_call`（`:704`） | 组内调用不走门控 |
+| 5 | ACP 路径 `check_tool_autonomy` | `agent_tools.py:29649` | truthy bug 死代码 → **本期删除**；ACP 写工具把关交 IDE 端 + 版本控制（§8.3 显性记录裸写缺口） |
 | 6 | `execute_code` 沙箱 + `sync_back` 回写 | runtime 沙箱 | shell 逃逸面——门控定为「治理层」的依据 |
 
-**新增门控（①）的定位**：接管第 1/2 层对 `delete/edit/write/move` 四类**文档工具**的判定，替换为「维护人员名单」；第 3/4/5/6 层**不动**。`check_and_enforce` 保留给非文件 action（`send_*`/`web_search`/`execute_code` 等）。
+**新增门控（①）的定位**：接管第 1/2 层对 `delete/edit/write/move` 四类**文档工具**的判定，替换为「维护人员名单」；第 3/4/6 层**不动**，第 5 层（ACP `check_tool_autonomy`）**删除**（死代码，见 §8.3）。`check_and_enforce` 保留给非文件 action（`send_*`/`web_search`/`execute_code` 等）。
 
 ### 8.2 三个雷 + 折入处理
 
 | 雷 | 现状（核实） | 折入处理 |
 |---|---|---|
-| **雷 1：3 条 pending delete_files 审批变孤儿** | 决策 B 废弃 delete 审批流后，现 3 条 pending `ApprovalRequest(action_type=delete_files)` 无人消费 → 对应 run 悬挂 | `resolve_approval` **保留 delete_files 分支不删**；f075 迁移时对存量 pending delete_files 审批**按 creator 直接 resolve**（reject + resume run 告知「门控已接管」），不新增审批流。新 delete 调用不再产生审批（走门控硬拒） |
+| **雷 1：3 条 pending delete_files 审批变孤儿** | 决策 B 废弃 delete 审批流后，现 3 条 pending `ApprovalRequest(action_type=delete_files)` 无人消费 → 对应 run 悬挂 | `resolve_approval` **保留 delete_files 分支不删**；f077 迁移时对存量 pending delete_files 审批**按 creator 直接 resolve**（reject + resume run 告知「门控已接管」），不新增审批流。新 delete 调用不再产生审批（走门控硬拒） |
 | **雷 2：`modify_soul` 空头支票** | `modify_soul` 仅是 `DEFAULT_AUTONOMY_POLICY` 键（`agent.py:30`），**零执行点**；soul.md 实际保护 = 第 3 层工具描述拒绝 | 门控 `DEFER` 分支落到第 3 层工具描述拒绝路径（§3.4 已写），**不假设存在 modify_soul 审批**；`modify_soul` 硬执行另行立项 |
 | **雷 3：两套「谁能批」判定并存** | `resolve_approval` 只认 creator+platform_admin；门控管理 API 拟用 platform_admin+org_admin（决策 D） | **文档化并存**：审批流（历史机制）仍 creator+platform_admin；门控管理 API（`GET/POST/DELETE /api/agents/{id}/maintainers`）用 platform_admin+org_admin。两者不合并——审批流是运行态裁决，维护人员管理是治理配置，归属不同权限主体，写进 API 文档 + release note |
+| **雷 4：`send_external_message` 孤儿键**（2026-09-05 新发现） | `DEFAULT_AUTONOMY_POLICY`(:29) + 16 agents 政策（L1/L3）+ 测试 `ALL_ACTIONS` 均含 `send_external_message`，但**零代码读取**（无任何 `policy.get("send_external_message")`） | 与 `modify_soul` 同类「声明但零执行点」，**另立配置清理小票**：确认产品语义→若废弃则从 DEFAULT 删 + 迁移政策键 + 更新 `test_agent_default_autonomy_policy.py` 的 `ALL_ACTIONS`；不在本票混入（爆炸半径远超 bug 修复，违宪法 II） |
+
+### 8.3 ACP 写工具裸写缺口（既存，本次显性化——grill 决策 1 的 ACP 延伸）
+
+**事实链（2026-09-06 HEAD `49806eb2` 核实）**：
+1. 写工具 schema（`acp_write_file`/`acp_edit_file`/`acp_delete_file`/`acp_refactor_rename`/`acp_move_file`/`acp_reformat_code`）**无 `requires_approval` 参数**；全 backend 仅 `acp_execute_command` 有（`tool_hooks.py:198`），且后端**不消费**它（纯模型提示，默认 false）。
+2. IDE 端弹窗证据（`tool_bridge.py:798-803` `_timeout_for_acp_method`）：仅 `fs/safe_delete` 用 120s permission 超时（对齐 IDE `requestPermissions`）；`fs/write_text_file` 60s / `fs/edit_text_file` 30s 普通超时 → 写工具**无 `requestPermissions` 弹窗**。
+3. `check_tool_autonomy` truthy bug（`:29679`）→ 后端永不拦截。
+4. **结论**：写工具（write/edit/refactor/move/reformat/optimize/convert）在 ACP 路径 = **裸写**（无人肉确认、无分级）。
+
+**参考对比**：标准 ACP 协议（claude-agent-acp `permission-extension.md`）里 Edit/Write 走 `session/request_permission`（客户端渲染 allow-once/reject）；Clawith 自定义 RPC `fs/write_text_file`/`fs/edit_text_file` 直写是**对协议的偏离**（简化实现）。
+
+**决策（对齐 grill 决策 1「治理层非硬安全」）**：删 `check_tool_autonomy`（死代码），ACP 写工具把关 = IDE 端 + 版本控制兜底。**有意为之、非事故**。缓解：`execute_command` 保留 `_guard_acp_dangerous_command` 黑名单（`tool_bridge.py:1205`，`:1965`/`:2105` 调用）不受影响；写工具裸写**无独立拒绝信号**（直写不产生 `tool_permission_denied`），观察手段 = 版本控制/undo 兜底 + 遗留项的 IDE 弹窗加固，不设独立周报曲线（§5 周报只覆盖门控拒绝率）。
+
+**遗留（不阻塞本期）**：若要写工具恢复人肉确认，方向 = IDE 插件把 `fs/write_text_file`/`fs/edit_text_file` 也接 `requestPermissions`（仿 `fs/safe_delete`），后端可先行补 `requires_approval`——对齐标准 ACP 协议，属独立加固项，另行立项。
 
 **验收红线**：① 落地后 `approval_requests` 不再新增 delete_files 记录；3 条 pending 已 resolve；`agent_maintainers` 管理 API 鉴权含 org_admin；非维护人员 edit_file（最大量、现零门控）被 `tool_permission_denied` 拦截。
