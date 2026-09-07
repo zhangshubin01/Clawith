@@ -1,12 +1,17 @@
-# PG 僵尸连接泄漏根治方案审核（production-fix-plan）
+# PG 僵尸连接泄漏根治方案审核（clawith-fix-plan）
 
 > 审核日期 2026-09-06 · 审核人 PenguinHarness `default_agent` · 目标：Clawith 生产 PG 连接打满（99/100 → TooManyConnectionsError）的根治方案。
 
-## 裁决：有条件通过（列风险 + 缓解）
+## 裁决：最终方案（评审定稿）
 
 根因在 Phase 2 取证中被**修正**：此前假设「被杀 exec/sandbox 容器遗留连接」不成立（沙箱容器 `network_mode: none`，不连 DB）。**主导泄漏源是 PenguinHarness 每个会话 spawn 的 `postgres-mcp` MCP 容器（73 个，连接同一 clawith PG），死会话不回收 + PG 无死对端探测，二者叠加把一次性 SIGKILL 放大成永久僵尸。**
 
-方案（PG 端 `tcp_keepalives_*`）正确、最小、可回退，治的是「放大器」这一半；「源头」（MCP 容器死会话不回收）属本 Agent 自身 MCP 基建，不在 Clawith 代码内，由既有 `mcp-container-gc` 日任务 + 可选优雅关闭治理。两条条件见 Phase 4 末尾。
+**最终方案（各项裁决见第三节正文，依据见二/四/五节）**：
+- **C1 PG 端 `tcp_keepalives_idle=60/interval=30/count=3`** —— ✅ 采纳，**已执行并验证通过**（治「放大器」：死对端僵尸 ~150s 自愈）。
+- **C2 backend `pool_pre_ping=True`** —— ✅ 通过（P2 预防），待落地（与 C1 互补，backend 侧自愈，需重建 backend）。
+- **C3 MCP 容器优雅关闭** —— ❌ 移出 Clawith 仓库（源头治理，owner 属 PenguinHarness MCP 基建，另开任务）。
+- **A 同步 deploy 两份 compose 加 keepalive** —— ⚠️ 跳过（两份是死文件，无脚本引用）。
+- **C4/C5 idle timeout** —— ❌ 否决（false friend / 误杀 backend 池连接）。
 
 ---
 
@@ -75,14 +80,14 @@ per-session postgres-mcp 容器（PenguinHarness MCP 基建，非 Clawith 代码
 
 ## 三、修复方案（最小、可回退、带回归）
 
-### 候选枚举（Ponytail 阶梯从低到高）
-- **C1（最低档，采纳）PG 端 tcp_keepalives**：在 `PG_COMMAND`（prod `.env`，`deploy/docker-compose.yml` 已 `command: ${PG_COMMAND:-}`）追加 `-c tcp_keepalives_idle=60 -c tcp_keepalives_interval=30 -c tcp_keepalives_count=3`，`docker compose up -d postgres` 重建。**零代码、零迁移、可回退**（删参数重启即回退）、治本（死对端 150s 自愈，僵尸无法累积）。
-- **C2（更高档，不采纳为主）backend `pool_pre_ping=True`**：只保护 backend 自己的池（LangBot/bisheng/mem0 均此），**不治本故障**（泄漏源在 postgres-mcp 容器，不在 backend 池内）。属卫生加固，独立 P2 另议。
-- **C3（更高档，不采纳）容器优雅关闭**：MCP/沙箱容器 SIGTERM→grace→SIGKILL。改动在 harness/MCP 基建层，复杂、不可控、仍有关不掉的硬死。治标不治本。
+### 候选枚举（Ponytail 阶梯从低到高，标注最终裁决）
+- **C1（采纳，已执行并验证）PG 端 tcp_keepalives**：在根 `docker-compose.yml`（`command: ${PG_COMMAND:-}`）追加 `-c tcp_keepalives_idle=60 -c tcp_keepalives_interval=30 -c tcp_keepalives_count=3`，`docker compose up -d postgres` 重建。**零代码、零迁移、可回退**（删参数重启即回退）、治本（死对端 150s 自愈，僵尸无法累积）。已重建并验证：`pg_settings` `source=command line`、TCP 连接 `SHOW` 实测 60/30/3。
+- **C2（通过，P2 预防，待落地）backend `pool_pre_ping=True`**：只保护 backend 自己的池，**不治本故障**（泄漏源在 postgres-mcp 容器，不在 backend 池内），但与 C1 **互补**（服务端回收死对端 vs 客户端主动探测重连，如 PG 重启后）、行业标准（LangBot/bisheng/mem0/cognee/edict 均配）。落地 = `config.py` 加 `DB_POOL_PRE_PING: bool = True` + `database.py` 传 `pool_pre_ping=settings.DB_POOL_PRE_PING`，补一条回归测试（复用 `test_database_dirty_connection.py` 风格），跑 `arch-guard.sh` + `pytest backend/tests/test_database*`，rebuild backend（需用户批准）。
+- **C3（移出 Clawith 仓库）容器优雅关闭**：MCP/沙箱容器 SIGTERM→grace→SIGKILL。指向源头，但 158 个 `clawith-mcp-python:1` 容器由 PenguinHarness MCP 基建 spawn（`grep backend/app` 无 spawn 代码），Clawith 仓库内无 owner 可改。另开 PenguinHarness 任务（会话结束优雅 stop / 定期 GC，记忆 `penguinharness-mcp-ops`）。
 - **C4（否决）`idle_in_transaction_session_timeout`**：false friend（僵尸是 `idle` 非 `idle in transaction`，不回收）。
 - **C5（否决为默认）`idle_session_timeout`**：能回收 idle 僵尸，但会误杀 backend 21 条合法池连接，须设 >>1800s 才安全，收益小风险大。
 
-**采纳 C1**。可选后续（P2 预防，非本次必须）：C2 backend `pool_pre_ping`。
+**追加动作 A（跳过）**：同步 `deploy/docker-compose.yml` + `deploy/docker-compose-multi.yml` 加 keepalive —— 两份是**死文件**（`scripts/deploy.sh:214-224` 用根 `docker-compose.yml`、`deploy/RELEASE_DEPLOYMENT.md` 的 Drone 发布用 `docker-compose.cd.yml`，均不引用它们），已与主线 drift（multi 引用 `./frontend/nginx.conf.template`）。不改，避免死文件噪音。
 
 ### 回归测试
 1. **根因路径**：部署后人为 `docker rm -f` 一个已连 PG 的 postgres-mcp 容器 → 观察其连接在 ~150s 内从 `pg_stat_activity` 消失。
@@ -106,6 +111,23 @@ per-session postgres-mcp 容器（PenguinHarness MCP 基建，非 Clawith 代码
 8. **可复用？** ✅ 通过。复用现有 `PG_COMMAND` `-c` 机制（与 dify 同款），零新机制。
 9. **破坏 Clawith 特性？** ✅ 通过。C1 只改 PG 层，不碰 durable run/checkpoint、多租户隔离、exactly-once、前缀缓存稳定性、WS 状态机、飞书通道；红线（测试不灰度、loguru、禁 ruff format、子代理禁 checkout/reset）无涉。
 
-### 通过条件（两条）
-1. **PG 容器重建需用户批准**（DB 写/容器重启红线），选低峰执行，秒级停机，数据在 pgdata 卷。
-2. **边界诚实标注**：C1 治「放大器」（死对端僵尸累积）；「源头」（73 个 postgres-mcp 容器死会话不回收）属本 Agent 自身 MCP 基建，由既有 `mcp-container-gc` 日任务治理，可选加固 B2（MCP 容器优雅关闭）——均非 Clawith 代码改动，不阻塞本次。
+### 通过条件（最终状态）
+1. **C1 已执行**：PG 容器重建需用户批准（DB 写/容器重启红线）——**已获批并完成**，数据在 pgdata 卷持久。
+2. **C2 待落地**：落地 `pool_pre_ping` 需用户批准 rebuild backend，落地前补一条回归测试 + 跑 `arch-guard.sh`。
+3. **边界诚实标注**：C1/C2 治「放大器」+ backend 侧自愈；「源头」（73 个 postgres-mcp 容器死会话不回收）属本 Agent 自身 MCP 基建，由既有 `mcp-container-gc` 日任务治理 + C3（PenguinHarness 另开任务）——均非 Clawith 代码改动，不阻塞本次。
+
+---
+
+## 五、二轮评审记录（A/B/C 追加改动，2026-09-06）
+
+> 本节是二轮评审的**过程证据**；裁决已回写第三节正文与头部「最终方案」，本节保留逐条依据供复核。
+
+C1 已执行并验证通过后，用户提出三项追加改动，逐条 9 角度复审（宪法 C1–C6 原文 `.specify/memory/constitution.md` v1.0.0 已读）。
+
+| 改动 | 裁决 | 依据（真实代码/实况） |
+|---|---|---|
+| **A. 同步 `deploy/docker-compose.yml` + `docker-compose-multi.yml` 加 keepalive** | ⚠️ **跳过**（死文件） | 两份文件全仓库无脚本/文档引用：`scripts/deploy.sh:214-224` 用**根** `docker-compose.yml`，`deploy/RELEASE_DEPLOYMENT.md` 的 Drone 发布用 `docker-compose.cd.yml`。且已与主线 drift（multi 引用 `./frontend/nginx.conf.template`）。同步只制造一致性假象，不影响当前生产。若要一致性，仅同步单机版 `deploy/docker-compose.yml` 并加「已废弃」头注释。 |
+| **B. backend `pool_pre_ping=True`** | ✅ **通过**（P2 预防） | `backend/app/database.py:18-24` 现有 `pool_recycle=settings.DB_POOL_RECYCLE_SECONDS`（`config.py:116` = 1800s）无 pre_ping。与 PG keepalive **互补**（服务端回收死对端 vs 客户端主动探测重连，如 PG 重启后）；行业标准（LangBot/bisheng/mem0/cognee/edict 均配）。惰性 ping 负载可忽略；与既有 `_discard_dirty_connection`（`database.py:46`）不重叠。 |
+| **C. MCP 容器优雅关闭** | ❌ **移出 Clawith 仓库** | 158 个 `clawith-mcp-python:1` 容器（`docker ps -a` 实况 `Up 2min~17h`）由 **PenguinHarness MCP 基建** spawn，`grep backend/app` 无任何 spawn 代码；Clawith 仓库内无 owner 可改。属平台侧 MCP server 生命周期管理，另开 PenguinHarness 任务（会话结束优雅 stop 容器 / 定期 GC 死会话容器，记忆 `penguinharness-mcp-ops`）。 |
+
+**裁决要点**：三项均为「加固/治理」非「根治」——删掉后 C1（keepalive）仍在、故障不复发。B 是唯一值得在 Clawith 仓库落地者（`config.py` 加 `DB_POOL_PRE_PING: bool = True` + `database.py` 传 `pool_pre_ping=settings.DB_POOL_PRE_PING`，补一条回归测试复用 `test_database_dirty_connection.py` 风格，跑 `arch-guard.sh` + `pytest backend/tests/test_database*`，rebuild backend 需用户批准）；A 是死文件一致化；C 指向源头但 owner 不在 Clawith。
