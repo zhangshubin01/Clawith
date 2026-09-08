@@ -62,10 +62,6 @@ from app.services.agent_runtime.langgraph_driver import (
     RuntimeGraphRegistry,
     RuntimeInputSnapshotFactory,
 )
-from app.services.agent_runtime.list_persistence import (
-    ListPersistenceCompletionHandler,
-    WAITING_STATUSES,
-)
 from app.services.agent_runtime.model_step_service import RuntimeModelStepService
 from app.services.agent_runtime.node_executor import DeterministicRuntimeNodeExecutor
 from app.services.agent_runtime.onboarding_completion import (
@@ -236,10 +232,7 @@ def build_runtime_worker_components(
         settings=runtime_settings,
     )
     tool_result_store = ToolResultStore(session_factory=session_factory)
-    cross_session_retriever = CrossSessionListRetriever(
-        session_factory=session_factory,
-        context_service=session_context_service,
-    )
+    cross_session_retriever = CrossSessionListRetriever()
     task_state_loader = SessionTaskStateLoader(
         session_factory=session_factory,
         context_service=session_context_service,
@@ -344,15 +337,6 @@ def build_runtime_worker_components(
                 session_factory=session_factory,
                 settings=runtime_settings,
             ),
-            # 票 06（D-12）：waiting 收尾的编号清单同样确定性落库（dsh append-only 哲学）。
-            # 必须排在 SessionTaskStateWaitingHandler 之前：paused 节快照 open_items
-            # 时才能带上本 run 自己的 waiting 清单指针。终态路径由下方
-            # terminal_handlers 中的默认注册（trigger=completed）承担。
-            ListPersistenceCompletionHandler(
-                session_factory=session_factory,
-                context_service=session_context_service,
-                trigger_statuses=WAITING_STATUSES,
-            ),
             SessionTaskStateWaitingHandler(
                 session_factory=session_factory,
                 context_service=session_context_service,
@@ -360,10 +344,6 @@ def build_runtime_worker_components(
         ),
         terminal_handlers=(
             SessionContextCompletionHandler(
-                session_factory=session_factory,
-                context_service=session_context_service,
-            ),
-            ListPersistenceCompletionHandler(
                 session_factory=session_factory,
                 context_service=session_context_service,
             ),

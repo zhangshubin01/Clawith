@@ -4,15 +4,16 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import UTC, datetime
+import json
 import uuid
 
 import pytest
 
+from app.services.agent_runtime import session_task_state as sts
 from app.services.agent_runtime.command_worker import (
     CheckpointObservation,
     RuntimeRunRecord,
 )
-from app.services.agent_runtime.list_persistence import LIST_FILE_PATH
 from app.services.agent_runtime.session_context_service import (
     SessionContextCandidate,
     SessionContextConflict,
@@ -96,12 +97,11 @@ def _section(
 
 
 def test_task_file_roundtrip_preserves_foreign_content() -> None:
-    list_id = "00000000-0000-0000-0000-000000000001"
     section = _section(
         session_id="00000000-0000-0000-0000-0000000000aa",
         run_id="00000000-0000-0000-0000-0000000000bb",
         pending=(
-            PendingListRef(list_id=uuid.UUID(list_id), title="app 优化清单", item_count=2),
+            PendingListRef(title="app 优化清单", item_count=2),
         ),
     )
     content = (
@@ -109,7 +109,7 @@ def test_task_file_roundtrip_preserves_foreign_content() -> None:
         "这是 agent 自己写的内容。\n\n"
         f"## task:{section.session_id} | phase: active | ended: completed | "
         f"目标：优化 app | run:{section.run_id} | 2026-09-01 20:00\n"
-        f"未决事项：list:{list_id} 清单「app 优化清单」（2 项）\n\n"
+        "未决事项：清单「app 优化清单」（2 项）\n\n"
         "尾部注释\n"
     )
     parsed = parse_task_file(content)
@@ -122,7 +122,6 @@ def test_task_file_roundtrip_preserves_foreign_content() -> None:
     assert got.run_id == section.run_id
     assert got.timestamp == "2026-09-01 20:00"
     assert len(got.pending_lists) == 1
-    assert got.pending_lists[0].list_id == uuid.UUID(list_id)
     assert got.pending_lists[0].title == "app 优化清单"
     assert got.pending_lists[0].item_count == 2
     assert render_task_file(parsed) == content
@@ -204,20 +203,13 @@ class _SessionFactory:
 
 
 class _Storage:
-    """Key-aware fake: 清单.md and 任务状态.md live under separate keys."""
+    """Key-aware fake for the task-state file (``memory/任务状态.md``)."""
 
-    def __init__(
-        self,
-        list_content: str | None = None,
-        task_content: str | None = None,
-    ) -> None:
-        self.list_content = list_content
+    def __init__(self, task_content: str | None = None) -> None:
         self.task_content = task_content
         self.writes: list[tuple[str, str]] = []
 
     def _read(self, key: str) -> str | None:
-        if key.endswith(LIST_FILE_PATH):
-            return self.list_content
         if key.endswith(TASK_STATE_FILE_PATH):
             return self.task_content
         raise AssertionError(f"unexpected storage key: {key}")
@@ -308,7 +300,7 @@ def _snapshot(
     )
 
 
-def _state(*, status: str) -> RuntimeGraphState:
+def _state(*, status: str, messages: list | None = None) -> RuntimeGraphState:
     registry = RunRegistrySnapshot(
         tenant_id=str(uuid.uuid4()),
         run_id=str(uuid.uuid4()),
@@ -332,7 +324,7 @@ def _state(*, status: str) -> RuntimeGraphState:
             related_run_summaries=(),
             initial_input={"input_content": "优化 app"},
         ),
-        "messages": [],
+        "messages": messages or [],
         "lifecycle": lifecycle,
     }  # type: ignore[typeddict-item]
 
@@ -343,6 +335,7 @@ def _records(
     goal: str = "优化 app",
     session_id: str | None = None,
     direct_chat: bool = True,
+    messages: list | None = None,
 ) -> tuple[RuntimeRunRecord, CheckpointObservation]:
     tenant_id = uuid.uuid4()
     agent_id = uuid.uuid4()
@@ -365,7 +358,7 @@ def _records(
     )
     checkpoint = CheckpointObservation(
         checkpoint_id="checkpoint-terminal",
-        state=_state(status=status),
+        state=_state(status=status, messages=messages),
     )
     return run, checkpoint
 
@@ -404,8 +397,41 @@ def _terminal_handler(
     return handler, service
 
 
-def _list_pointer(list_id: uuid.UUID, *, project: str | None = None) -> dict:
-    return {"list_ref": LIST_FILE_PATH, "list_id": str(list_id), "project": project}
+class _FakeListDao:
+    """Minimal fake for ``list_dao``; ``_load_pending_lists`` only reads the count."""
+
+    def __init__(self, items: list | None = None) -> None:
+        self.items: list = list(items or [])
+        self.calls: list[dict] = []
+
+    async def list_by_project(self, *, agent_id, project, include_completed):
+        self.calls.append({"agent_id": agent_id, "project": project, "include_completed": include_completed})
+        return list(self.items)
+
+
+@pytest.fixture(autouse=True)
+def _fake_list_dao(monkeypatch: pytest.MonkeyPatch) -> _FakeListDao:
+    """Route ``_load_pending_lists`` away from the real DB for every test."""
+    dao = _FakeListDao()
+    monkeypatch.setattr(sts, "list_dao", dao)
+    return dao
+
+
+def _workspace_messages(project: str = "mydome1") -> list:
+    return [
+        {
+            "role": "assistant",
+            "tool_calls": [
+                {
+                    "id": "c1",
+                    "function": {
+                        "name": "write_file",
+                        "arguments": json.dumps({"path": f"workspace/{project}/src/A.kt"}),
+                    },
+                },
+            ],
+        },
+    ]
 
 
 # ---------------------------------------------------------------- waiting handler
@@ -499,27 +525,22 @@ async def test_terminal_handler_completed_without_list_is_complete() -> None:
 
 
 @pytest.mark.asyncio
-async def test_terminal_handler_completed_with_list_is_active() -> None:
-    list_id = uuid.uuid4()
-    list_content = (
-        f"## list:{list_id} | project: mydome1 | 标题：app 优化清单 | 2026-09-01 18:00\n"
-        "1. 输入精度截断 — Calculator.kt:204\n"
-        "2. 超大指数上限 — power()\n"
-    )
-    storage = _Storage(list_content=list_content)
-    run, checkpoint = _records(status="completed")
-    handler, service = _terminal_handler(
-        storage=storage,
-        snapshot=_snapshot(open_items=(_list_pointer(list_id, project="mydome1"),)),
-    )
+async def test_terminal_handler_completed_with_list_is_active(_fake_list_dao: _FakeListDao) -> None:
+    _fake_list_dao.items = [object(), object()]
+    storage = _Storage()
+    run, checkpoint = _records(status="completed", messages=_workspace_messages())
+    handler, service = _terminal_handler(storage=storage, snapshot=_snapshot())
 
     await handler.handle(run=run, checkpoint=checkpoint)
 
     key, content = storage.writes[0]  # only the task-state file is written
     assert key.endswith(TASK_STATE_FILE_PATH)
     assert "phase: active | ended: completed |" in content
-    assert f"未决事项：list:{list_id} 清单「app 优化清单」（2 项）" in content
+    assert "未决事项：清单「mydome1」（2 项）" in content
     assert len(service.compare_calls) == 1
+    assert _fake_list_dao.calls == [
+        {"agent_id": uuid.UUID(run.agent_id), "project": "mydome1", "include_completed": False}
+    ]
 
 
 @pytest.mark.asyncio
@@ -582,7 +603,7 @@ async def test_terminal_handler_replaces_same_session_section_and_preserves_fore
     existing = (
         "# 备忘\n"
         f"## task:{session_id} | phase: active | ended: completed | 目标：优化 app | run:{run_id} | 2026-09-01 10:00\n"
-        "未决事项：list:00000000-0000-0000-0000-000000000001 清单「旧清单」（1 项）\n\n"
+        "未决事项：清单「旧清单」（1 项）\n\n"
         "尾部注释\n"
     )
     storage = _Storage(task_content=existing)
@@ -706,8 +727,8 @@ def test_completion_phrase_for_unknown_phase_defaults_to_complete() -> None:
 # ---------------------------------------------------------------- pending-lists line / note
 
 
-def _pending(list_id: str, title: str, item_count: int) -> PendingListRef:
-    return PendingListRef(list_id=uuid.UUID(list_id), title=title, item_count=item_count)
+def _pending(title: str, item_count: int) -> PendingListRef:
+    return PendingListRef(title=title, item_count=item_count)
 
 
 def test_render_pending_lists_line_empty_is_none() -> None:
@@ -718,10 +739,10 @@ def test_render_pending_lists_line_empty_is_none() -> None:
 def test_render_pending_lists_line_single() -> None:
     section = _section(
         session_id="00000000-0000-0000-0000-0000000000aa",
-        pending=(_pending("00000000-0000-0000-0000-000000000001", "app 优化清单", 2),),
+        pending=(_pending("app 优化清单", 2),),
     )
     assert render_pending_lists_line(section) == (
-        "未决事项：清单「app 优化清单」（2 项，见 memory/清单.md）"
+        "未决事项：清单「app 优化清单」（2 项，见 list_list_items）"
     )
 
 
@@ -729,7 +750,7 @@ def test_render_pending_lists_line_joins_multiple_and_is_bounded_to_three() -> N
     section = _section(
         session_id="00000000-0000-0000-0000-0000000000aa",
         pending=tuple(
-            _pending(f"00000000-0000-0000-0000-00000000000{i}", f"清单{i}", i)
+            _pending(f"清单{i}", i)
             for i in range(1, 6)
         ),
     )
@@ -763,20 +784,20 @@ def test_render_task_state_note_appends_pending_line_when_present() -> None:
         phase=PHASE_ACTIVE,
         ended="completed",
         goal="优化 app",
-        pending=(_pending("00000000-0000-0000-0000-000000000001", "app 优化清单", 2),),
+        pending=(_pending("app 优化清单", 2),),
     )
     note = render_task_state_note(section, current_run_id="run-1")
     assert "上一轮任务已交付，仍有未决事项" in note["content"]
-    assert note["content"].endswith("未决事项：清单「app 优化清单」（2 项，见 memory/清单.md）")
+    assert note["content"].endswith("未决事项：清单「app 优化清单」（2 项，见 list_list_items）")
 
 
 def test_render_pending_lists_line_truncates_long_titles_to_30_chars() -> None:
     section = _section(
         session_id="00000000-0000-0000-0000-0000000000aa",
-        pending=(_pending("00000000-0000-0000-0000-000000000001", "甲" * 40, 2),),
+        pending=(_pending("甲" * 40, 2),),
     )
     line = render_pending_lists_line(section)
-    assert "清单「" + "甲" * 30 + "…」（2 项，见 memory/清单.md）" in line
+    assert "清单「" + "甲" * 30 + "…」（2 项，见 list_list_items）" in line
     assert "甲" * 31 not in line  # truncated, no 31st char
 
 
@@ -784,25 +805,25 @@ def test_render_pending_lists_line_uses_fallback_title_when_blank() -> None:
     section = _section(
         session_id="00000000-0000-0000-0000-0000000000aa",
         pending=(
-            _pending("00000000-0000-0000-0000-000000000001", "", 1),
-            _pending("00000000-0000-0000-0000-000000000002", "   ", 2),
+            _pending("", 1),
+            _pending("   ", 2),
         ),
     )
     line = render_pending_lists_line(section)
-    assert line.startswith("未决事项：清单「清单」（1 项，见 memory/清单.md）")
-    assert "清单「清单」（2 项，见 memory/清单.md）" in line
+    assert line.startswith("未决事项：清单「清单」（1 项，见 list_list_items）")
+    assert "清单「清单」（2 项，见 list_list_items）" in line
 
 
 def test_render_pending_lists_line_marks_overflow_with_etc() -> None:
     section = _section(
         session_id="00000000-0000-0000-0000-0000000000aa",
         pending=tuple(
-            _pending(f"00000000-0000-0000-0000-00000000000{i}", f"清单{i}", i)
+            _pending(f"清单{i}", i)
             for i in range(1, 5)
         ),
     )
     line = render_pending_lists_line(section)
-    assert line.endswith("清单「清单3」（3 项，见 memory/清单.md）等")
+    assert line.endswith("清单「清单3」（3 项，见 list_list_items）等")
     assert "清单4" not in line  # the 4th item is only marked, not listed
 
 

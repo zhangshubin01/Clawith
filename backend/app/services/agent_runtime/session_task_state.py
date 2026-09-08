@@ -8,9 +8,9 @@ preserved verbatim) plus a pure index pointer row
 ``{"task_state_ref": "memory/任务状态.md"}`` in
 ``session_context_states.open_items`` (zero schema migration).
 
-This closes the waiting gap: R1 (``list_persistence``) only persists at
-``completed``, so a Run parked in ``waiting_user`` left no task state behind.
-Phase is a deterministic projection (D-8), never an LLM judgment.
+This closes the waiting gap: without it, a Run parked in ``waiting_user``
+left no task state behind. Phase is a deterministic projection (D-8), never an
+LLM judgment.
 """
 
 from __future__ import annotations
@@ -22,21 +22,19 @@ import logging
 import re
 import uuid
 
+from app.dao import list_dao
 from app.services.agent_runtime.command_worker import (
     CheckpointObservation,
     RuntimeRunRecord,
     RuntimeSessionFactory,
 )
-from app.services.agent_runtime.list_persistence import (
-    LIST_FILE_PATH,
-    parse_list_file,
-)
+from app.services.agent_runtime.list_persistence import extract_workspace_project
 from app.services.agent_runtime.session_context_service import (
     SessionContextCandidate,
     SessionContextConflict,
     SessionContextService,
 )
-from app.services.agent_runtime.state import JsonObject, JsonValue
+from app.services.agent_runtime.state import JsonObject, JsonValue, runtime_messages_as_json
 from app.services.storage import get_storage_backend, normalize_storage_key
 from app.services.storage_runtime.base import StorageBackend
 
@@ -79,7 +77,7 @@ _HEADER_LINE = re.compile(
     r"run:(?P<run>[0-9a-fA-F-]{36}) \| (?P<ts>[^|]+?)\s*$"
 )
 _PENDING_LINE = re.compile(
-    r"^未决事项：list:([0-9a-fA-F-]{36}) 清单「(.+?)」（(\d+) 项）\s*$"
+    r"^未决事项：清单「(.+?)」（(\d+) 项）\s*$"
 )
 
 
@@ -96,8 +94,8 @@ def map_phase(status: str, *, has_open_list_items: bool) -> str:
 
     ``waiting_*`` → paused (parked, awaiting a reply/approval);
     ``failed``/``cancelled`` → blocked (interrupted, not done);
-    ``completed`` → active when the session's open_items still hold a
-    ``memory/清单.md`` pointer (a delivered list with unexecuted entries),
+    ``completed`` → active when the (agent, project) list scope still holds
+    unfinished ``agent_list_items`` (a delivered list with unexecuted entries),
     otherwise complete.
     """
     if status.startswith("waiting_"):
@@ -129,9 +127,8 @@ def _sanitize_goal(goal: str) -> str:
 
 @dataclass(frozen=True, slots=True)
 class PendingListRef:
-    """One 未决事项 list pointer captured from open_items at the Run boundary."""
+    """One 未决事项 list captured from ``agent_list_items`` at the Run boundary."""
 
-    list_id: uuid.UUID
     title: str
     item_count: int
 
@@ -171,7 +168,7 @@ def _render_section(section: TaskSection) -> str:
     lines = [_render_header(section)]
     for pending in section.pending_lists:
         lines.append(
-            f"未决事项：list:{pending.list_id} 清单「{pending.title}」（{pending.item_count} 项）\n"
+            f"未决事项：清单「{pending.title}」（{pending.item_count} 项）\n"
         )
     return "".join(lines)
 
@@ -205,15 +202,10 @@ def _parse_section_lines(lines: list[str]) -> TaskSection | None:
         match = _PENDING_LINE.match(line)
         if match is None:
             return None
-        try:
-            list_id = uuid.UUID(match.group(1))
-        except ValueError:
-            return None
         pending_lists.append(
             PendingListRef(
-                list_id=list_id,
-                title=match.group(2),
-                item_count=int(match.group(3)),
+                title=match.group(1),
+                item_count=int(match.group(2)),
             )
         )
     return TaskSection(
@@ -332,63 +324,44 @@ class _SessionTaskStatePersistence:
     async def _write_file(self, key: str, content: str) -> None:
         await self._storage_backend().write_text(key, content, encoding="utf-8")
 
-    async def _load_list_titles_and_counts(
+    async def _load_pending_lists(
         self,
         *,
         run: RuntimeRunRecord,
-        list_ids: Sequence[uuid.UUID],
-    ) -> dict[uuid.UUID, tuple[str, int]]:
-        """Snapshot title + item count for each list pointer from ``清单.md``."""
-        if run.agent_id is None:
-            return {}
-        wanted = set(list_ids)
-        storage_key = normalize_storage_key(f"{run.agent_id}/{LIST_FILE_PATH}")
-        content = await self._load_file(storage_key)
-        parsed = parse_list_file(content)
-        return {
-            section.list_id: (section.title, len(section.items))
-            for section in parsed.sections
-            if section.list_id in wanted
-        }
+        checkpoint: CheckpointObservation,
+    ) -> tuple[PendingListRef, ...]:
+        """Resolve the Run's active list scope against ``agent_list_items``.
 
-    async def _load_pending_lists(self, *, run: RuntimeRunRecord) -> tuple[PendingListRef, ...]:
-        """Collect 未决事项 list pointers from open_items, resolved against 清单.md."""
-        if run.session_id is None:
+        The scope is platform-derived: the workspace project from the
+        checkpoint's tool-call paths, falling back to a per-session scope when
+        no workspace project resolves. Returns at most one ``PendingListRef``
+        (the scope's active-item count) so the persisted 未决事项 line stays
+        bounded and the pointer line and injected index agree on the same
+        source of truth.
+        """
+        if not run.agent_id:
+            return ()
+        project: str | None = None
+        try:
+            project = extract_workspace_project(runtime_messages_as_json(checkpoint.state))
+        except (TypeError, ValueError):
+            project = None
+        if project is None and run.session_id:
+            project = f"session:{run.session_id}"
+        if project is None:
             return ()
         try:
-            session_id = uuid.UUID(run.session_id)
+            agent_id = uuid.UUID(run.agent_id)
         except ValueError:
             return ()
-        async with self._session_factory() as db:
-            snapshot = await self._context_service.load_snapshot(
-                db,
-                tenant_id=run.tenant_id,
-                session_id=session_id,
-            )
-        list_ids: list[uuid.UUID] = []
-        for open_item in snapshot.open_items:
-            if not isinstance(open_item, Mapping):
-                continue
-            if open_item.get("list_ref") != LIST_FILE_PATH:
-                continue
-            raw_list_id = open_item.get("list_id")
-            if not isinstance(raw_list_id, str):
-                continue
-            try:
-                list_ids.append(uuid.UUID(raw_list_id))
-            except ValueError:
-                continue
-        if not list_ids:
-            return ()
-        titles_and_counts = await self._load_list_titles_and_counts(run=run, list_ids=list_ids)
-        return tuple(
-            PendingListRef(
-                list_id=list_id,
-                title=titles_and_counts.get(list_id, (_PENDING_FALLBACK_TITLE, 0))[0],
-                item_count=titles_and_counts.get(list_id, (_PENDING_FALLBACK_TITLE, 0))[1],
-            )
-            for list_id in list_ids
+        items = await list_dao.list_by_project(
+            agent_id=agent_id,
+            project=project,
+            include_completed=False,
         )
+        if not items:
+            return ()
+        return (PendingListRef(title=project, item_count=len(items)),)
 
     async def _replace_task_state_pointer(
         self,
@@ -510,7 +483,7 @@ class SessionTaskStateWaitingHandler(_SessionTaskStatePersistence):
         if not self._is_direct_chat(run):
             return
         try:
-            pending = await self._load_pending_lists(run=run)
+            pending = await self._load_pending_lists(run=run, checkpoint=checkpoint)
             await self._write_state(run=run, phase=PHASE_PAUSED, ended=status, pending_lists=pending)
         except Exception:
             # D-10: best-effort persistence must never block Run settlement.
@@ -525,8 +498,8 @@ class SessionTaskStateTerminalHandler(_SessionTaskStatePersistence):
     """Persist the mapped phase at the terminal Run boundary.
 
     Terminal-handler hook registered last so it runs after
-    ``SessionContextCompletionHandler`` / ``ListPersistenceCompletionHandler``
-    and reads the merged open_items to decide active/complete. Best-effort
+    ``SessionContextCompletionHandler`` and reads the active
+    ``agent_list_items`` for the scope to decide active/complete. Best-effort
     idempotent: replay converges to the same section and a single pointer row.
     """
 
@@ -542,7 +515,7 @@ class SessionTaskStateTerminalHandler(_SessionTaskStatePersistence):
         if not self._is_direct_chat(run):
             return
         try:
-            pending = await self._load_pending_lists(run=run)
+            pending = await self._load_pending_lists(run=run, checkpoint=checkpoint)
             phase = map_phase(status, has_open_list_items=bool(pending))
             await self._write_state(run=run, phase=phase, ended=status, pending_lists=pending)
         except Exception:
@@ -575,13 +548,13 @@ def render_pending_lists_line(section: TaskSection) -> str | None:
     At most three pending lists are noted (bounded so a long open-items tail
     cannot blow up the model window); each entry carries the list title
     (stripped, truncated to 30 characters, ``清单`` when blank), the item
-    count, and the authoritative ``memory/清单.md`` path the model can read
-    for the full text. A trailing ``等`` marks lists dropped past the bound.
+    count, and the ``list_list_items`` tool the model can call for the full
+    text. A trailing ``等`` marks lists dropped past the bound.
     """
     if not section.pending_lists:
         return None
     notes = [
-        f"清单「{_bounded_pending_title(pending.title)}」（{pending.item_count} 项，见 memory/清单.md）"
+        f"清单「{_bounded_pending_title(pending.title)}」（{pending.item_count} 项，见 list_list_items）"
         for pending in section.pending_lists[:_MAX_PENDING_LIST_NOTES]
     ]
     line = "未决事项：" + "；".join(notes)

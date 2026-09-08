@@ -59,6 +59,7 @@ from app.services.agent_runtime.state import (
     RuntimeGraphState,
     runtime_messages_as_json,
 )
+from app.services.agent_runtime.list_persistence import extract_workspace_project
 from app.services.agent_runtime.tool_contracts import (
     AcceptedToolCall,
     StepToolContext,
@@ -1562,6 +1563,7 @@ class RuntimeToolStepService:
             "runtime_execution_id": str(reservation.execution.id),
             "runtime_lease_owner": lease_owner,
             "runtime_tenant_id": context.tenant_id,
+            "runtime_list_project": extract_workspace_project(runtime_messages_as_json(state)),
         }
         if local_code_execution_seconds is not None:
             executor_arguments["runtime_code_timeout_seconds"] = local_code_execution_seconds

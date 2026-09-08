@@ -155,6 +155,79 @@ _BUILTIN_TOOL_SOURCE = [
         "config_schema": {},
     },
     {
+        "name": "list_list_items",
+        "display_name": "List Items",
+        "description": "List structured checklist items (清单) for the current project from the system database. The visible number (sort_order) is stable and never renumbered.",
+        "category": "file",
+        "icon": "☑",
+        "is_default": True,
+        "parameters_schema": {
+            "type": "object",
+            "properties": {
+                "project": {
+                    "type": "string",
+                    "description": "Optional project scope name; defaults to the current workspace project.",
+                },
+                "include_completed": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Whether to include completed items. Default false.",
+                },
+            },
+        },
+        "config": {},
+        "config_schema": {},
+    },
+    {
+        "name": "upsert_list_item",
+        "display_name": "Upsert List Item",
+        "description": "Create or update a structured checklist item (清单) for the current project. The platform assigns a stable number (sort_order) and normalizes the key.",
+        "category": "file",
+        "icon": "☑",
+        "is_default": True,
+        "parameters_schema": {
+            "type": "object",
+            "properties": {
+                "project": {
+                    "type": "string",
+                    "description": "Optional project scope name; defaults to the current workspace project.",
+                },
+                "key": {"type": "string", "description": "Stable short identifier, snake_case preferred."},
+                "title": {"type": "string", "description": "Short title (清单项名称)."},
+                "description": {"type": "string", "description": "Human-readable description of the item."},
+                "status": {
+                    "type": "string",
+                    "enum": ["pending", "in_progress", "completed"],
+                    "description": "Item status; default pending.",
+                },
+            },
+            "required": ["description"],
+        },
+        "config": {},
+        "config_schema": {},
+    },
+    {
+        "name": "complete_list_item",
+        "display_name": "Complete List Item",
+        "description": "Mark a structured checklist item (清单) completed.",
+        "category": "file",
+        "icon": "☑",
+        "is_default": True,
+        "parameters_schema": {
+            "type": "object",
+            "properties": {
+                "project": {
+                    "type": "string",
+                    "description": "Optional project scope name; defaults to the current workspace project.",
+                },
+                "key": {"type": "string", "description": "List item key to complete."},
+            },
+            "required": ["key"],
+        },
+        "config": {},
+        "config_schema": {},
+    },
+    {
         "name": "write_file",
         "display_name": "Write File",
         "description": "Write or incrementally append UTF-8 text to a file in the workspace. Each call accepts at most 6000 content characters. For a longer generated file such as HTML, CSS, JavaScript, or markdown, call write_file once with mode=overwrite for the first chunk, then use one mode=append call per later model turn for each remaining chunk; never emit the whole file or multiple large chunks in one response. Before creating a new document under workspace/, first inspect the relevant directories with list_files, prefer an existing topical subfolder over the workspace root, and create a new subfolder when the content belongs to a new category. Avoid placing standalone document files directly in workspace/ root unless the user explicitly wants that. Can update memory/memory.md, create documents in workspace/, and update skills in skills/ when the active workflow requires repair.",

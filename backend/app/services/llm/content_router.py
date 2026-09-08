@@ -25,6 +25,7 @@ _TOOL_TYPE_ROUTE: dict[str, str] = {
     "list_files": "list",
     "list_dir": "list",
     "list_focus_items": "list",
+    "list_list_items": "list",
     "read_file": "code",
     "read_document": "code",
     "search_files": "search",

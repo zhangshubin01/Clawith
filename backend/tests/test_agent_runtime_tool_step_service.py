@@ -715,6 +715,7 @@ async def test_feishu_approval_create_executes_exact_call_after_chat_confirmatio
         runtime_execution_id=None,
         runtime_lease_owner=None,
         runtime_tenant_id=None,
+        runtime_list_project=None,
     ):
         execution_calls.append(
             {
@@ -730,6 +731,7 @@ async def test_feishu_approval_create_executes_exact_call_after_chat_confirmatio
                 "runtime_execution_id": runtime_execution_id,
                 "runtime_lease_owner": runtime_lease_owner,
                 "runtime_tenant_id": runtime_tenant_id,
+                "runtime_list_project": runtime_list_project,
             }
         )
         return ToolExecutionOutcome(

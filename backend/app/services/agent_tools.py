@@ -74,6 +74,12 @@ from app.services.focus_service import (
     list_focus_items,
     upsert_focus_item,
 )
+from app.services.list_service import (
+    complete_list_item,
+    is_list_file_path,
+    list_list_items,
+    upsert_list_item,
+)
 from app.services.feishu_group_targets import (
     FeishuGroupTargetError,
     resolve_feishu_group_target,
@@ -662,6 +668,9 @@ RUNTIME_TYPED_APPLICATION_TOOL_NAMES = frozenset(
         "list_focus_items",
         "upsert_focus_item",
         "complete_focus_item",
+        "list_list_items",
+        "upsert_list_item",
+        "complete_list_item",
         "write_file",
         "move_file",
         "delete_file",
@@ -763,11 +772,14 @@ RUNTIME_TYPED_APPLICATION_TOOL_NAMES = frozenset(
 # to avoid sending duplicate tool definitions to the LLM.
 _ALWAYS_INCLUDE_CORE = {
     "complete_focus_item",
+    "complete_list_item",
     "list_focus_items",
+    "list_list_items",
     "query_directory",
     "send_channel_file",
     "send_file_to_agent",
     "upsert_focus_item",
+    "upsert_list_item",
     "write_file",
 }
 # Channel message tool - available when any channel (Feishu/DingTalk/WeCom) is configured
@@ -4079,6 +4091,126 @@ async def _complete_focus_item_outcome(
     return _typed_success(f"Focus item completed: {key}")
 
 
+def _resolve_list_project(
+    arguments: dict,
+    runtime_list_project: str | None,
+    session_id: str,
+) -> str:
+    """Resolve the list scope: model-explicit project > platform-derived > session.
+
+    The model may pass ``project`` explicitly (visible in the injected context,
+    never invented); otherwise the platform's workspace-derived value wins;
+    otherwise a per-session fallback keeps the scope non-empty and isolated.
+    """
+    project = arguments.get("project")
+    if isinstance(project, str) and project.strip():
+        return project.strip()
+    if runtime_list_project:
+        return runtime_list_project
+    return f"session:{session_id}"
+
+
+async def _list_list_items_outcome(
+    agent_id: uuid.UUID,
+    arguments: dict,
+    *,
+    session_id: str,
+    runtime_list_project: str | None,
+) -> ToolExecutionOutcome:
+    """Return a typed list read for one (agent, project) scope."""
+    project = _resolve_list_project(arguments, runtime_list_project, session_id)
+    try:
+        items = await list_list_items(
+            agent_id,
+            project=project,
+            include_completed=bool(arguments.get("include_completed", False)),
+        )
+    except Exception as exc:
+        return _typed_failure(
+            f"List items could not be read: {type(exc).__name__}",
+            "list_read_failed",
+            retryable=True,
+        )
+    if not items:
+        return _typed_success("No list items.")
+    lines = ["List items:"]
+    for item in items:
+        label = item["status"]
+        title = item.get("title")
+        if title:
+            lines.append(
+                f"{item['sort_order']}. {title} ({item['key']}) [{label}]: {item['description']}"
+            )
+        else:
+            lines.append(
+                f"{item['sort_order']}. {item['key']} [{label}]: {item['description']}"
+            )
+    return _typed_success("\n".join(lines))
+
+
+async def _upsert_list_item_outcome(
+    agent_id: uuid.UUID,
+    arguments: dict,
+    *,
+    session_id: str,
+    runtime_list_project: str | None,
+) -> ToolExecutionOutcome:
+    project = _resolve_list_project(arguments, runtime_list_project, session_id)
+    description = (arguments.get("description") or "").strip()
+    if not description:
+        return _typed_failure(
+            "Missing required argument 'description' for upsert_list_item.",
+            "invalid_tool_arguments",
+        )
+    try:
+        item = await upsert_list_item(
+            agent_id,
+            project=project,
+            key=arguments.get("key"),
+            title=arguments.get("title"),
+            description=description,
+            status=arguments.get("status") or "pending",
+        )
+    except Exception as exc:
+        return _typed_failure(
+            f"List item could not be saved: {type(exc).__name__}",
+            "list_write_failed",
+        )
+    title = f" (title: {item['title']})" if item.get("title") else ""
+    return _typed_success(
+        f"List item saved: {item['sort_order']}. {item['key']}{title} — {item['description']}"
+    )
+
+
+async def _complete_list_item_outcome(
+    agent_id: uuid.UUID,
+    arguments: dict,
+    *,
+    session_id: str,
+    runtime_list_project: str | None,
+) -> ToolExecutionOutcome:
+    project = _resolve_list_project(arguments, runtime_list_project, session_id)
+    key = (arguments.get("key") or "").strip()
+    if not key:
+        return _typed_failure(
+            "Missing required argument 'key' for complete_list_item.",
+            "invalid_tool_arguments",
+        )
+    try:
+        item = await complete_list_item(agent_id, project=project, key=key)
+    except Exception as exc:
+        return _typed_failure(
+            f"List item could not be completed: {type(exc).__name__}",
+            "list_write_failed",
+        )
+    if item is None:
+        return _typed_failure(
+            f"List item not found: {key}",
+            "list_item_not_found",
+        )
+    return _typed_success(f"List item completed: {key}")
+
+
 async def _read_file_outcome(
     agent_id: uuid.UUID,
     arguments: dict,
@@ -4096,6 +4228,11 @@ async def _read_file_outcome(
         return _typed_failure(
             "Focus is structured data; use list_focus_items.",
             "focus_file_path_removed",
+        )
+    if is_list_file_path(path):
+        return _typed_failure(
+            "Lists are structured data; use list_list_items.",
+            "list_file_path_removed",
         )
     binary_error = _read_file_binary_error(path)
     if binary_error is not None:
@@ -5620,6 +5757,7 @@ async def execute_builtin_tool_outcome(
     runtime_execution_id: str | None = None,
     runtime_lease_owner: str | None = None,
     runtime_tenant_id: str | None = None,
+    runtime_list_project: str | None = None,
     runtime_code_timeout_seconds: float | None = None,
     execution_binding: Mapping[str, object] | None = None,
 ) -> ToolExecutionOutcome | str:
@@ -5685,6 +5823,27 @@ async def execute_builtin_tool_outcome(
         return await _upsert_focus_item_outcome(agent_id, arguments)
     if tool_name == "complete_focus_item":
         return await _complete_focus_item_outcome(agent_id, arguments)
+    if tool_name == "list_list_items":
+        return await _list_list_items_outcome(
+            agent_id,
+            arguments,
+            session_id=session_id,
+            runtime_list_project=runtime_list_project,
+        )
+    if tool_name == "upsert_list_item":
+        return await _upsert_list_item_outcome(
+            agent_id,
+            arguments,
+            session_id=session_id,
+            runtime_list_project=runtime_list_project,
+        )
+    if tool_name == "complete_list_item":
+        return await _complete_list_item_outcome(
+            agent_id,
+            arguments,
+            session_id=session_id,
+            runtime_list_project=runtime_list_project,
+        )
     if tool_name == "read_file":
         return await _read_file_outcome(
             agent_id,
@@ -6312,12 +6471,49 @@ async def execute_tool(
                 return "❌ Missing required argument 'key' for complete_focus_item"
             item = await complete_focus_item(agent_id, key=key)
             result = f"✅ Focus item completed: {key}" if item else f"❌ Focus item not found: {key}"
+        elif tool_name == "list_list_items":
+            project = _resolve_list_project(arguments, None, session_id)
+            items = await list_list_items(agent_id, project=project, include_completed=bool(arguments.get("include_completed", False)))
+            if not items:
+                result = "No list items."
+            else:
+                lines = ["List items:"]
+                for item in items:
+                    label = item["status"]
+                    if item.get("title"):
+                        lines.append(f"{item['sort_order']}. {item['title']} ({item['key']}) [{label}]: {item['description']}")
+                    else:
+                        lines.append(f"{item['sort_order']}. {item['key']} [{label}]: {item['description']}")
+                result = "\n".join(lines)
+        elif tool_name == "upsert_list_item":
+            project = _resolve_list_project(arguments, None, session_id)
+            description = (arguments.get("description") or "").strip()
+            if not description:
+                return "❌ Missing required argument 'description' for upsert_list_item"
+            item = await upsert_list_item(
+                agent_id,
+                project=project,
+                key=arguments.get("key"),
+                title=arguments.get("title"),
+                description=description,
+                status=arguments.get("status") or "pending",
+            )
+            result = f"✅ List item saved: {item['sort_order']}. {item['key']} (title: {item['title']}) — {item['description']}" if item.get("title") else f"✅ List item saved: {item['sort_order']}. {item['key']} — {item['description']}"
+        elif tool_name == "complete_list_item":
+            project = _resolve_list_project(arguments, None, session_id)
+            key = (arguments.get("key") or "").strip()
+            if not key:
+                return "❌ Missing required argument 'key' for complete_list_item"
+            item = await complete_list_item(agent_id, project=project, key=key)
+            result = f"✅ List item completed: {key}" if item else f"❌ List item not found: {key}"
         elif tool_name == "read_file":
             path = arguments.get("path")
             if not path:
                 return "❌ Missing required argument 'path' for read_file"
             if is_focus_file_path(path):
                 return "❌ Focus is no longer stored in focus.md. Use list_focus_items, upsert_focus_item, and complete_focus_item."
+            if is_list_file_path(path):
+                return "❌ Lists are no longer stored in 清单.md. Use list_list_items, upsert_list_item, and complete_list_item."
             offset = int(arguments.get("offset", 0))
             limit = int(arguments.get("limit", 2000))
             result = await _storage_read_file(agent_id, path, tenant_id=_agent_tenant_id, offset=offset, limit=limit)

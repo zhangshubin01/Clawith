@@ -250,6 +250,7 @@ async def lifespan(app: FastAPI):
             import app.models.trigger        # noqa
             import app.models.trigger_execution  # noqa
             import app.models.focus          # noqa
+            import app.models.list           # noqa
             import app.models.notification   # noqa
             import app.models.gateway_message # noqa
             import app.models.agent_credential  # noqa

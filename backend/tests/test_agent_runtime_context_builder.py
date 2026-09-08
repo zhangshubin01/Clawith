@@ -590,7 +590,7 @@ async def test_bridge_active_active_section_uses_phase_phrase_and_pending_line()
     section = _task_section(
         phase=PHASE_ACTIVE,
         ended="completed",
-        pending=(PendingListRef(list_id=uuid.uuid4(), title="app 优化清单", item_count=2),),
+        pending=(PendingListRef(title="app 优化清单", item_count=2),),
     )
     builder = context_builder.ContextBuilder(
         _SessionContextService(SessionContextPack(SessionContextSnapshot.empty(), ())),
@@ -605,7 +605,7 @@ async def test_bridge_active_active_section_uses_phase_phrase_and_pending_line()
     assert summary["content"].startswith(
         "历史上下文（非当前任务）：上一轮任务已交付，仍有未决事项"
     )
-    assert "未决事项：清单「app 优化清单」（2 项，见 memory/清单.md）" in summary["content"]
+    assert "未决事项：清单「app 优化清单」（2 项，见 list_list_items）" in summary["content"]
 
 
 @pytest.mark.asyncio

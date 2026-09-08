@@ -531,6 +531,98 @@ async def test_focus_read_and_write_handlers_return_native_typed_outcomes(
 
 
 @pytest.mark.asyncio
+async def test_list_read_and_write_handlers_return_native_typed_outcomes(
+    monkeypatch,
+) -> None:
+    captured: dict = {}
+
+    async def fake_list(*args, **kwargs):
+        captured["list_kwargs"] = kwargs
+        return [
+            {
+                "key": "run_lint",
+                "title": "Run lint",
+                "description": "Add lint",
+                "status": "pending",
+                "sort_order": 92,
+            }
+        ]
+
+    async def fake_upsert(*args, **kwargs):
+        captured["upsert_kwargs"] = kwargs
+        return {
+            "key": "run_lint",
+            "title": "Run lint",
+            "description": "Add lint",
+            "status": "pending",
+            "sort_order": 92,
+        }
+
+    async def fake_complete(*args, **kwargs):
+        captured["complete_kwargs"] = kwargs
+        return {
+            "key": "run_lint",
+            "title": "Run lint",
+            "description": "Add lint",
+            "status": "completed",
+            "sort_order": 92,
+        }
+
+    monkeypatch.setattr(agent_tools, "list_list_items", fake_list)
+    monkeypatch.setattr(agent_tools, "upsert_list_item", fake_upsert)
+    monkeypatch.setattr(agent_tools, "complete_list_item", fake_complete)
+
+    read_outcome = await agent_tools.execute_builtin_tool_outcome(
+        "list_list_items",
+        {},
+        agent_id=None,
+        user_id=None,
+        session_id="s1",
+        runtime_list_project="mydome1",
+    )
+    assert isinstance(read_outcome, ToolExecutionOutcome)
+    assert read_outcome.status == "succeeded"
+    assert "92. Run lint (run_lint)" in (read_outcome.result_summary or "")
+    assert captured["list_kwargs"]["project"] == "mydome1"
+
+    write_outcome = await agent_tools.execute_builtin_tool_outcome(
+        "upsert_list_item",
+        {"description": "Add lint", "title": "Run lint"},
+        agent_id=None,
+        user_id=None,
+        session_id="s1",
+    )
+    assert isinstance(write_outcome, ToolExecutionOutcome)
+    assert write_outcome.status == "succeeded"
+    assert "run_lint" in (write_outcome.result_summary or "")
+    # No project passed and no platform-derived scope -> session fallback.
+    assert captured["upsert_kwargs"]["project"] == "session:s1"
+
+    complete_outcome = await agent_tools.execute_builtin_tool_outcome(
+        "complete_list_item",
+        {"key": "run_lint", "project": "mydome1"},
+        agent_id=None,
+        user_id=None,
+        session_id="s1",
+    )
+    assert isinstance(complete_outcome, ToolExecutionOutcome)
+    assert complete_outcome.status == "succeeded"
+    # Explicit model project wins over the (absent) platform scope.
+    assert captured["complete_kwargs"]["project"] == "mydome1"
+
+
+@pytest.mark.asyncio
+async def test_typed_list_validation_failure_is_explicit_not_unknown() -> None:
+    outcome = await agent_tools.execute_builtin_tool_outcome(
+        "upsert_list_item", {}, agent_id=None, user_id=None, session_id="s1"
+    )
+
+    assert isinstance(outcome, ToolExecutionOutcome)
+    assert outcome.status == "failed"
+    assert outcome.error_code == "invalid_tool_arguments"
+
+
+@pytest.mark.asyncio
 async def test_typed_builtin_validation_failure_is_explicit_not_unknown() -> None:
     outcome = await agent_tools.execute_builtin_tool_outcome(
         "upsert_focus_item", {}, agent_id=None, user_id=None

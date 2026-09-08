@@ -35,6 +35,7 @@ _TOOL_TOKEN_BUDGET: dict[str, int] = {
     "list_dir": 3000,
     "list_files": 3000,  # ACP/agent_tools 实际传 list_files；缺失会落 _default 并走 _text（有损根因）
     "list_focus_items": 2000,
+    "list_list_items": 2000,
     "execute_command": 2000,
     "run_in_terminal": 2000,
     "_default": 2000,
@@ -46,6 +47,7 @@ _TOOL_TYPE_ROUTE: dict[str, str] = {
     "list_files": "list",
     "list_dir": "list",
     "list_focus_items": "list",
+    "list_list_items": "list",
     "read_file": "code",
     "read_document": "code",
     "search_files": "search",

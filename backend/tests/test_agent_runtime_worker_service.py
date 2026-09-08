@@ -22,9 +22,6 @@ from app.services.agent_runtime.heartbeat_completion import (
     HeartbeatRuntimeCompletionHandler,
     HeartbeatSeedFocusHandler,
 )
-from app.services.agent_runtime.list_persistence import (
-    ListPersistenceCompletionHandler,
-)
 from app.services.agent_runtime.onboarding_completion import (
     OnboardingRuntimeCompletionHandler,
 )
@@ -406,7 +403,6 @@ def test_component_builder_installs_current_agent_and_planning_graphs() -> None:
     terminal_handlers = components.worker._post_checkpoint_handler._terminal_handlers
     assert [type(handler) for handler in terminal_handlers] == [
         SessionContextCompletionHandler,
-        ListPersistenceCompletionHandler,
         TaskRuntimeCompletionHandler,
         TriggerRuntimeCompletionHandler,
         HeartbeatRuntimeCompletionHandler,
@@ -419,9 +415,6 @@ def test_component_builder_installs_current_agent_and_planning_graphs() -> None:
     checkpoint_handlers = components.worker._post_checkpoint_handler._checkpoint_handlers
     assert [type(handler) for handler in checkpoint_handlers] == [
         PlanningCheckpointScheduler,
-        # 票 06（D-12）：waiting 清单落库须在任务状态 WaitingHandler 之前，
-        # paused 节才能带上本 run 的 waiting 清单指针。
-        ListPersistenceCompletionHandler,
         SessionTaskStateWaitingHandler,
     ]
 

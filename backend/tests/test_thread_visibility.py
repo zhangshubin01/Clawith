@@ -479,14 +479,14 @@ async def test_summary_appends_pending_lists_line_after_goal_and_artifacts():
         messages,
         current_run_id="run-current",
         completion_phrase="上一轮任务已交付，仍有未决事项",
-        pending_lists_line="未决事项：清单「app 优化清单」（2 项，见 memory/清单.md）",
+        pending_lists_line="未决事项：清单「app 优化清单」（2 项，见 list_list_items）",
     )
 
     content = summary["content"]
     assert content.startswith("历史上下文（非当前任务）：上一轮任务已交付，仍有未决事项")
     assert "任务「优化 app」" in content
     assert "artifact://apk" in content
-    assert content.endswith("未决事项：清单「app 优化清单」（2 项，见 memory/清单.md）。")
+    assert content.endswith("未决事项：清单「app 优化清单」（2 项，见 list_list_items）。")
     # the pointer line comes after the goal
     assert content.index("任务「优化 app」") < content.index("未决事项：")
 

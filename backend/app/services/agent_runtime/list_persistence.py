@@ -1,87 +1,57 @@
-"""Deterministic numbered-list persistence from terminal Run closing answers.
+"""Platform-derived list scope and legacy 清单.md parsing.
 
-R1 of the Run-context-inheritance fix: when a Run completes, the numbered list
-in its closing answer is extracted by pure-function rules (never an LLM), then
-merged into the agent's ``memory/清单.md`` with continued numbering, and an
-index pointer row is written into ``session_context_states.open_items``.
+The numbered-list channel is now structured — ``agent_list_items`` plus the
+``list/upsert/complete_list_item`` tools — so the free-text extraction path
+(R1) and the open_items pointer mechanism are gone. This module keeps only the
+two pieces the migration still needs: ``extract_workspace_project`` (the
+platform-derived list scope) and ``parse_list_file`` (the legacy 清单.md
+parser used by ``migrate_legacy_list_file`` for the one-time import).
 """
 
 from __future__ import annotations
 
 from collections import Counter
-from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, replace
-from datetime import UTC, datetime
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 import json
-import logging
 import re
 import uuid
 
-from app.services.agent_runtime.command_worker import (
-    CheckpointObservation,
-    RuntimeRunRecord,
-    RuntimeSessionFactory,
-)
-from app.services.agent_runtime.delivery import waiting_content
-from app.services.agent_runtime.session_context_service import (
-    SessionContextCandidate,
-    SessionContextConflict,
-    SessionContextService,
-)
-from app.services.agent_runtime.state import (
-    JsonObject,
-    JsonValue,
-    runtime_messages_as_json,
-)
-from app.services.storage import get_storage_backend, normalize_storage_key
-from app.services.storage_runtime.base import StorageBackend
-
-logger = logging.getLogger(__name__)
+from app.services.agent_runtime.state import JsonObject
 
 LIST_FILE_PATH = "memory/清单.md"
 
-# Lifecycle statuses that mark a Run as waiting (non-terminal). In these
-# states the closing content lives in ``lifecycle.waiting_request`` rather than
-# ``final_answer``. Exposed so the worker_service checkpoint-handler wiring
-# (ticket 06) can opt into persisting waiting closing lists.
-WAITING_STATUSES = ("waiting_user", "waiting_external", "waiting_agent")
-
-# R5 numbering contract, injected once per Run into the system prompt. Stable
-# wording: changes here are a model-visible contract change (backend/AGENTS.md).
+# Model-visible numbering contract, injected once per Run into the system
+# prompt. Stable wording: changes here are a model-visible contract change
+# (backend/AGENTS.md).
 LIST_NUMBERING_CONTRACT = (
-    "\n\n# Numbered Lists\n\n如产出编号清单，必须每行 `N. 标题 — 一句话说明`；同一清单重问时延续原编号、只增补不重排；用户以编号引用清单时，以上下文/历史检索注入的清单条目为准执行，不得自行重排或猜测候选。"
+    "\n\n# Numbered Lists\n\n"
+    "清单（待办/候选/未决事项）必须通过 list_list_items / upsert_list_item / complete_list_item 工具声明与维护，"
+    "不得只写在回复文本或手写 memory/清单.md。清单作用域（project）由平台派生，不得自行发明 list_id。\n\n"
+    "- 编号即身份：每条目编号 = 工具分配的 sort_order（per-project 单调递增、永不重排）。向用户呈现清单时编号必须与 "
+    "list_list_items 输出一致；呈现子集/过滤视图时保留原 sort_order 编号，绝不从 1 重新编号。\n"
+    "- 解析优先级：用户以裸编号（如「先做 #92+#93」）引用清单时，按次序解析：①本对话注入的清单索引"
+    "（= system 提示词动态尾注入的活跃项 title 索引，逐项 `{sort_order}. {title} ({key})` 原文）；②list_list_items 读出的当前清单。"
+    "均以工具输出/清单索引的编号与条目原文为准，不得自行重排、猜测或补造候选。注入窗口有界（活跃项 N 项），"
+    "窗口外编号引用（含 completed 项）不在注入索引里——此时用稳定编号做一次 list_list_items 确定性解析（查得准，非猜）；"
+    "若查无该编号/key（如 completed 项已归档后仍被引用），如实说明该编号无对应未完成项并追问，绝不顺延到邻近编号。\n"
+    "- 完成凭据：complete_list_item 以 key 为凭据；注入索引每项已带 key，直接用 key 完成；只有裸编号且无 key 时才 list_list_items 解析。\n"
+    "- 兜底消歧：多份清单并存且无法唯一确定所指时，先复述候选条目（编号+标题，逐字引用）向用户确认后再动工；"
+    "查无该编号/key 时如实说明并追问，绝不顺延到邻近编号。"
 )
 
 _ITEM_LINE = re.compile(r"^\s*(\d+)\s*[.、)）]\s*(.+?)\s*$")
-_HEADING_LINE = re.compile(r"^\s*#+\s+(.+?)\s*$")
-_BOLD_LINE = re.compile(r"^\s*\*\*(.+?)\*\*\s*$")
 _HEADER_LINE = re.compile(r"^## list:([0-9a-fA-F-]{36}) \| project: (.+?) \| 标题：(.+?) \| (.+?)\s*$")
 _WORKSPACE_SEGMENT = re.compile(r"^workspace/([^/]+)/")
-_TITLE_MAX_CHARS = 40
-
-
-class ListPersistenceError(RuntimeError):
-    """A terminal list cannot be persisted without violating its own rules."""
-
-    def __init__(self, code: str, message: str) -> None:
-        super().__init__(message)
-        self.code = code
 
 
 @dataclass(frozen=True, slots=True)
 class ListItem:
-    """One numbered entry of a persisted list."""
+    """One numbered entry of a legacy persisted list."""
 
     number: int
     title: str
     description: str
-
-
-@dataclass(frozen=True, slots=True)
-class ParsedList:
-    """The numbered list extracted from one closing answer."""
-
-    items: tuple[ListItem, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -117,64 +87,13 @@ def _split_title_description(body: str) -> tuple[str, str] | None:
     return title, description
 
 
-def parse_numbered_list(text: str) -> ParsedList | None:
-    """Extract ``N. 标题 — 说明`` lines; prose and table rows are rejected.
-
-    Table rows (leading ``|``) and numbered lines without the em-dash
-    separator are ignored. A list needs at least two entries — a lone numbered
-    line inside prose is not a list.
-    """
-    items: list[ListItem] = []
-    for line in text.splitlines():
-        stripped = line.strip()
-        if stripped.startswith("|") or stripped.endswith("|"):
-            continue
-        match = _ITEM_LINE.match(line)
-        if match is None:
-            continue
-        body = _split_title_description(match.group(2))
-        if body is None:
-            continue
-        number = int(match.group(1))
-        title, description = body
-        items.append(ListItem(number=number, title=title, description=description))
-    if len(items) < 2:
-        return None
-    return ParsedList(items=tuple(items))
-
-
-def extract_list_title(text: str, *, fallback: str) -> str:
-    """The nearest heading before the first item line, else the goal truncated."""
-    fallback_title = fallback.strip()[:_TITLE_MAX_CHARS]
-    if not fallback_title:
-        fallback_title = "清单"
-    pending: str | None = None
-    for line in text.splitlines():
-        heading = _HEADING_LINE.match(line)
-        if heading is not None:
-            candidate = heading.group(1).strip()
-            if candidate:
-                pending = candidate
-                continue
-        bold = _BOLD_LINE.match(line)
-        if bold is not None:
-            candidate = bold.group(1).strip()
-            if candidate:
-                pending = candidate
-                continue
-        item = _ITEM_LINE.match(line)
-        if item is not None and _split_title_description(item.group(2)) is not None:
-            return pending if pending is not None else fallback_title
-    return fallback_title
-
-
 def extract_workspace_project(messages: Sequence[JsonObject]) -> str | None:
     """Most frequent ``workspace/<name>`` first segment across tool-call paths.
 
     Only paths carrying the explicit ``workspace/`` prefix participate (D1);
     ties break by first occurrence, which keeps the result deterministic.
     Returns None when no such path exists — the caller degrades to a
-    session-level merge key.
+    session-level scope.
     """
     counts: Counter[str] = Counter()
     for message in messages:
@@ -208,57 +127,6 @@ def extract_workspace_project(messages: Sequence[JsonObject]) -> str | None:
     if not counts:
         return None
     return counts.most_common(1)[0][0]
-
-
-def _item_text(item: ListItem) -> str:
-    return f"{item.title} — {item.description}"
-
-
-def merge_list_items(
-    existing: Sequence[ListItem],
-    incoming: Sequence[ListItem],
-) -> tuple[ListItem, ...]:
-    """Continue numbering, append only, never reorder (D1 versioned merge).
-
-    Incoming numbers are ignored: entries already present by full text are
-    dropped, so replaying the same terminal handler is idempotent.
-    """
-    merged = list(existing)
-    seen = {_item_text(item) for item in merged}
-    next_number = max((item.number for item in merged), default=0)
-    for item in incoming:
-        text = _item_text(item)
-        if text in seen:
-            continue
-        seen.add(text)
-        next_number += 1
-        merged.append(ListItem(number=next_number, title=item.title, description=item.description))
-    return tuple(merged)
-
-
-def _render_header(section: ListSection) -> str:
-    project = section.project if section.project else "-"
-    return f"## list:{section.list_id} | project: {project} | 标题：{section.title} | {section.timestamp}\n"
-
-
-def _render_section(section: ListSection) -> str:
-    lines = [_render_header(section)]
-    for item in section.items:
-        lines.append(f"{item.number}. {_item_text(item)}\n")
-    return "".join(lines)
-
-
-def render_list_file(parsed: ListFile) -> str:
-    """Serialize back; raw blocks round-trip byte-exact."""
-    parts: list[str] = []
-    for block in parsed.blocks:
-        if isinstance(block, str):
-            parts.append(block)
-        else:
-            if parts and not parts[-1].endswith("\n"):
-                parts.append("\n")
-            parts.append(_render_section(block))
-    return "".join(parts)
 
 
 def _parse_section_lines(lines: list[str]) -> ListSection | None:
@@ -346,266 +214,12 @@ def parse_list_file(content: str) -> ListFile:
     return ListFile(blocks=tuple(blocks))
 
 
-def _closing_content(checkpoint: CheckpointObservation) -> str | None:
-    lifecycle = checkpoint.state["lifecycle"]
-    answer = lifecycle.get("final_answer")
-    if isinstance(answer, str) and answer.strip():
-        return answer.strip()
-    request = lifecycle.get("delivery_request")
-    if isinstance(request, Mapping):
-        content = request.get("content")
-        if isinstance(content, str) and content.strip():
-            return content.strip()
-    waiting = lifecycle.get("waiting_request")
-    if isinstance(waiting, Mapping):
-        content = waiting_content(waiting)
-        if content.strip():
-            return content.strip()
-    return None
-
-
-def _is_pointer_for(open_item: JsonValue, list_id: uuid.UUID) -> bool:
-    return (
-        isinstance(open_item, Mapping)
-        and open_item.get("list_ref") == LIST_FILE_PATH
-        and open_item.get("list_id") == str(list_id)
-    )
-
-
-class ListPersistenceCompletionHandler:
-    """Persist the closing answer's numbered list at the terminal Run boundary.
-
-    Terminal-handler hook (RuntimeCheckpointSideEffects.terminal_handlers):
-    covers the gap where open_items had no writer when a Run finishes without
-    compaction. Best-effort idempotent by design — replay merges to the same
-    file content and pointer row.
-    """
-
-    def __init__(
-        self,
-        *,
-        session_factory: RuntimeSessionFactory,
-        context_service: SessionContextService | None = None,
-        storage: StorageBackend | None = None,
-        max_conflict_retries: int = 3,
-        clock: Callable[[], datetime] | None = None,
-        trigger_statuses: Sequence[str] = ("completed",),
-    ) -> None:
-        if max_conflict_retries <= 0:
-            raise ValueError("max_conflict_retries must be positive")
-        self._session_factory = session_factory
-        self._context_service = context_service or SessionContextService()
-        self._storage = storage
-        self._max_conflict_retries = max_conflict_retries
-        self._clock = clock or (lambda: datetime.now(UTC))
-        self._trigger_statuses = tuple(trigger_statuses)
-
-    def _storage_backend(self) -> StorageBackend:
-        return self._storage or get_storage_backend()
-
-    def _now(self) -> datetime:
-        return self._clock()
-
-    async def _load_file(self, key: str) -> str:
-        storage = self._storage_backend()
-        try:
-            if not await storage.exists(key) or not await storage.is_file(key):
-                return ""
-            return await storage.read_text(key, encoding="utf-8", errors="replace")
-        except (OSError, ValueError):
-            # Local agent-file storage failure or invalid key: start empty.
-            logger.warning("Failed to read list file %s; starting empty", key, exc_info=True)
-            return ""
-
-    async def _write_file(self, key: str, content: str) -> None:
-        await self._storage_backend().write_text(key, content, encoding="utf-8")
-
-    async def _load_session_pointer_list_id(
-        self,
-        *,
-        tenant_id: uuid.UUID,
-        session_id: uuid.UUID,
-    ) -> uuid.UUID | None:
-        async with self._session_factory() as db:
-            snapshot = await self._context_service.load_snapshot(
-                db,
-                tenant_id=tenant_id,
-                session_id=session_id,
-            )
-        for open_item in snapshot.open_items:
-            if not isinstance(open_item, Mapping):
-                continue
-            if open_item.get("list_ref") != LIST_FILE_PATH:
-                continue
-            raw_list_id = open_item.get("list_id")
-            if not isinstance(raw_list_id, str):
-                continue
-            try:
-                return uuid.UUID(raw_list_id)
-            except ValueError:
-                continue
-        return None
-
-    async def _replace_pointer(
-        self,
-        *,
-        tenant_id: uuid.UUID,
-        session_id: uuid.UUID,
-        pointer: JsonObject,
-    ) -> None:
-        raw_list_id = pointer["list_id"]
-        if not isinstance(raw_list_id, str):
-            raise ListPersistenceError(
-                "invalid_list_pointer",
-                "list pointer list_id must be a string",
-            )
-        list_id = uuid.UUID(raw_list_id)
-        for _attempt in range(self._max_conflict_retries):
-            async with self._session_factory() as db:
-                async with db.begin():
-                    snapshot = await self._context_service.load_snapshot(
-                        db,
-                        tenant_id=tenant_id,
-                        session_id=session_id,
-                    )
-                    open_items = [value for value in snapshot.open_items if not _is_pointer_for(value, list_id)]
-                    open_items.append(pointer)
-                    candidate = SessionContextCandidate(
-                        summary=snapshot.summary,
-                        requirements=snapshot.requirements,
-                        decisions=snapshot.decisions,
-                        open_items=tuple(open_items),
-                        evidence_refs=snapshot.evidence_refs,
-                        workspace_refs=snapshot.workspace_refs,
-                        covered_through_message_id=snapshot.covered_through_message_id,
-                    )
-                    try:
-                        await self._context_service.compare_and_swap(
-                            db,
-                            tenant_id=tenant_id,
-                            session_id=session_id,
-                            expected_version=snapshot.version,
-                            expected_covered_through_message_id=(snapshot.covered_through_message_id),
-                            candidate=candidate,
-                        )
-                        return
-                    except SessionContextConflict:
-                        continue
-        raise ListPersistenceError(
-            "list_pointer_conflict_limit",
-            "Session Context kept changing while the list pointer was replaced",
-        )
-
-    async def handle(
-        self,
-        *,
-        run: RuntimeRunRecord,
-        checkpoint: CheckpointObservation,
-    ) -> None:
-        if checkpoint.state["lifecycle"].get("status") not in self._trigger_statuses:
-            return
-        if run.agent_id is None:
-            return
-        closing = _closing_content(checkpoint)
-        if closing is None:
-            return
-        parsed = parse_numbered_list(closing)
-        if parsed is None:
-            return
-        try:
-            messages = runtime_messages_as_json(checkpoint.state)
-        except (TypeError, ValueError):
-            messages = ()
-        project = extract_workspace_project(messages)
-        title = extract_list_title(closing, fallback=run.goal)
-
-        storage_key = normalize_storage_key(f"{run.agent_id}/{LIST_FILE_PATH}")
-        content = await self._load_file(storage_key)
-        parsed_file = parse_list_file(content)
-
-        section: ListSection | None = None
-        if project is not None:
-            # D1 merge key: (agent, workspace project, list kind). The only kind
-            # this channel writes is the numbered list, so the project alone
-            # identifies the list; the title is a display field, not identity.
-            for candidate in parsed_file.sections:
-                if candidate.project == project:
-                    section = candidate
-        elif run.session_id is not None:
-            try:
-                session_id = uuid.UUID(run.session_id)
-            except ValueError:
-                session_id = None
-            if session_id is not None:
-                pointer_list_id = await self._load_session_pointer_list_id(
-                    tenant_id=run.tenant_id,
-                    session_id=session_id,
-                )
-                if pointer_list_id is not None:
-                    for candidate in parsed_file.sections:
-                        if candidate.list_id == pointer_list_id:
-                            section = candidate
-
-        existing_items = section.items if section is not None else ()
-        merged_items = merge_list_items(existing_items, parsed.items)
-        if section is not None and merged_items == section.items:
-            return
-        if section is None:
-            section = ListSection(
-                list_id=uuid.uuid4(),
-                project=project,
-                title=title,
-                timestamp=self._now().strftime("%Y-%m-%d %H:%M"),
-                items=merged_items,
-            )
-            blocks = [*parsed_file.blocks, section]
-        else:
-            updated = replace(
-                section,
-                title=title,
-                timestamp=self._now().strftime("%Y-%m-%d %H:%M"),
-                items=merged_items,
-            )
-            # One list keeps only its latest version (R1): a hand-copied older
-            # section with the same list_id is dropped, never renumbered.
-            blocks = [
-                updated if block is section else block
-                for block in parsed_file.blocks
-                if not (isinstance(block, ListSection) and block is not section and block.list_id == section.list_id)
-            ]
-        await self._write_file(storage_key, render_list_file(ListFile(blocks=tuple(blocks))))
-
-        if run.session_id is None:
-            return
-        try:
-            session_id = uuid.UUID(run.session_id)
-        except ValueError:
-            return
-        await self._replace_pointer(
-            tenant_id=run.tenant_id,
-            session_id=session_id,
-            pointer={
-                "list_ref": LIST_FILE_PATH,
-                "list_id": str(section.list_id),
-                "project": project,
-            },
-        )
-
-
 __all__ = [
     "LIST_FILE_PATH",
     "LIST_NUMBERING_CONTRACT",
-    "WAITING_STATUSES",
     "ListItem",
     "ListFile",
-    "ListPersistenceCompletionHandler",
-    "ListPersistenceError",
     "ListSection",
-    "ParsedList",
-    "extract_list_title",
     "extract_workspace_project",
-    "merge_list_items",
     "parse_list_file",
-    "parse_numbered_list",
-    "render_list_file",
 ]

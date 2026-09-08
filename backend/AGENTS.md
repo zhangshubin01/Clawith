@@ -164,7 +164,7 @@ bounded: at most 3 lists, each title stripped and truncated to 30 characters
 (blank titles fall back to 清单), with a trailing 等 when more lists exist:
 
 ```text
-历史上下文（非当前任务）：[phase wording]。任务「goal」。[未决事项：清单「title」（N 项，见 memory/清单.md）；…]
+历史上下文（非当前任务）：[phase wording]。任务「goal」。[未决事项：清单「title」（N 项，见 list_list_items）；…]
 ```
 
 Wording constants and renderers live in `session_task_state.py`
