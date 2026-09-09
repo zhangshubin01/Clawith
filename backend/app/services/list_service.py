@@ -15,7 +15,6 @@ from app.database import bind_session_context
 from app.models.list import AgentListItem as AgentListItemModel
 from app.services.agent_runtime.list_persistence import (
     LIST_FILE_PATH,
-    ListItem,
     parse_list_file,
 )
 from app.services.storage import get_storage_backend, normalize_storage_key
@@ -65,55 +64,70 @@ async def _load_legacy_list_file(agent_id: uuid.UUID) -> str:
         return ""
 
 
-async def migrate_legacy_list_file(agent_id: uuid.UUID, db=None) -> int:
-    """Import legacy ``清单.md`` once per (agent, project) scope.
+async def migrate_legacy_list_file(
+    agent_id: uuid.UUID,
+    db=None,
+    *,
+    project: str | None = None,
+) -> int:
+    """Import legacy ``清单.md`` into the platform-derived project scope.
 
-    Section numbering is preserved verbatim as ``sort_order`` (so migrated
-    ``92. GitLab CI`` keeps sort_order 92, never renumbered from 1). Sections
-    without a resolvable project fall back to a synthetic ``legacy:<list_id>``
-    scope so distinct NULL-project lists never merge. Idempotent via
-    ``on_conflict_do_nothing``.
+    Sections carrying a named ``project: X`` keep that scope. Sections with no
+    project (``project: -``, the old format's missing-project marker) migrate
+    into the passed ``project`` — the platform-derived workspace scope — so
+    their live items stay visible; only when no ``project`` is resolvable do
+    they fall back to a synthetic ``legacy:<list_id>`` scope. ``sort_order`` is
+    reassigned contiguously after each scope's existing max to satisfy the
+    ``(agent_id, project, sort_order)`` unique constraint. Idempotent via
+    ``on_conflict_do_nothing`` plus in-file key dedup.
     """
     if db is not None:
         async with bind_session_context(db):
-            return await _migrate_legacy_list_file_impl(agent_id)
-    return await _migrate_legacy_list_file_impl(agent_id)
+            return await _migrate_legacy_list_file_impl(agent_id, project=project)
+    return await _migrate_legacy_list_file_impl(agent_id, project=project)
 
 
-async def _migrate_legacy_list_file_impl(agent_id: uuid.UUID) -> int:
+async def _migrate_legacy_list_file_impl(
+    agent_id: uuid.UUID,
+    *,
+    project: str | None = None,
+) -> int:
     content = await _load_legacy_list_file(agent_id)
     if not content:
         return 0
     parsed = parse_list_file(content)
     rows: list[dict] = []
+    # (project, key) dedup spans sections: the old per-scope "already has rows"
+    # skip is gone so a project with runtime rows still migrates its legacy
+    # sections; idempotency now lives in on_conflict_do_nothing by key.
+    seen: set[tuple[str, str]] = set()
+    next_order: dict[str, int] = {}
     for section in parsed.sections:
         if not section.items:
             continue
-        project = section.project or f"legacy:{section.list_id}"
-        existing_keys = await list_dao.list_by_project(
-            agent_id=agent_id,
-            project=project,
-            include_completed=True,
-        )
-        if existing_keys:
-            # Already migrated for this scope (idempotent skip).
-            continue
-        seen: set[str] = set()
+        resolved_project = section.project or project or f"legacy:{section.list_id}"
+        if resolved_project not in next_order:
+            max_order = await list_dao.max_sort_order(
+                agent_id=agent_id,
+                project=resolved_project,
+            )
+            next_order[resolved_project] = max_order + 1
         for item in section.items:
             key = slugify_list_key(item.title or item.description)
-            if not key or key in seen:
+            if not key or (resolved_project, key) in seen:
                 continue
-            seen.add(key)
+            seen.add((resolved_project, key))
             rows.append({
                 "agent_id": agent_id,
-                "project": project,
+                "project": resolved_project,
                 "key": key,
                 "title": item.title,
                 "description": item.description,
                 "status": "pending",
-                "sort_order": item.number,
+                "sort_order": next_order[resolved_project],
                 "completed_at": None,
             })
+            next_order[resolved_project] += 1
     if not rows:
         return 0
     return await list_dao.bulk_insert_legacy_rows(rows)
@@ -129,14 +143,14 @@ async def list_list_items(
     """List items for one (agent, project) in stable sort_order."""
     if db is not None:
         async with bind_session_context(db):
-            await _migrate_legacy_list_file_impl(agent_id)
+            await _migrate_legacy_list_file_impl(agent_id, project=project)
             items = await list_dao.list_by_project(
                 agent_id=agent_id,
                 project=project,
                 include_completed=include_completed,
             )
             return [_serialize_list_item(item) for item in items]
-    await _migrate_legacy_list_file_impl(agent_id)
+    await _migrate_legacy_list_file_impl(agent_id, project=project)
     items = await list_dao.list_by_project(
         agent_id=agent_id,
         project=project,
@@ -161,7 +175,7 @@ async def upsert_list_item(
     ``project`` and ``sort_order`` are platform-controlled (never model
     supplied); ``key`` is normalized with ``slugify_list_key``.
     """
-    await migrate_legacy_list_file(agent_id, db=db)
+    await migrate_legacy_list_file(agent_id, db=db, project=project)
     desc = (description or "").strip()
     item_key = slugify_list_key((key or "").strip() or desc)
     if status not in VALID_STATUSES:
@@ -194,7 +208,7 @@ async def upsert_list_item(
 
 async def complete_list_item(agent_id: uuid.UUID, *, project: str, key: str, db=None) -> dict | None:
     """Complete one list item by key; ``None`` when not found."""
-    await migrate_legacy_list_file(agent_id, db=db)
+    await migrate_legacy_list_file(agent_id, db=db, project=project)
     if db is not None:
         async with bind_session_context(db):
             item = await list_dao.complete_item(

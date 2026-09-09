@@ -914,3 +914,11 @@ async def test_workspace_initialization_does_not_copy_role_metadata_into_soul(
     assert "role" not in soul.lower()
     assert "responsibilit" not in soul.lower()
     assert "personality, values, and working style" in soul
+
+
+def test_list_tool_descriptions_carry_hygiene_guidance() -> None:
+    # P0-a: 三清单工具 description 补「待办 only + 观察写 reflections + 交付 complete 收口」
+    for name in ("list_list_items", "upsert_list_item", "complete_list_item"):
+        description = builtin_model_definition(name)["function"]["description"]
+        assert "actionable todos only" in description
+        assert "reflections" in description

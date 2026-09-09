@@ -37,7 +37,12 @@ LIST_NUMBERING_CONTRACT = (
     "若查无该编号/key（如 completed 项已归档后仍被引用），如实说明该编号无对应未完成项并追问，绝不顺延到邻近编号。\n"
     "- 完成凭据：complete_list_item 以 key 为凭据；注入索引每项已带 key，直接用 key 完成；只有裸编号且无 key 时才 list_list_items 解析。\n"
     "- 兜底消歧：多份清单并存且无法唯一确定所指时，先复述候选条目（编号+标题，逐字引用）向用户确认后再动工；"
-    "查无该编号/key 时如实说明并追问，绝不顺延到邻近编号。"
+    "查无该编号/key 时如实说明并追问，绝不顺延到邻近编号。\n"
+    "- 清单卫生：清单只放待办/候选/未决事项。①非待办内容（核验观察、动作记录、已完成的交付事实、空闲态快照）"
+    "不写清单，写入 reflections（memory）或直接 complete_list_item 收口；②写新条目前先 list_list_items 查是否"
+    "已有同主题条目——有则 upsert 更新既有 key，不新建重复项；③description 是「当前状态收据」，推进或完成后"
+    "必须 upsert 更新为当前事实；④「已完成」用 complete_list_item，不新建「…已闭环」的 pending 项；"
+    "⑤每次交付/收尾时对账清单：已交付、已推进的项必须 complete_list_item 收口，不得残留「已完成但未标 completed」的 pending 项。"
 )
 
 _ITEM_LINE = re.compile(r"^\s*(\d+)\s*[.、)）]\s*(.+?)\s*$")

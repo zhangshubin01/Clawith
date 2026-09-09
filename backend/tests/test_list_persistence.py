@@ -177,3 +177,14 @@ def test_prompt_messages_inject_the_numbering_contract_into_system() -> None:
     assert again[0].content == system
     # Contract text lives with the parser it serves (single source of truth).
     assert "list_list_items" in LIST_NUMBERING_CONTRACT
+
+
+def test_contract_has_list_hygiene_clause() -> None:
+    # P0-a: 清单卫生段 5 条款（待办 only / 先查后写 / 描述收据 / complete 收口 / 交付收尾对账）
+    assert "清单卫生" in LIST_NUMBERING_CONTRACT
+    assert "非待办内容" in LIST_NUMBERING_CONTRACT
+    assert "先 list_list_items 查" in LIST_NUMBERING_CONTRACT
+    assert "当前状态收据" in LIST_NUMBERING_CONTRACT
+    assert "「已完成」用 complete_list_item" in LIST_NUMBERING_CONTRACT
+    assert "对账清单" in LIST_NUMBERING_CONTRACT
+    assert "不得残留" in LIST_NUMBERING_CONTRACT

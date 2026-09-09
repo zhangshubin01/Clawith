@@ -36,6 +36,17 @@ class ListDAO(BaseDAO[AgentListItem]):
             )
             return int(result or 0)
 
+    async def max_sort_order(self, agent_id: Any, project: str) -> int:
+        """Highest sort_order for one (agent, project) scope; 0 when empty."""
+        async with self.session(readonly=True) as db:
+            result = await db.scalar(
+                select(func.max(AgentListItem.sort_order)).where(
+                    AgentListItem.agent_id == agent_id,
+                    AgentListItem.project == project,
+                )
+            )
+            return int(result or 0)
+
     async def bulk_insert_legacy_rows(self, rows: list[dict[str, Any]]) -> int:
         """Insert migrated legacy rows, ignoring existing agent/project/key rows."""
         if not rows:

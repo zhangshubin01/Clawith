@@ -157,7 +157,7 @@ _BUILTIN_TOOL_SOURCE = [
     {
         "name": "list_list_items",
         "display_name": "List Items",
-        "description": "List structured checklist items (清单) for the current project from the system database. The visible number (sort_order) is stable and never renumbered.",
+        "description": "List structured checklist items (清单) for the current project from the system database. The visible number (sort_order) is stable and never renumbered. Checklist = actionable todos only: record observations/conclusions/facts in reflections, not here; complete delivered items via complete_list_item.",
         "category": "file",
         "icon": "☑",
         "is_default": True,
@@ -181,7 +181,7 @@ _BUILTIN_TOOL_SOURCE = [
     {
         "name": "upsert_list_item",
         "display_name": "Upsert List Item",
-        "description": "Create or update a structured checklist item (清单) for the current project. The platform assigns a stable number (sort_order) and normalizes the key.",
+        "description": "Create or update a structured checklist item (清单) for the current project. The platform assigns a stable number (sort_order) and normalizes the key. Checklist = actionable todos only: record observations/conclusions/facts in reflections, not here; complete delivered items via complete_list_item.",
         "category": "file",
         "icon": "☑",
         "is_default": True,
@@ -209,7 +209,7 @@ _BUILTIN_TOOL_SOURCE = [
     {
         "name": "complete_list_item",
         "display_name": "Complete List Item",
-        "description": "Mark a structured checklist item (清单) completed.",
+        "description": "Mark a structured checklist item (清单) completed. Checklist = actionable todos only: record observations/conclusions/facts in reflections, not here; complete delivered items via complete_list_item.",
         "category": "file",
         "icon": "☑",
         "is_default": True,
