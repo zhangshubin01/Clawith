@@ -928,9 +928,9 @@ class FeishuOrgSyncAdapter(BaseOrgSyncAdapter):
                         f"code={error_code}, msg={error_msg}"
                     )
                     # Provide targeted guidance based on error code
-                    if error_code == 40060:
-                        # 40060 = "no dept authority": the app has correct API scopes
-                        # but lacks DATA-level access to this department.
+                    if error_code == 40004:
+                        # 40004 = "no dept authority error" (Feishu official generic error code):
+                        # the app has correct API scopes but lacks DATA-level access to this department.
                         guidance = (
                             f"Feishu API error (code {error_code}): {error_msg}. "
                             f"The app does not have data access to this department. "

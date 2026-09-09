@@ -231,7 +231,7 @@ async def test_provider_rejection_is_not_converted_to_empty_results(monkeypatch)
 
         async def get(self, _url, **_kwargs):
             return FakeResponse(
-                {"code": 40060, "msg": "no department authority"},
+                {"code": 40004, "msg": "no department authority"},
                 status_code=400,
             )
 
@@ -245,4 +245,4 @@ async def test_provider_rejection_is_not_converted_to_empty_results(monkeypatch)
             offset=0,
         )
 
-    assert raised.value.code == 40060
+    assert raised.value.code == 40004
