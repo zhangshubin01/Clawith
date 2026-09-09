@@ -623,6 +623,17 @@
         "manageAccess": "Manage",
         "manageAccessDesc": "Full access including Settings, Mind, and Directory"
       },
+      "maintainers": {
+        "title": "Maintainers",
+        "description": "Maintainers can edit this agent's workspace and skill files. Only the creator or an admin can manage the maintainer list.",
+        "creatorLabel": "Creator · implicit maintainer",
+        "empty": "No maintainers yet",
+        "searchPlaceholder": "Search name or email to add...",
+        "remove": "Remove",
+        "removeConfirmTitle": "Remove maintainer",
+        "removeConfirmMessage": "Remove this user's maintainer role? They will lose the ability to edit workspace and skill files.",
+        "noResults": "No available results"
+      },
       "timezone": {
         "label": "Timezone",
         "description": "Set the timezone for scheduled tasks and time-based triggers",

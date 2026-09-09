@@ -651,6 +651,17 @@
         "manageAccess": "管理",
         "manageAccessDesc": "完全访问权限，包括设置、心智、通讯录"
       },
+      "maintainers": {
+        "title": "维护者",
+        "description": "维护者可以修改此数字员工的工作区与技能文件。只有创建者或管理员可以管理维护者名单。",
+        "creatorLabel": "创建者 · 隐式维护者",
+        "empty": "暂无维护者",
+        "searchPlaceholder": "搜索姓名或邮箱以添加...",
+        "remove": "删除",
+        "removeConfirmTitle": "删除维护者",
+        "removeConfirmMessage": "确定要移除该用户的维护者身份吗？移除后其将无法再修改工作区与技能文件。",
+        "noResults": "无可用结果"
+      },
       "tools": {
         "platformTools": "平台预置工具",
         "agentInstalled": "数字员工自行安装的工具",

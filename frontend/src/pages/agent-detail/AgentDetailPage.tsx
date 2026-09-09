@@ -58,6 +58,7 @@ import ApprovalsTab from './tabs/ApprovalsTab';
 import { AGENT_DETAIL_TABS } from './agentDetailTabs';
 import MindTab from './tabs/MindTab';
 import SettingsTab from './tabs/SettingsTab';
+import MaintainersPanel from './components/MaintainersPanel';
 import SkillsTab from './tabs/SkillsTab';
 import ToolsTab from './tabs/ToolsTab';
 import AgentDirectory from './AgentDirectory';
@@ -2440,6 +2441,11 @@ export default function AgentDetailPage() {
         currentUser?.id != null &&
         (agent as any)?.creator_id != null &&
         String((agent as any).creator_id) === String(currentUser.id);
+    /** Narrow admin predicate (matches backend `is_admin_user`): not the same as `canManage`. */
+    const isAdmin =
+        currentUser?.role === 'platform_admin' ||
+        currentUser?.role === 'org_admin' ||
+        !!(currentUser as any)?.is_platform_admin;
     /** Chat sidebar: who may list all sessions & read others' threads (matches backend scope=all). */
     const canViewAllAgentChatSessions =
         currentUser?.role === 'platform_admin' ||
@@ -7722,6 +7728,14 @@ export default function AgentDetailPage() {
                                     queryClient={queryClient}
                                 />
                             )}
+                            maintainersPanel={(isAgentOwner || isAdmin) ? (
+                                <MaintainersPanel
+                                    agentId={id}
+                                    isOwner={isAgentOwner}
+                                    isAdmin={isAdmin}
+                                    queryClient={queryClient}
+                                />
+                            ) : null}
                             queryClient={queryClient}
                             formatTokens={formatTokens}
                             showDeleteConfirm={showDeleteConfirm}

@@ -212,10 +212,23 @@ async def get_authenticated_user(
     return user
 
 
+def is_admin_user(user) -> bool:
+    """Single source of truth for the "admin" role predicate.
+
+    True when the user's role is ``platform_admin``/``org_admin``, or when their
+    linked Identity carries ``is_platform_admin``. Reuse this instead of writing
+    yet another inline role check (the codebase already forks this predicate in
+    several places).
+    """
+    identity_is_platform_admin = bool(
+        getattr(getattr(user, "identity", None), "is_platform_admin", False)
+    )
+    return user.role in ("platform_admin", "org_admin") or identity_is_platform_admin
+
+
 async def get_current_admin(current_user=Depends(get_current_user)):
     """Dependency to require admin role (platform_admin or org_admin)."""
-    identity_is_platform_admin = bool(getattr(getattr(current_user, "identity", None), "is_platform_admin", False))
-    if current_user.role not in ("platform_admin", "org_admin") and not identity_is_platform_admin:
+    if not is_admin_user(current_user):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin access required")
     return current_user
 

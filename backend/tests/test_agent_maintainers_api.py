@@ -1,8 +1,8 @@
 """API tests for the agent_maintainers management endpoints.
 
-Direct-call style (mirrors test_agent_delete_api.py): the endpoints' role
-gating lives in the ``get_current_admin`` dependency (security layer), so these
-tests focus on the endpoint business logic — tenant isolation (via
+Direct-call style (mirrors test_agent_delete_api.py): the endpoints gate on
+``_require_maintainers_admin`` (creator OR admin), so these tests cover both the
+gating predicate and the endpoint business logic — tenant isolation (via
 ``_require_maintainer_agent``), validation, audit logging, and status codes.
 """
 
@@ -129,6 +129,7 @@ async def test_list_maintainers_returns_items_and_implicit_creator(monkeypatch):
     assert result["maintainers"][0]["user_id"] == str(maintainer_user.id)
     assert result["maintainers"][0]["username"] == "bob"
     assert result["creator"]["user_id"] == str(creator.id)
+    assert result["creator"]["email"] == "alice@example.com"
     assert result["creator"]["is_implicit"] is True
 
 
@@ -361,6 +362,107 @@ async def test_require_maintainer_agent_not_found(monkeypatch):
     with pytest.raises(HTTPException) as exc:
         await agents_api._require_maintainer_agent(RecordingDB(), admin, uuid.uuid4())
     assert exc.value.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# _require_maintainers_admin — creator-or-admin gating (spec §2)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_require_maintainers_admin_allows_creator(monkeypatch):
+    creator = make_user(role="member")
+    agent = make_agent(creator)
+    _patch_agent(monkeypatch, agent)
+
+    resolved = await agents_api._require_maintainers_admin(RecordingDB(), creator, agent.id)
+    assert resolved is agent
+
+
+@pytest.mark.asyncio
+async def test_require_maintainers_admin_allows_admin_non_creator(monkeypatch):
+    admin = make_user(role="org_admin")
+    creator = make_user(role="member", tenant_id=admin.tenant_id)
+    agent = make_agent(creator, tenant_id=admin.tenant_id)
+    _patch_agent(monkeypatch, agent)
+
+    resolved = await agents_api._require_maintainers_admin(RecordingDB(), admin, agent.id)
+    assert resolved is agent
+
+
+@pytest.mark.asyncio
+async def test_require_maintainers_admin_allows_platform_admin_cross_tenant(monkeypatch):
+    platform_admin = make_user(role="platform_admin", tenant_id=None)
+    other_tenant = uuid.uuid4()
+    agent = make_agent(make_user(role="member", tenant_id=other_tenant), tenant_id=other_tenant)
+    _patch_agent(monkeypatch, agent)
+
+    resolved = await agents_api._require_maintainers_admin(RecordingDB(), platform_admin, agent.id)
+    assert resolved is agent
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("role", ["member", "agent_admin"])
+async def test_require_maintainers_admin_rejects_non_creator_non_admin(monkeypatch, role):
+    # Covers the "custom manage access, not owner/admin" user: they can reach the
+    # Settings tab (can_manage) but must still get 403 on the maintainers endpoints.
+    caller = make_user(role=role)
+    creator = make_user(role="member", tenant_id=caller.tenant_id)
+    agent = make_agent(creator, tenant_id=caller.tenant_id)
+    _patch_agent(monkeypatch, agent)
+
+    with pytest.raises(HTTPException) as exc:
+        await agents_api._require_maintainers_admin(RecordingDB(), caller, agent.id)
+    assert exc.value.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_list_maintainers_as_creator(monkeypatch):
+    creator = make_user(role="member")
+    agent = make_agent(creator)
+    _patch_agent(monkeypatch, agent)
+    monkeypatch.setattr(
+        agents_api.maintainer_service, "list_maintainers", lambda db, agent_id: _async_return([])
+    )
+    monkeypatch.setattr(
+        agents_api.user_dao, "get_with_identity", lambda creator_id: _async_return(creator)
+    )
+
+    result = await agents_api.list_agent_maintainers(
+        agent_id=agent.id, current_user=creator, db=RecordingDB()
+    )
+    assert result["maintainers"] == []
+    assert result["creator"]["user_id"] == str(creator.id)
+
+
+@pytest.mark.asyncio
+async def test_add_maintainer_as_creator(monkeypatch):
+    creator = make_user(role="member")
+    agent = make_agent(creator)
+    target = make_user(role="member", tenant_id=creator.tenant_id, username="bob")
+    row = AgentMaintainer(id=uuid.uuid4(), agent_id=agent.id, user_id=target.id)
+
+    _patch_agent(monkeypatch, agent)
+    monkeypatch.setattr(agents_api.user_dao, "get", lambda uid, db=None: _async_return(target))
+    monkeypatch.setattr(
+        agents_api.maintainer_service, "is_maintainer", lambda db, aid, uid: _async_return(False)
+    )
+    monkeypatch.setattr(
+        agents_api.maintainer_service,
+        "add_maintainer",
+        lambda db, *, agent_id, user_id, created_by: _async_return(row),
+    )
+
+    db = RecordingDB()
+    result = await agents_api.add_agent_maintainer(
+        agent_id=agent.id,
+        data={"user_id": str(target.id)},
+        current_user=creator,
+        db=db,
+    )
+    assert result["user_id"] == str(target.id)
+    assert _audit_action(db) == "maintainer_added"
+    assert db.commit_count == 1
 
 
 # ---------------------------------------------------------------------------

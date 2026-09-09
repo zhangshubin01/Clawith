@@ -41,6 +41,7 @@ interface Props {
     wmSaved: boolean;
     onSaveWelcomeMessage: () => Promise<void>;
     accessPermissionsPanel: ReactNode;
+    maintainersPanel: ReactNode;
     queryClient: any;
     formatTokens: (n: number) => string;
     showDeleteConfirm: boolean;
@@ -66,6 +67,7 @@ export default function SettingsTab(props: Props) {
         wmSaved,
         onSaveWelcomeMessage,
         accessPermissionsPanel,
+        maintainersPanel,
         queryClient,
         formatTokens,
         showDeleteConfirm,
@@ -356,6 +358,8 @@ export default function SettingsTab(props: Props) {
             </div>
 
             {accessPermissionsPanel}
+
+            {maintainersPanel}
 
             <div className="card" style={{ marginBottom: '12px' }}>
                 <h4 style={{ marginBottom: '4px', display: 'flex', alignItems: 'center', gap: '8px' }}>

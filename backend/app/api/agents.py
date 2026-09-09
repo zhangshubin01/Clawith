@@ -14,7 +14,7 @@ from sqlalchemy.orm import selectinload
 
 from app.config import get_settings
 from app.core.permissions import check_agent_access, is_agent_creator
-from app.core.security import get_current_admin, get_current_user
+from app.core.security import get_current_user, is_admin_user
 from app.database import async_session, get_db
 from app.models.agent import Agent, AgentPermission, AgentTemplate
 from app.models.agent_run import AgentRun
@@ -1043,9 +1043,9 @@ async def _require_maintainer_agent(
 ) -> Agent:
     """Resolve the agent for a maintainers admin call, with tenant isolation.
 
-    Role gating (platform_admin + org_admin + identity.is_platform_admin) is done
-    by the ``get_current_admin`` dependency on the endpoints; this helper only
-    resolves the agent and enforces tenant isolation.
+    Role gating (creator or platform_admin + org_admin + identity.is_platform_admin)
+    is done by ``_require_maintainers_admin``; this helper only resolves the agent
+    and enforces tenant isolation.
     """
     # arch-guard: allow (platform_admin cross-tenant) — 超管需跨租户，用父类 get() 而非 tenant-scoped get_active()
     agent = await agent_dao.get(agent_id, db=db)
@@ -1057,14 +1057,31 @@ async def _require_maintainer_agent(
     return agent
 
 
+async def _require_maintainers_admin(
+    db: AsyncSession, current_user: User, agent_id: uuid.UUID
+) -> Agent:
+    """Resolve the agent and require the caller to be its creator or an admin.
+
+    Reuses ``_require_maintainer_agent`` for tenant isolation + 404, then requires
+    creator OR admin (``is_admin_user``). Maintainers themselves (non-creator) and
+    plain members get a 403.
+    """
+    agent = await _require_maintainer_agent(db, current_user, agent_id)
+    if is_agent_creator(current_user, agent) or is_admin_user(current_user):
+        return agent
+    raise HTTPException(
+        status.HTTP_403_FORBIDDEN, "Creator or admin access required"
+    )
+
+
 @router.get("/{agent_id}/maintainers")
 async def list_agent_maintainers(
     agent_id: uuid.UUID,
-    current_user: User = Depends(get_current_admin),
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """List explicit maintainers plus the implicit creator."""
-    agent = await _require_maintainer_agent(db, current_user, agent_id)
+    """List explicit maintainers plus the implicit creator (creator or admin)."""
+    agent = await _require_maintainers_admin(db, current_user, agent_id)
     maintainers = await maintainer_service.list_maintainers(db, agent_id)
 
     users_by_id: dict[str, User] = {}
@@ -1095,6 +1112,7 @@ async def list_agent_maintainers(
                 "user_id": str(c.id),
                 "name": c.display_name,
                 "username": c.username,
+                "email": c.email,
                 "is_implicit": True,
             }
     return {"maintainers": items, "creator": creator}
@@ -1104,11 +1122,11 @@ async def list_agent_maintainers(
 async def add_agent_maintainer(
     agent_id: uuid.UUID,
     data: dict,
-    current_user: User = Depends(get_current_admin),
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Add a user as a maintainer (governance action, admin-only)."""
-    agent = await _require_maintainer_agent(db, current_user, agent_id)
+    """Add a user as a maintainer (governance action, creator or admin)."""
+    agent = await _require_maintainers_admin(db, current_user, agent_id)
 
     raw_user_id = data.get("user_id")
     try:
@@ -1163,11 +1181,11 @@ async def add_agent_maintainer(
 async def remove_agent_maintainer(
     agent_id: uuid.UUID,
     user_id: uuid.UUID,
-    current_user: User = Depends(get_current_admin),
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Remove a maintainer (governance action, admin-only)."""
-    agent = await _require_maintainer_agent(db, current_user, agent_id)
+    """Remove a maintainer (governance action, creator or admin)."""
+    agent = await _require_maintainers_admin(db, current_user, agent_id)
 
     if user_id == agent.creator_id:
         raise HTTPException(

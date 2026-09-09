@@ -244,6 +244,15 @@ export const agentApi = {
     collaborators: (id: string) =>
         request<any[]>(`/agents/${id}/collaborators`),
 
+    maintainers: {
+        list: (id: string) =>
+            request<{ maintainers: any[]; creator: any }>(`/agents/${id}/maintainers`),
+        add: (id: string, userId: string) =>
+            request<any>(`/agents/${id}/maintainers`, { method: 'POST', body: JSON.stringify({ user_id: userId }) }),
+        remove: (id: string, userId: string) =>
+            request<void>(`/agents/${id}/maintainers/${userId}`, { method: 'DELETE' }),
+    },
+
     templates: () =>
         request<any[]>('/agents/templates'),
 
