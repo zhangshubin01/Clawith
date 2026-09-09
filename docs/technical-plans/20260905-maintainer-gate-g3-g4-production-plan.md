@@ -273,7 +273,7 @@ P0 先 commit/stash 并行会话的工作区改动（开工前 git status 核对
 | S3 | `agent_maintainers` 管理 API（GET/POST/DELETE `/api/agents/{id}/maintainers`，鉴权含 org_admin）未实现（雷 3 / 验收红线） | ✅ **已实现**（`20260907-agent-maintainers-management-api-production-plan.md`，commit 见该方案 Phase 5）——`is_maintainer` 分支可达、名单可写、鉴权含 org_admin |
 | S4 | 前缀判定用 `normalize_workspace_path`（非 symlink 感知）替换了 §2/§3.3/§3.6 要求的 `safe_agent_path` | **拍板偏离**（grill 决策 1 / G-4：治理层非硬安全，symlink 需先经 `execute_code` 种入=已接受绕过面），代码 docstring 已记录；本表（S4）即为 spec↔代码同步记录 |
 | S5 | legacy `execute_tool` 门控只传 `actor_user_id`、缺 `actor_agent_id` → a2a 规则在 legacy/ACP 链式路径不生效 | durable runtime 路径（`_maintainer_file_gate`）已正确传 `actor_agent_id`；legacy seam 无该参数，且 a2a 文件写走 durable runtime，**记待办**（若 legacy seam 复用于 a2a 再补参） |
-| S6 | 前端「维护人员」tab 未实现（名单管理 UI） | **待办（P2）**。**阻塞性前置依赖**：依赖 S3 管理 API 的 admin 角色门控；**禁复用 `canManage`**（`canManage` ⊃ admin 含 creator，会与 admin-only 后端错位→creator 看到 tab 却 GET 403）——tab 必须按 **admin 角色**（platform_admin/org_admin）门控。S3 已交付，本票可开做 |
+| S6 | 前端「维护人员」tab 未实现（名单管理 UI） | ✅ **已实现（2026-09-09）**（`20260909-maintainer-creator-management-ui-plan.md`，`MaintainersPanel.tsx`）。**修订**：门控随「决策 D 反转」改为 **`isOwner || isAdmin`**（创建者+管理员，见该方案 §0.1），仍**禁复用 `canManage`**（`canManage` 含 custom 模式被授予 manage 的非 owner/admin 用户，会对 `/maintainers` 403）；`isAdmin` = `role in (platform_admin,org_admin) || is_platform_admin`。原注「tab 必须按 admin 角色门控」就此更新 |
 
 核对无误：creator 隐式维护者 ✓、actor-None/heartbeat 回退 creator ✓、group-scoped delete 保留 L3 ✓、A3 正确延期（零实现）✓。
 

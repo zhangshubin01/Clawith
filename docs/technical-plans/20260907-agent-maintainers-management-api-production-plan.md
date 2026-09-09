@@ -83,6 +83,8 @@ async def _require_maintainer_agent(db, current_user: User, agent_id: uuid.UUID)
 
 ### 3.3 服务方法（新增，`backend/app/services/maintainer_service.py`）
 
+> **修订注记（2026-09-09）**：上文「② 决策 D 拍板」已**反转**——维护者名单管理权限由「仅 admin」改为「**创建者 + 管理员**」，理由与依据见 `20260909-maintainer-creator-management-ui-plan.md` §0.1（采纳 dify 的 owner 模型并与 Clawith 既有 admin 门控叠加）。实现据此落地：端点改 `Depends(get_current_user)` + `_require_maintainers_admin`（creator OR `is_admin_user`），共享谓词 `is_admin_user` 抽于 `app/core/security.py`。
+
 在 `MaintainerService` 增 3 个方法（复用 `is_maintainer` 的查询模式）：
 
 ```python
@@ -117,6 +119,8 @@ async def remove_maintainer(self, db, *, agent_id, user_id) -> bool             
 
 - **纯增量**：新端点 + 新服务方法，无既有函数契约变更、无模型/迁移变更（`AgentMaintainer` + f077 已就位）、无运行时门控改动（`is_maintainer` 未动）。
 - 前端：**本方案不含**（TODO 标题限定「管理 API」）；维护人员 tab 是独立 P2（门控方案 §9），届时前端须按 **admin 角色** 而非 `canManage` 门控（`canManage` ⊃ admin，含 creator，会与 admin-only 后端错位——见 Q4）。**硬绑定**：本方案交付时**同步开前端 tab 票**，并标注「阻塞性前置依赖：依赖本方案 admin 角色门控、禁复用 canManage」——闭环不靠人记、靠依赖链兜底。
+
+> **修订注记（2026-09-09）**：前端 tab 已实现（`20260909-maintainer-creator-management-ui-plan.md`）。门控口径随「决策 D 反转」同步改为 **`isOwner || isAdmin`**（窄口径），仍**禁复用 `canManage`**（`canManage` = access_level==='manage' 含 custom 模式被授予 manage 的非 owner/admin 用户，会对 `/maintainers` 403）。`isAdmin` = `role in (platform_admin, org_admin) || is_platform_admin`。
 
 ---
 
