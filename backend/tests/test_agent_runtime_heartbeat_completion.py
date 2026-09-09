@@ -677,6 +677,57 @@ async def test_completed_heartbeat_item_is_not_reopened_by_reclassification() ->
 
 
 @pytest.mark.asyncio
+async def test_classifier_model_falls_back_when_pinned_model_disabled() -> None:
+    tenant_id = uuid.uuid4()
+    agent_id = uuid.uuid4()
+    agent = SimpleNamespace()
+    fallback_model = SimpleNamespace()
+    db = _Session(agent)
+    handler = HeartbeatSeedFocusHandler(session_factory=_SessionFactory(db))  # type: ignore[arg-type]
+    with (
+        patch(
+            "app.services.agent_runtime.heartbeat_completion.load_active_model",
+            AsyncMock(return_value=None),
+        ) as load_model,
+        patch(
+            "app.services.agent_runtime.heartbeat_completion.resolve_active_agent_model",
+            AsyncMock(return_value=fallback_model),
+        ) as resolve,
+    ):
+        resolved = await handler._classifier_model(
+            str(uuid.uuid4()), tenant_id, agent_id
+        )
+
+    load_model.assert_awaited_once()
+    resolve.assert_awaited_once()
+    assert resolved is fallback_model
+
+
+@pytest.mark.asyncio
+async def test_classifier_model_returns_none_when_agent_missing() -> None:
+    tenant_id = uuid.uuid4()
+    agent_id = uuid.uuid4()
+    db = _Session(None)
+    handler = HeartbeatSeedFocusHandler(session_factory=_SessionFactory(db))  # type: ignore[arg-type]
+    with (
+        patch(
+            "app.services.agent_runtime.heartbeat_completion.load_active_model",
+            AsyncMock(return_value=None),
+        ),
+        patch(
+            "app.services.agent_runtime.heartbeat_completion.resolve_active_agent_model",
+            AsyncMock(return_value=None),
+        ) as resolve,
+    ):
+        resolved = await handler._classifier_model(
+            str(uuid.uuid4()), tenant_id, agent_id
+        )
+
+    resolve.assert_not_awaited()
+    assert resolved is None
+
+
+@pytest.mark.asyncio
 async def test_classify_seed_kinds_parses_structured_output() -> None:
     model = SimpleNamespace()
     step = SimpleNamespace(

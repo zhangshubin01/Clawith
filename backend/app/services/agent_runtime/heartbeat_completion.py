@@ -12,6 +12,7 @@ import uuid
 from sqlalchemy import select
 
 from app.models.activity_log import AgentActivityLog
+from app.models.agent import Agent
 from app.models.agent_run import AgentRun
 from app.models.notification import Notification
 from app.services.agent_runtime.command_worker import (
@@ -26,7 +27,10 @@ from app.services.focus_service import (
     upsert_focus_item,
 )
 from app.services.llm.client import LLMMessage
-from app.services.llm.model_resolution import load_active_model
+from app.services.llm.model_resolution import (
+    load_active_model,
+    resolve_active_agent_model,
+)
 from app.services.llm.single_step import complete_llm_once
 from app.services.storage import get_storage_backend, normalize_storage_key
 
@@ -432,8 +436,19 @@ class HeartbeatSeedFocusHandler:
                 exc,
             )
 
-    async def _classifier_model(self, model_id: str | None, tenant_id: uuid.UUID | None):
-        """Resolve the agent's active model for classification; None on failure."""
+    async def _classifier_model(
+        self,
+        model_id: str | None,
+        tenant_id: uuid.UUID | None,
+        agent_id: uuid.UUID,
+    ):
+        """Resolve the agent's active model for classification; None on failure.
+
+        Prefers the run's pinned model; when that model is disabled, deleted, or
+        outside the tenant scope, falls back to the agent's three-level
+        resolution (primary → fallback → tenant default), mirroring
+        ``RuntimeModelStepService._load``. Always fail-closed.
+        """
         if not model_id:
             return None
         try:
@@ -442,11 +457,25 @@ class HeartbeatSeedFocusHandler:
             return None
         try:
             async with self._session_factory() as db:
-                return await load_active_model(
+                model = await load_active_model(
                     db,
                     model_id=model_uuid,
                     tenant_id=tenant_id,
                 )
+                if model is not None:
+                    return model
+                agent = (
+                    await db.execute(
+                        select(Agent).where(
+                            Agent.id == agent_id,
+                            Agent.tenant_id == tenant_id,
+                            Agent.deleted_at.is_(None),
+                        )
+                    )
+                ).scalar_one_or_none()
+                if agent is None:
+                    return None
+                return await resolve_active_agent_model(db, agent)
         except Exception:
             return None
 
@@ -480,7 +509,7 @@ class HeartbeatSeedFocusHandler:
         # Classify each seed as a next action vs a finished learning. Any
         # failure falls back to "task" (current behaviour) — never blocks the
         # projection and never mis-routes on uncertainty.
-        model = await self._classifier_model(model_id, tenant_id)
+        model = await self._classifier_model(model_id, tenant_id, agent_id)
         kinds: list[str] | None = None
         if model is not None and seeds:
             try:

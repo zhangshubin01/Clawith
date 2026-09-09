@@ -142,6 +142,108 @@
 
 ---
 
+## 偏离修复：`_classifier_model` 取模型路径偏离 spec（code-review Spec 轴 #1）
+
+> 触发：code-review 对 `cb681b8d` 复核，Spec 轴 #1 发现 P1 分类门的取模型实现偏离了方案正文承诺的解析路径。本段按 clawith-fix-plan 四件套重走（参考对比 → 双源定根因 → 方案 → 7 角度评审），评审通过后实现。
+> 裁决：**通过**（方案 1 加 fallback，复用既有 `active_agent_model_candidates` owner；见 Q1–Q7）。
+
+### 偏离的确切性质（代码事实，已 read_file 核对）
+
+- `_classifier_model`（`heartbeat_completion.py`）用 `load_active_model(db, model_id=model_uuid, tenant_id=tenant_id)` 单点加载：模型禁用（`enabled=False`）/软删（`deleted_at` 非空）/跨租户即返回 None，**无任何 fallback**。
+- 方案正文 Phase 3 与 Q6 写的是 `active_agent_model_candidates`（三级：primary→fallback→tenant default）；「交付结论」写的是「handle 传 model_id/tenant_id」（单点）。spec 文档内部自相矛盾，实现取了后者。
+- 权威参照 `RuntimeModelStepService._load`（`model_step_service.py` `_load` 函数）：当 `agent is not None and (model is None or not model.enabled or model.tenant_id not in {None, tenant_id})` 时 `candidates = await active_agent_model_candidates(db, agent); model = candidates[0] if candidates else None`——主 run 执行路径的既有三级兜底。
+- `run.model_id` 非空（`run_state_reader.py` `runtime_run_record`：`run.model_id is None` 即 raise `RunStateReadError`）。故偏离真实场景**不是「model_id 为空」**，而是「`run.model_id` 指向的模型被禁用/软删」时分类门静默退化为「全部 task」，P1 的 learning→completed 保护静默失效（fail-closed，不崩溃、不误路由，但等于退回 P0 之前的旧行为）。
+
+### Phase 1 — 参考项目对比结论（「模型 fallback」决策点，11 项目）
+
+| 项目 | 模型解析/fallback 机制（源码定位） | 结论 |
+|---|---|---|
+| Clawith `_load`/`active_agent_model_candidates` | 三级 primary→fallback→tenant default（`model_resolution.py` / `model_step_service.py`） | **应复用的 owner**：本偏离正是没对齐它 |
+| litellm | `fallback_lookup_groups`/`context_window_fallbacks`/`run_async_fallback`（`litellm/router.py`） | 网关级 fallback 链是行业标准 |
+| new-api | `distributor.go` 渠道 model mapping + 重试 | 网关把「模型→渠道→fallback」做进分发层 |
+| bisheng | `TenantSystemModelConfigDao.aresolve`「Root fallback」：Child 无行继承 Root，返 `(value, inherited_from_root, fallback_blocked)` | 与 Clawith 同族（dataelement），租户级「子继承父」fallback 同构 |
+| pi | `model-resolver.ts` + `allowedFallbackModels`（`ai/src/api/anthropic-messages.ts`） | coding agent 侧显式 fallback 目标模型列表 |
+| gemini-cli | `handleFallback`（`geminiChat`：429/失败重试换模型） | 传输/限流级 fallback，非配置级三级解析 |
+| opencode | `provider.defaultModel()` + `getSmallModel` | provider 默认模型 + 小模型兜底，非「primary→fallback→default」链 |
+| codex | 无模型 fallback 机制（grep 零命中） | **诚实负结论**：单模型 + 手动切换 |
+| dify | 无 model_runtime fallback（grep 零命中） | **诚实负结论**：模型按 app 配置，无自动 fallback |
+| openai-agents-python | `fallback_agent`（agent 级 fallback） | **诚实负结论**：fallback 在 agent 层不在 model 层 |
+| letta-code | 仅 transport/websocket retry fallback | **诚实负结论**：无模型级 fallback |
+
+**结论**：模型解析的行业分层是「网关做调用级 fallback（litellm/new-api）、平台做配置级三级解析（Clawith 自身 `active_agent_model_candidates`、bisheng 的 Root fallback）、单用户 coding agent 多为单模型手动切换（codex/opencode/gemini-cli/dify）」。Clawith 作为多租户平台，本就有配置级三级解析 owner，`_classifier_model` 偏离它属回归式缺口，不是「过度设计」。
+
+### Phase 2 — 双源定根因
+
+**根因（单层，已追到底）**：P1 分类门落地时，`_classifier_model` 复用了「单点 `load_active_model`」而非方案正文承诺的「三级 `active_agent_model_candidates`」，且 spec 文档「交付结论」把单点写成了交付口径。结果：当 `run.model_id` 指向的 pinned 模型被禁用/软删时，分类门拿到 None → 静默退化为「全部 task」。
+
+**数据证据（PG 台账，2026-09-08 实时重查）**：
+- `llm_models` 存在 **1 条禁用+软删模型** `0360b723-…`（deepseek-v4-flash，`enabled=false`，`deleted_at=2026-08-07 11:40:58Z`）。
+- `agent_runs` 里 **562 条 run** 的 `model_id` 指向该禁用模型，其中 **130 条 `source_type='heartbeat'`**（正是触发 `HeartbeatSeedFocusHandler` 的源）。但 `max(created_at)=2026-08-07 09:00:41Z`（早于删除时刻）→ 这些 run 创建时模型仍 enabled，投影时未命中「禁用」。
+- **3 个存量 live agent**（Meeseeks、Morty、OKR Agent，`deleted_at=NULL`）的 `primary_model_id` 仍指向禁用模型 `0360b723`，且 `fallback_model_id=NULL`、所在租户 `default_model_id=NULL` → 一旦这些 agent 产生 heartbeat run，`run.model_id` 即指向禁用模型，`_classifier_model` 返回 None，分类门静默失效。
+
+**诚实定性**：「投影时模型已禁用」这一**触发瞬间**在生产日志/台账**无直接实例**（562 条 run 均在禁用前创建、3 个 agent 迄今 0 run）。故本修复定性为「**静态代码语义对比钉死的潜在缺陷 + 前置条件已在生产数据真实存在、触发尚未被观察**」——P1 预防加固，非 P0 已损（与既有 P1 定性一致）。
+
+### Phase 3 — 最小修复方案
+
+**候选枚举（≥3）**：
+1. **方案 1（推荐）**：`_classifier_model` 加 fallback——`load_active_model` 失败 → `select(Agent)` 查 agent → `resolve_active_agent_model(db, agent)`。复用既有 owner、保持 `run.model_id` 优先、fail-closed。
+2. **方案 2（被否）**：直接用 `resolve_active_agent_model(db, agent)` 放弃 `run.model_id` 优先。否因：`run.model_id` 是 run 的 pinned 模型，多数情况正确且已省一次查询，完全放弃改变现有语义、引入不必要行为变化。
+3. **方案 3（被否）**：只改文档承认「单点兜底」。否因：偏离是真实健壮性缺口（禁用模型场景已在数据可见），只改文档等于埋雷。
+
+**取舍**：方案 1 最优——Ponytail 阶梯最低档（复用 owner，不加新机制），且与主 run 路径 `_load` 的 fallback 语义一致。
+
+**实现**（`heartbeat_completion.py`）：
+- import 加 `from app.models.agent import Agent` + `from app.services.llm.model_resolution import resolve_active_agent_model`（现有 import 仅 `load_active_model`）。
+- `_classifier_model` 加 `agent_id: uuid.UUID` 参数 + fallback 分支（`load_active_model` 返回 None 时查 Agent、走 `resolve_active_agent_model` 三级解析）。
+- `_project_seeds` 调用点（`model = await self._classifier_model(...)`）传 `agent_id`。
+- 保持 fail-closed：fallback 也失败（agent 缺失/无 candidate）→ None → 兜底 task，不阻断心跳。
+
+**回归测试**（`tests/test_agent_runtime_heartbeat_completion.py`）：
+- 新增 `test_classifier_model_falls_back_when_pinned_model_disabled`（mock `load_active_model→None`、`resolve_active_agent_model→model`，断言命中 fallback 模型）。
+- 新增 `test_classifier_model_returns_none_when_agent_missing`（mock `load_active_model→None`、Agent 查询→None，断言 fail-closed 返回 None、`resolve_active_agent_model` 未被调用）。
+- 现有 6 个分类门测试不受影响（`_classification_context` 用 `patch.object(handler, "_classifier_model", AsyncMock(...))` 隔离）。
+
+**影响面**：`_classifier_model` 唯一调用点是 `_project_seeds`（`heartbeat_completion.py`），签名加参不改变外部契约；`handle`→`_project_seeds`→`_classifier_model` 链路不变。爆炸半径仅限心跳投影的分类门取模型路径。
+
+### Phase 4 — 7 角度评审
+
+**Q1 根因是否正确？——通过**
+- 正向依据：偏离 = 实现取了单点 `load_active_model` 而非方案正文承诺的三级解析（源码 `_classifier_model` 对照 spec Phase 3/Q6）；数据侧前置条件真实存在（禁用模型 + 3 个 live agent 悬空 primary_model_id）。已追到底：spec 文档内部矛盾（Phase 3/Q6 说三级、交付结论说单点）导致实现选了单点。
+- 负向探针（反例测试）：若「model_id 为空」才是偏离主场景，则 `runtime_run_record` 不会对 `run.model_id is None` raise——实际它 raise（`run_state_reader.py`），故 model_id 恒非空，主场景确为「模型被禁用/软删」而非「为空」；核对**证实**根因方向。
+
+**Q2 根治方案是否正确？——通过**
+- 正向依据：方案 1 直接改根因（补上三级 fallback），非止痛药。
+- 负向探针（删除测试）：删掉方案，问「模型禁用时分类门是否静默失效」——**会**，因为 `_classifier_model` 单点无 fallback、数据已见禁用模型。故是根治。
+
+**Q3 参考资料是否正确？——通过**
+- 正向依据：11 项目均为「模型解析/fallback」同类问题；读真实源码（`litellm/router.py`、`bisheng/llm/domain/models/tenant_system_model_config.py`、`pi/ai/src/api/anthropic-messages.ts` 等），非 README 摘要；codex/dify/letta 等单模型项目标为诚实负结论，未当第一依据。
+- 负向探针：找了一个可能引用错的点——gemini-cli `handleFallback` 易被当「配置级模型 fallback」，核下来它是 429/失败传输级重试，非三级解析，已在表中标注「传输/限流级」，**无误**。
+
+**Q4 副作用与爆炸半径是否排查完？——通过**
+- 正向依据：①副作用面——无外部写、无缓存失效、无新连接；仅多一次 `select(Agent)`（在既有 session 内）+ 可能一次 `active_agent_model_candidates`（内 2 次 select）。fail-closed 不阻断心跳。②影响面——`_classifier_model` 唯一调用点 `_project_seeds`，签名加参不改外部契约；`handle`/`_project_seeds` 链路不变；现有 6 测试隔离该函数不受影响。验证跑 `scripts/arch-guard.sh` + `test_agent_runtime_heartbeat_completion.py`。
+- 负向探针：特意找一个可能漏的消费者——`handle` 的 `except Exception` 兜底会不会因 fallback 抛错被吞导致行为变化？核下来 fallback 也在 `_classifier_model` 的 `try/except` 内（失败→None→兜底 task），与原 fail-closed 语义一致，**不新增暴露面**。
+
+**Q5 这是最优且必要的方案吗？——通过**
+- 正向依据：枚举 3 候选（fallback / 直接 resolve / 只改文档），从最低档起步；方案 1 复用 owner、保持 `run.model_id` 优先、最小改动。
+- 负向探针（更简单档测试）：试过「方案 3 只改文档」能否接受——**不能**，因数据已见禁用模型 + 悬空 agent，只改文档等于埋雷（未来某次模型禁用时静默失效）。试过「方案 2 直接 resolve」——能解决但放弃 `run.model_id` 优先语义、多一次无谓解析，非最优。故方案 1 是必要且最优。
+
+**Q6 是否已有可复用的逻辑？——通过**
+- 正向依据：`active_agent_model_candidates` / `resolve_active_agent_model` 即既有 owner（`model_resolution.py`，被 `caller.py`、`okr_reporting.py`、`model_step_service.py` 等复用）；本方案直接复用，不新增解析逻辑。
+- 负向探针：查过知识图谱/代码是否已有「分类门专用模型 fallback」等价逻辑——结论**无**（分类门是 cb681b8d 新增，唯一取模型点即 `_classifier_model`），但通用三级解析 owner 已存在，直接复用即可，无重复造轮子。
+
+**Q7 会破坏 Clawith 的特性吗？——通过**
+- 正向依据：逐条过宪法 C1–C6 + 红线。C1 证据先行（PG 实时重查）；C2 最小改动（仅 1 函数 + 1 import + 1 调用点 + 2 测试）；C3 契约与状态所有权（不动 run/checkpoint/状态 owner，仅取模型路径对齐主 run 语义）；C4 测试证行为（2 直测 + 既有 6 测试）；C5 保留既有工作（不动 `run.model_id` 优先语义、不动 P0/P1 已落地逻辑）；C6 数据边界（不动 checkpoint/WS/飞书/前缀缓存）。红线：多租户隔离——fallback 查询带 `Agent.tenant_id == tenant_id` + `active_agent_model_candidates` 内部按 `agent.tenant_id` 过滤，**不跨租户**。
+- 负向探针：把方案对「多租户隔离」红线过一遍——最可疑的是 fallback 是否会解析到别的租户模型。核下来 `active_agent_model_candidates` 内 `or_(LLMModel.tenant_id.is_(None), LLMModel.tenant_id == agent.tenant_id)`，且 `Agent` 查询已 `Agent.tenant_id == tenant_id` 限定，**不跨租户**。
+
+### Phase 5 — 实现落地闭环（偏离修复，已复核）
+
+- **Spec 轴：通过**——六验收点全落地（`agent_id` 参数、`select(Agent)` 过滤、`resolve_active_agent_model` fallback、fail-closed、调用点传 `agent_id`、2 测试 + import），无夹带、无实现错误。
+- **Standards 轴：1 处发现，已改**——fallback 分支原写 `candidates = await active_agent_model_candidates(db, agent); return candidates[0] if candidates else None` 与既有 `resolve_active_agent_model`（`model_resolution.py`）逐行重复，违反宪法 C2「复用既有工具」；已改为 `return await resolve_active_agent_model(db, agent)`。另 2 处判断性（`_classifier_model` 缺返回类型注解、`select(Agent)` 查询与 `model_step_service._load` 同形），标注可接受、不扩范围。
+- **验证**：`ruff check` 通过、`scripts/arch-guard.sh` P0 全清、`pytest tests/test_agent_runtime_heartbeat_completion.py` 28 passed。
+- **diff ≡ 方案**：方案 1 落地（三级 fallback + 2 测试），无偏离、无夹带。
+
+---
+
 ## 交付结论
 
 - **裁决：有条件通过**（P0 根治 + P1 防御加固分层；已知风险=「learning 标 completed 进入 Recently Completed 注入」可接受、及「upsert 覆写 status 需单调护栏」必带，均已入 Phase 3）。
@@ -153,3 +255,4 @@
 - **部署（已完成，2026-09-08）**：commit `cb681b8d` 上线，worktree `/tmp/clawith-deploy-cb681b8d`（勿删），回滚标签 `clawith-agent-backend:pre-cb681b8d-a53eee251af9`，registry last_deploys[0]=cb681b8d success。部署后验证全过（分类门特征 14 处命中、三处模板契约命中、alembic head=f077 无迁移、frontend 200、LAN 192.168.1.62 拒绝、health 200、沙箱冒烟 exit 0）。
 - **P0-b 数据清淤（已完成，2026-09-08）**：7 个受影响 agent 的 reflections.md 共 **43 条**结论/心跳核验记录从 Seeds 段移入 Insights 段（950a1943=21、62bc9c81=6、27d55a64=4、b1a73489=5、ddc779e3=4、b05d3a82=2、82dc9a8a=1），Seeds 段残留结论归零、只留合法动作；475264c9（7 条版本 watch）等「持续/等待型」seed 属合法动作未动。备份在容器 `/tmp/reflections-backup-20260908/` + 宿主 scratchpad `reflections-backup-20260908/`。
 - **收尾（自动，无需手动）**：下一个心跳周期，退休路径（`stale = heartbeat_keys - seed_keys`）自动把 43 条消失的 seed complete；剩余动作型 seed 由 P1 分类门判 task/learning。73 条卡死 in_progress 将在下一心跳批量转入「已完成」。
+- **偏离修复（code-review Spec 轴 #1，已完成，2026-09-08）**：`_classifier_model` 取模型补三级 fallback——`load_active_model` 失败（pinned 模型禁用/软删）→ `select(Agent)` → `resolve_active_agent_model`，对齐 spec 承诺与主 run 路径 `_load` 语义；新增 2 直测（fallback 命中 / agent 缺失 fail-closed）。`ruff` 通过、`arch-guard` P0 全清、`pytest 28 passed`。Phase 5 code-review 复核：Spec 轴通过；Standards 轴 1 处（重复 `candidates[0]` 逻辑）已改复用 `resolve_active_agent_model`。见本段「偏离修复」四件套 + Q1–Q7 评审（全部通过）。
