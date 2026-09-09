@@ -304,15 +304,4 @@ if [ "$BUILD_RC" -ne 0 ] && command -v sync_sdk_components >/dev/null 2>&1; then
     fi
 fi
 
-# ─── 产物路径输出（纯信息，无代码消费方） ───
-# 构建完成后输出本次 APK/AAB 路径列表，覆盖多模块和自定义 buildDir 项目
-echo "=== APK_OUTPUT_PATHS ==="
-APKS=$(find . -path "*/build/outputs/*" \( -name "*.apk" -o -name "*.aab" \) 2>/dev/null)
-if [ -n "$APKS" ]; then
-    echo "$APKS"
-else
-    echo "NO_APK_FOUND"
-fi
-echo "=== END_APK_OUTPUT_PATHS ==="
-
 exit "$BUILD_RC"

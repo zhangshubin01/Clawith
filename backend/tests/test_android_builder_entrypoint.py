@@ -158,6 +158,18 @@ def test_entrypoint_defines_required_functions() -> None:
     assert "cleanup_intermediates_link;" in source  # EXIT trap 链式注册
 
 
+def test_entrypoint_has_no_apk_output_paths() -> None:
+    """APK_OUTPUT_PATHS 冗余输出已删除，防回归（见 20260908 修复方案）。
+
+    断言范围限定为 entrypoint.sh 单文件源码——不可做全仓库 grep，
+    否则会命中仓库根目录的历史日志快照 replay_full.log 与
+    docs/technical-plans/ 里的旧标记引用而误报。
+    """
+    source = _ENTRYPOINT.read_text(encoding="utf-8")
+    for marker in ("APK_OUTPUT_PATHS", "NO_APK_FOUND", "END_APK_OUTPUT_PATHS"):
+        assert marker not in source, f"{marker} 不应再出现在 entrypoint.sh"
+
+
 # ─────────────────────────────────────────────────────────
 # 阿里云镜像注入 + 下载超时硬化
 # ─────────────────────────────────────────────────────────

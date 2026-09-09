@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import shlex
+import subprocess
 import time
 from pathlib import Path
 
@@ -986,3 +987,163 @@ class TestGradleTaskSplitting:
         # 旧行为（整串单引号引用）不得出现——否则 Gradle 会查一个字面
         # 任务名 "testDebugUnitTest assembleDebug"
         assert "'testDebugUnitTest assembleDebug'" not in script
+
+
+# ─────────────────────────────────────────────────────────
+# 产物契约污染修复（方案 A）：构建前清理 APK/AAB
+# ─────────────────────────────────────────────────────────
+
+
+class TestApkArtifactCleanup:
+    """验证构建前清理 APK/AAB 产物（产物契约污染修复，方案 A）。
+
+    背景：workspace 跨 run 持久化导致 app/build/outputs 残留上次构建的
+    APK，后端 _android_compile_outcome 成功分支无条件 rglob 会把它扫进
+    apk_files，污染 artifact_refs / freshness ledger / manifest。
+    修复=构建 command 里 ./gradlew 前插入 find -delete 清理 *.apk/*.aab
+    （保留 mapping/logs）。
+    详见 docs/technical-plans/20260908-android-apk-artifact-contract-fix.md
+    """
+
+    def test_command_contains_apk_cleanup_before_gradlew(self, backend, mock_docker_client):
+        """构建 command 必须含清理命令，且位于 ./gradlew 之前。"""
+        result = asyncio.run(backend.execute(
+            code="", language="java",
+            timeout=30, work_dir="/workspace",
+            project_path="/workspace/app",
+            gradle_task="assembleDebug",
+        ))
+        assert result.success is True, f"mock 构建应成功: {result.error}"
+        last_kwargs = mock_docker_client.containers.last_run_kwargs
+        assert last_kwargs is not None, "containers.run 应该已被调用"
+        command = last_kwargs["command"]
+        assert command[0] == "bash" and command[1] == "-c" and isinstance(command[2], str)
+        script = command[2]
+
+        # 清理命令必须存在（精确匹配 find -delete 清理 *.apk/*.aab）
+        cleanup = r"find app/build/outputs -type f \( -name '*.apk' -o -name '*.aab' \) -delete"
+        assert cleanup in script, (
+            f"预期构建前清理命令存在: {cleanup!r}\n实际 script: {script!r}"
+        )
+
+        # 清理命令必须位于 ./gradlew 真正执行之前（注意 `./gradlew` 还出现在
+        # 前置的 `chmod +x ./gradlew`，须锚定 gradlew 调用 `./gradlew --no-daemon`）
+        cleanup_idx = script.index(cleanup)
+        gradlew_idx = script.index("./gradlew --no-daemon")
+        assert cleanup_idx < gradlew_idx, (
+            f"清理命令应在 ./gradlew 调用之前执行，实际 cleanup@{cleanup_idx} 而 gradlew@{gradlew_idx}\n"
+            f"script: {script!r}"
+        )
+
+
+# ─────────────────────────────────────────────────────────
+# gradlew 构建入口完整性根治：构建前确定性恢复标准模板
+# ─────────────────────────────────────────────────────────
+
+
+class TestGradlewEntrypointIntegrity:
+    """验证构建前把项目 gradlew 脚本确定性恢复为标准模板。
+
+    背景：agent 会写坏持久化 workspace 里的 gradlew 脚本（历史 incident：改坏
+    wrapper 烧光工具预算；本次：漏 OS flag 初始化 → 5 行 Permission denied 噪音）。
+    修复=构建 command 里 ./gradlew 前插入 `cp /opt/gradle-wrapper/gradlew ./gradlew`
+    （幂等覆盖标准模板）+ chmod +x。
+    详见 docs/technical-plans/20260909-android-gradlew-entrypoint-integrity-fix.md
+    """
+
+    def test_command_restores_gradlew_template_before_invoke(self, backend, mock_docker_client):
+        """构建 command 必须含 cp 恢复命令，且位于 ./gradlew 真正执行之前。"""
+        result = asyncio.run(backend.execute(
+            code="", language="java",
+            timeout=30, work_dir="/workspace",
+            project_path="/workspace/app",
+            gradle_task="assembleDebug",
+        ))
+        assert result.success is True, f"mock 构建应成功: {result.error}"
+        last_kwargs = mock_docker_client.containers.last_run_kwargs
+        assert last_kwargs is not None, "containers.run 应该已被调用"
+        command = last_kwargs["command"]
+        assert command[0] == "bash" and command[1] == "-c" and isinstance(command[2], str)
+        script = command[2]
+
+        # 恢复命令必须存在（精确匹配 cp 覆盖 + chmod 保证可执行）
+        restore = "cp /opt/gradle-wrapper/gradlew ./gradlew && chmod +x ./gradlew"
+        assert restore in script, (
+            f"预期构建前恢复命令存在: {restore!r}\n实际 script: {script!r}"
+        )
+
+        # 恢复命令必须位于 ./gradlew 真正执行之前（注意 `./gradlew` 还出现在
+        # cp/chmod 里，须锚定 gradlew 调用 `./gradlew --no-daemon`）
+        restore_idx = script.index(restore)
+        gradlew_idx = script.index("./gradlew --no-daemon")
+        assert restore_idx < gradlew_idx, (
+            f"恢复命令应在 ./gradlew 调用之前执行，实际 restore@{restore_idx} 而 gradlew@{gradlew_idx}\n"
+            f"script: {script!r}"
+        )
+
+    def test_gradlew_template_is_standard_wrapper(self):
+        """模板文件必须保持标准 Gradle wrapper 结构（防模板本身被改坏）。"""
+        template = Path(__file__).resolve().parents[1] / "docker" / "android-builder" / "gradlew.template"
+        assert template.is_file(), f"模板文件不存在: {template}"
+        content = template.read_text(encoding="utf-8")
+
+        assert content.startswith("#!/bin/sh\n"), "模板必须以 POSIX sh shebang 开头"
+        assert "org.gradle.wrapper.GradleWrapperMain" in content, (
+            "模板必须收敛到 GradleWrapperMain 主类（版本无关启动器契约）"
+        )
+        # 四行 OS flag 初始化必须存在——这是本次 Permission denied 噪音的根因（缺省）
+        for flag in ("cygwin=false", "msys=false", "darwin=false", "nonstop=false"):
+            assert flag in content, f"模板缺 OS flag 初始化: {flag!r}"
+
+
+# ─────────────────────────────────────────────────────────
+# Gradle 缓存配额检查收尾安全（挂死修复）
+# ─────────────────────────────────────────────────────────
+
+
+class TestGradleCacheQuotaTeardownSafe:
+    """回归：_enforce_gradle_cache_quota 走 to_thread+subprocess.run，而非
+    create_subprocess_exec。
+
+    背景：execute() 用 ensure_future 把 _enforce_gradle_cache_quota 作为
+    fire-and-forget 任务调度。旧实现用 asyncio.create_subprocess_exec——
+    该任务在 asyncio.run 收尾（测试里 execute 被 asyncio.run 包裹）被取消时，
+    子进程传输层的取消清理（transp.close + await transp._wait 等 child watcher
+    回调）会永久卡在 run_until_complete(gather(...)) 的 select 上，令所有走
+    execute 成功路径的用例挂死（pytest-timeout）。subprocess.run(timeout) 把
+    fork/reap 交给线程池与 subprocess 模块自身，取消只波及 daemon 线程。
+    详见 docs/technical-plans/20260909-gradle-cache-quota-teardown-fix.md
+    """
+
+    def test_quota_check_uses_subprocess_run_not_create_subprocess_exec(
+        self, backend, mock_docker_client, monkeypatch
+    ):
+        """execute 成功路径必须经 subprocess.run 检查缓存，且不再调用
+        create_subprocess_exec（后者是挂死根因）。"""
+        import app.services.sandbox.local.android_build_backend as abm
+
+        calls: dict[str, object] = {}
+
+        def fake_run(args, **kwargs):
+            calls["run"] = args
+            return subprocess.CompletedProcess(args, 0, stdout=b"42\n", stderr=b"")
+
+        async def fake_create_subprocess_exec(*args, **kwargs):
+            calls["cse"] = True
+            raise AssertionError("不应再使用 create_subprocess_exec（挂死根因）")
+
+        monkeypatch.setattr(abm.subprocess, "run", fake_run)
+        monkeypatch.setattr(abm.asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+
+        result = asyncio.run(backend.execute(
+            code="", language="java",
+            timeout=30, work_dir="/workspace",
+            project_path="/workspace/app",
+            gradle_task="assembleDebug",
+        ))
+        assert result.success is True, f"mock 构建应成功: {result.error}"
+        assert "run" in calls, "缓存配额检查应经 subprocess.run 调用"
+        assert "cse" not in calls, "不应再使用 create_subprocess_exec"
+        assert any(a == "docker" for a in calls["run"]), (
+            f"subprocess.run 应调用 docker 检查缓存，实际: {calls['run']!r}"
+        )

@@ -125,6 +125,13 @@ COPY docker/android-builder/entrypoint.sh /usr/local/bin/entrypoint.sh
 COPY docker/android-builder/sdk-provision.sh /usr/local/bin/sdk-provision.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh /usr/local/bin/sdk-provision.sh
 
+# ─── gradlew 标准模板（构建入口完整性根治） ───
+# agent 会写坏持久化 workspace 里的 gradlew 脚本（历史 incident：改坏 wrapper 烧光工具预算；
+# 本次：漏 OS flag 初始化 → 5 行 Permission denied 噪音）。android_build_backend.py 构建前
+# 用此模板幂等 cp 覆盖项目 gradlew（版本无关启动器，不影响 gradle-wrapper.properties/jar 的版本 pin）。
+# 详见 docs/technical-plans/20260909-android-gradlew-entrypoint-integrity-fix.md
+COPY docker/android-builder/gradlew.template /opt/gradle-wrapper/gradlew
+
 USER builduser
 WORKDIR /workspace
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

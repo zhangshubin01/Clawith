@@ -12,6 +12,7 @@ import os
 import queue as thread_queue
 import shlex
 import socket
+import subprocess
 import time
 from pathlib import Path
 
@@ -199,18 +200,31 @@ gradle.beforeProject { project ->
             return False
 
     async def _enforce_gradle_cache_quota(self):
-        """Gradle 依赖缓存目录数超过阈值时告警（清理由 Gradle 内置 30 天 GC 处理）。"""
-        proc: asyncio.subprocess.Process | None = None
+        """Gradle 依赖缓存目录数超过阈值时告警（清理由 Gradle 内置 30 天 GC 处理）。
+
+        走 asyncio.to_thread + subprocess.run 而非 create_subprocess_exec：
+        create_subprocess_exec 在事件循环内 fork + 经 child watcher 回收子进程，
+        若此 fire-and-forget 任务在 asyncio.run 收尾（测试/关停）时被取消，
+        子进程传输层的取消清理（transp.close + await transp._wait 等 child
+        watcher 回调）会永久卡在 run_until_complete(gather(...)) 的 select 上，
+        令测试挂死（pytest-timeout）。subprocess.run(timeout) 把 fork/reap 交给
+        线程池与 subprocess 模块自身（超时自行 kill+reap），取消只波及 daemon
+        线程，不阻塞事件循环收尾。与本文件其余 docker 调用（exec_run/
+        images.get/container.wait）统一为 to_thread 模式。
+        """
         try:
-            proc = await asyncio.create_subprocess_exec(
-                "docker", "run", "--rm",
-                "-v", f"{self.GRADLE_CACHE_VOLUME}:/cache",
-                "alpine:latest", "sh", "-c",
-                "find /cache/caches/modules-2 -mindepth 3 -maxdepth 3 -type d | wc -l",
-                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            result = await asyncio.to_thread(
+                subprocess.run,
+                [
+                    "docker", "run", "--rm",
+                    "-v", f"{self.GRADLE_CACHE_VOLUME}:/cache",
+                    "alpine:latest", "sh", "-c",
+                    "find /cache/caches/modules-2 -mindepth 3 -maxdepth 3 -type d | wc -l",
+                ],
+                capture_output=True,
+                timeout=15,
             )
-            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=15)
-            dir_count = int(stdout.decode().strip() or "0")
+            dir_count = int(result.stdout.decode().strip() or "0")
             if dir_count > self._GRADLE_CACHE_MODULE_DIRS_MAX:
                 logger.warning(
                     f"[AndroidBuild] Gradle 依赖缓存目录数 {dir_count} > {self._GRADLE_CACHE_MODULE_DIRS_MAX}"
@@ -218,17 +232,11 @@ gradle.beforeProject { project ->
                 )
             else:
                 logger.debug(f"[AndroidBuild] gradle module dirs={dir_count}")
-        except asyncio.TimeoutError:
-            # communicate() was cancelled: kill and reap the docker CLI child
-            # so it cannot linger as a zombie under uvicorn.
-            if proc is not None and proc.returncode is None:
-                try:
-                    proc.kill()
-                except ProcessLookupError:
-                    pass
-                await proc.wait()
-        except (ValueError, ProcessLookupError, FileNotFoundError):
-            pass  # 解析失败/容器不存在/docker CLI 不可用 — 不影响构建
+        except subprocess.TimeoutExpired:
+            # subprocess.run 在超时时已自行 kill + reap 子进程，无需手动清理。
+            logger.debug("[AndroidBuild] gradle cache quota 检查超时（>15s）")
+        except (ValueError, FileNotFoundError):
+            pass  # 参数解析失败 / docker CLI 不可用 — 不影响构建
 
     async def _check_sdk_version_drift(self, container) -> bool:
         """比较镜像 SDK 版本与卷中版本，检测漂移。"""
@@ -455,12 +463,29 @@ gradle.beforeProject { project ->
                         # 接受 Android SDK 许可协议（CI/CD 标准做法）
                         f"yes | sdkmanager --licenses >/dev/null 2>&1 || true; "
                         f'echo "sdk.dir=/opt/android-sdk" > local.properties '
-                        f"&& chmod +x ./gradlew "
+                        # 构建入口 gradlew 完整性根治：agent 会写坏持久化 workspace 里的
+                        # gradlew 脚本（历史 incident：改坏 wrapper 烧光工具预算；本次：
+                        # 漏 OS flag 初始化 → 5 行 Permission denied 噪音）。用镜像内置的
+                        # 标准模板确定性恢复（幂等 cp），再保证可执行，顺序仍在
+                        # ./gradlew --no-daemon 之前。gradlew 是版本无关启动器，覆盖不影响
+                        # gradle-wrapper.properties/jar 的版本 pin。
+                        # 详见 docs/technical-plans/20260909-android-gradlew-entrypoint-integrity-fix.md
+                        f"&& cp /opt/gradle-wrapper/gradlew ./gradlew && chmod +x ./gradlew "
                         # 注入任务边界进度 init script（方案 B）：写到 /tmp（tmpfs），
                         # 经 -I 显式加载，避免污染共享 gradle 卷的 init.d。
                         f"&& cat > /tmp/gradle-progress.gradle << 'GRADLE_PROGRESS_EOF'\n"
                         f"{self._GRADLE_PROGRESS_INIT_SCRIPT}\n"
                         f"GRADLE_PROGRESS_EOF\n"
+                        # 构建前清理 APK/AAB 产物（产物契约污染修复，方案 A）：
+                        # workspace 跨 run 持久化导致上次构建的残留 APK 留在
+                        # app/build/outputs，后端 _android_compile_outcome 成功分支
+                        # 无条件 rglob 会把它扫进 apk_files，污染 artifact_refs /
+                        # freshness ledger / manifest。此处恢复「干净 workspace」前提——
+                        # 只删 *.apk/*.aab，保留 mapping/logs；独立语句（不接 &&，
+                        # 避开 heredoc 后 && 语法陷阱）；2>/dev/null || true 保证
+                        # 全新项目 app/build/outputs 不存在时不阻断构建。
+                        # 详见 docs/technical-plans/20260908-android-apk-artifact-contract-fix.md
+                        f"find app/build/outputs -type f \\( -name '*.apk' -o -name '*.aab' \\) -delete 2>/dev/null || true\n"
                         # heredoc 体结束后，下一行不能以 `&&` 开头——那是 bash 语法错误
                         # （`syntax error near unexpected token '&&'`，bash -c 解析期即 exit 2，
                         # 导致 gradle 从未被执行）。gradle 作为独立语句执行即可。
