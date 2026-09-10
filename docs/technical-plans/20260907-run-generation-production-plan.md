@@ -208,9 +208,9 @@ return await self._inner.aput(config, checkpoint, metadata, new_versions)
 - 正向依据：①副作用面——门控 raise 不写 checkpoint（无半写态）、工具副作用靠产品表幂等（exactly-once 保持）、不吞写不断父链（不破坏 `create_checkpointer` docstring 警告）、不新增连接/资源；②影响面——metadata 只增键（旧消费者无感）、`aget_state_history` filter 与 reconciler/debugger 均只读不受影响、`claim_next_command` 仅 re-claim 子路径多一次原子 UPDATE。
 - 负向探针：我特意找了一个方案可能漏的消费者——`mark_command_applied` 的「长图 claim 过期仍结算」路径（§2.1 的「advisory lock 优先」）。核下来：**确实受影响**——若长图执行中 claim 被 re-claim，旧 worker 的结算会因 checkpoint 写被拒而连带失败。这是**有意为之的语义再平衡**（见 §0 风险 1），且 fail-closed、无数据损坏、自愈（下一 worker 重跑）。**标注为已知风险 + 缓解**：缓解 = 心跳续期保证正常长图不触发（re-claim 需 claim 真过期）、失败自愈、产品表幂等兜底。
 
-**Q5 这是最优且必要的方案吗？** 裁决：**通过（附 1 条已知风险）**。
-- 正向依据：①枚举 ≥3 候选——（a）更简单：只加 `_require_claimant` 到结算（否决：claimed_by 已唯一，冗余且破坏长图 TTL 过期结算）；（b）更彻底：三处全加代际 + minimumNextFence（否决：claim/lease 已有等价保护，属投机加固，违反宪法 II）；（c）本方案：一处门控 + 唯一铸币 + 载体（Ponytail 阶梯最低有效档）。②修的是「已发生故障」还是「臆想风险」——诚实定性为 **P2 预防**（触发源是研究合流，非线上事故），非 P0 已损；删除方案后观察到的故障（6f43d25b 类）**仍在**（那是账本管，代际不管），故本项是「补上缺失的所有权版本化」的预防性加固，优先级 P2、不冒充 P0。
-- 负向探针：我试过用**更简单一档**（a：只把 claim 校验加到结算路径）能否解决——**不能**：它不动 checkpoint 写（真正无校验的路径），且会因长图 TTL 过期误杀合法结算。故当前「一处门控」是必要且最小档。**证实当前档正确**。
+**Q5 这是最优且必要的方案吗？** 裁决：**不通过**。
+- 正向依据（最优性成立，但必要性不成立）：①枚举 ≥3 候选——（a）更简单：只加 `_require_claimant` 到结算（否决：claimed_by 已唯一，冗余且破坏长图 TTL 过期结算）；（b）更彻底：三处全加代际 + minimumNextFence（否决：claim/lease 已有等价保护，属投机加固，违反宪法 II）；（c）本方案：一处门控 + 唯一铸币 + 载体（Ponytail 阶梯最低有效档）。在三候选内，本方案确为「最小有效档」。②修的是「已发生故障」还是「臆想风险」——诚实定性为 **P2 预防**（触发源是研究合流，非线上事故），非 P0 已损；删除方案后观察到的故障（6f43d25b 类）**仍在**（那是账本管，代际不管）。
+- 负向探针（**本项在此被否决**）：这是**投机式加固的判定点**，重新权衡收益-风险后不成立——（i）**收益极薄**：要防的「旧 owner 迟到 checkpoint 写」需「claim 会话失效 + advisory lock 连接断开 + checkpoint 池仍可写」三种**不同连接**的精确部分失效组合才能成立，实践中极难构造（进程死则三连接全死无迟到写；进程活则通常要么全活要么全受影响）；（ii）**风险耦合真实事故**：引入的「语义再平衡」会在 **PG 连接耗尽（53300，文档化事故）** 这类整体连接压力下，额外拒掉「本可凭 advisory lock 完成结算」的合法长图工作，在系统最需要韧性时放大恢复期动荡。**收益-风险不对称 → 投机式加固（宪法 II 禁止）→ 必要性不成立。**
 
 **Q6 是否已经有可复用的逻辑？** 裁决：**通过（部分复用）**。
 - 正向依据：载体复用现有 `runtime_command_config` metadata 通道（`clawith_run_id`/`clawith_command_id` 同路）；读 `run_generation` 复用主库 session factory（同 `_load_run` 的 `select(AgentRun)` 模式）；铸币复用现有 `_claim_statement` 的 re-claim 判定（`status==claimed`）。无现成的「代际门控」可复用（已确认全库无该字段）。
@@ -220,15 +220,21 @@ return await self._inner.aput(config, checkpoint, metadata, new_versions)
 - 正向依据：逐条过宪法 C1–C6 + 红线——C1 证据先行（本方案以源码+事故台账双源钉死）；C2 最小改动（一处门控，不动 claim/lease，不重构）；C3 契约与状态所有权（代际即「所有权」的显式化，正是强化 C3）；C4 测试证行为（§3.5 三条回归）；C5 保留既有工作（存量行默认 1、旧在途 metadata 缺代际跳过）；C6 模块化与数据边界（门控薄包装独立，不越界）。红线——checkpoint 语义（不吞写不断父链）、多租户隔离（run_id 级门控，不跨租户）、exactly-once（工具幂等保持）、前缀缓存稳定性（代际不碰模型层）、WS 状态机（不碰）、飞书通道（不碰）。
 - 负向探针：我试过把方案对「checkpoint 父链」红线过一遍——门控 raise 会不会断链？核下来**不碰**：gen 匹配时原样透传（父链完整），gen 不符时 raise 在**写之前**（无半写 checkpoint 进链），不会出现「跳过的 checkpoint」导致的断链（`create_checkpointer` docstring 警告的场景是「swallow writes」，本方案不 swallow）。**不碰红线**。
 
----
+### 总评
 
-## 6. Phase 5 实现闭环（待实施）
-
-方案实现为 diff 后，**必须**跑 `code-review` 对照本方案复核：Spec 轴核对 diff 是否忠实实现 §3 的门控/铸币/载体，无范围外改动、无「评审未提过的机制」。偏离则回改或回 §3/§5 重审。**跳过此步不算交付闭环。**（本条在实施时执行。）
+七角度中 Q1–Q4、Q6、Q7 的**技术正确性**均通过（根因定位、方案设计、参考资料、副作用排查、复用评估、特性红线均无缺陷），但 **Q5「最优且必要」不成立**——重新权衡收益-风险后判定为**投机式加固**（宪法 II 禁止）。按 clawith-fix-plan 规则，七角度只要有一条不通过即不得交付实现，故**本方案整体裁决为「不实施」，降级为纯观测（§0.1）**。§3 方案正文与本 §5 评审保留作「评估过程 + 为何不实施」的完整记录；「技术正确」与「值得实施」是两回事——本项是后者不成立。
 
 ---
 
-## 附：实施清单（顺序）
+## 6. Phase 5 实现闭环（不适用——已否决）
+
+方案已裁决**不实施**（§0 / §5 总评），不存在「实现为 diff」这一步，故本阶段的 code-review 对照复核**不适用**。保留本节仅作流程完整性说明：若未来 §0.1 的重新立项判据被触发（re-claim 观测频繁，或出现「同 run 同 command 双终态分歧」新事故），且七角度（尤其 Q5 必要性）重新评审通过，方进入实现闭环。
+
+---
+
+## 附：实施清单（不适用——已否决）
+
+下列步骤为原方案的实施清单，**随方案一并否决，当前不执行**。仅在未来按 §0.1 判据重新立项、且七角度重新通过后，方按此清单实施。
 
 1. 迁移 `f078`：`agent_runs.run_generation` + `agent_run_commands.claimed_generation`（含 CHECK）。
 2. `persistence.py`：`_bump_run_generation` / `_read_run_generation` 两辅助 + `claim_next_command` 铸币（was_reclaimed 判定）。
