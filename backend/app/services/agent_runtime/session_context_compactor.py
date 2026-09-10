@@ -106,6 +106,7 @@ class CompactCompletionPort(Protocol):
         tools: list[dict] | None = None,
         agent_id: uuid.UUID | None = None,
         supports_vision: bool = False,
+        thinking_disabled: bool = False,
     ) -> LLMCompletionStep: ...
 
 
@@ -372,6 +373,7 @@ class LLMSessionContextCompactor:
             tools=[_COMPACT_TOOL],
             agent_id=usage_agent_id,
             supports_vision=False,
+            thinking_disabled=True,
         )
         return _candidate_from_step(step, watermark=watermark)
 

@@ -186,6 +186,7 @@ async def test_compact_accepts_only_the_commit_tool_and_sets_code_owned_watermar
     assert len(calls) == 1
     assert calls[0][2]["agent_id"] == request.source_agent_id
     assert calls[0][2]["tools"][0]["function"]["name"] == "commit_session_context"
+    assert calls[0][2]["thinking_disabled"] is True
 
 
 @pytest.mark.asyncio
